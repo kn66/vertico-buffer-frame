@@ -1,0 +1,12 @@
+*.elc
+*.eln
+*.fasl
+
+# Emacs lock, autosave, and backup files
+.#*
+*~
+\#*\#
+
+# Local build and package artifacts
+.eldev/
+dist/

@@ -1,0 +1,63 @@
+# vertico-buffer-frame
+
+Experimental child frame display for Vertico's `vertico-buffer-mode`, with an
+optional preview child frame.
+
+The goal is to test whether `vertico-buffer` can be shown in a larger child
+frame using only Emacs' built-in `display-buffer-in-child-frame`, without
+depending on posframe.  The candidate frame is sized from the parent frame
+using the golden ratio.  When preview is enabled, preview content is shown in a
+second child frame overlaid on the right side of the candidate frame.
+
+## Usage
+
+Add this directory to `load-path`, then:
+
+```elisp
+(require 'vertico-buffer-frame)
+(vertico-buffer-frame-mode 1)
+```
+
+## Options
+
+- `vertico-buffer-frame-background-color`
+- `vertico-buffer-frame-foreground-color`
+- `vertico-buffer-frame-preview`
+- `vertico-buffer-frame-preview-delay`
+- `vertico-buffer-frame-golden-ratio-scale`
+- `vertico-buffer-frame-preview-function`
+- `vertico-buffer-frame-preview-category-functions`
+- `vertico-buffer-frame-preview-command-functions`
+
+Example:
+
+```elisp
+(setq vertico-buffer-frame-preview t
+      vertico-buffer-frame-preview-delay 0.05
+      vertico-buffer-frame-golden-ratio-scale 1.30)
+```
+
+To toggle the preview while completing, bind the toggle command in
+`vertico-map`:
+
+```elisp
+(with-eval-after-load 'vertico
+  (define-key vertico-map (kbd "C-t")
+              #'vertico-buffer-frame-toggle-preview))
+```
+
+## Commands
+
+- `vertico-buffer-frame-toggle-preview`
+
+## Preview
+
+Built-in preview functions currently cover files, directories, buffers,
+bookmarks, documentation-like categories such as commands, functions, variables,
+symbols and faces, text-like categories such as kill-ring and expressions, and
+location-like candidates from common completion categories such as Consult grep,
+Consult compile errors, Consult Flymake diagnostics, Consult Info, imenu, Org
+headings and xref.
+
+This is intentionally a small experiment scaffold.  Focus handling, placement,
+recursive minibuffers, and frame reuse still need real-world testing.
