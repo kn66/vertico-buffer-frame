@@ -25,6 +25,7 @@
 ;;; Code:
 
 (require 'subr-x)
+(require 'seq)
 (require 'vertico-buffer)
 
 (declare-function vertico--candidate "vertico")
@@ -43,6 +44,7 @@
 (declare-function package-version-join "package")
 (declare-function xref-item-location "xref")
 (declare-function xref-location-marker "xref")
+(defvar vertico--candidates-ov)
 (defvar bookmark-alist)
 (defvar imenu-space-replacement)
 (defvar package-alist)
@@ -154,6 +156,10 @@ Each preview function is called with the current candidate string."
   "Previous value of `vertico-buffer-display-action'.")
 (defvar vertico-buffer-frame--theme-timer nil
   "Timer used to refresh child frame colors after theme changes.")
+(defvar vertico-buffer-frame--minibuffer-buffers nil
+  "Live minibuffer buffers using `vertico-buffer-frame-mode'.
+The most recently set up minibuffer is first.  This lets recursive minibuffers
+refresh the parent preview after they exit.")
 
 (defconst vertico-buffer-frame--golden-ratio 1.61803398875)
 (defconst vertico-buffer-frame--top-offset 64)
@@ -209,6 +215,22 @@ Each preview function is called with the current candidate string."
         (mapcar (lambda (entry)
                   (and (cdr entry) entry))
                 alist)))
+
+(defun vertico-buffer-frame--frame-minibuffer-window ()
+  "Return the active minibuffer window for child frame sharing."
+  (when-let* ((window (active-minibuffer-window))
+              ((window-live-p window)))
+    window))
+
+(defun vertico-buffer-frame--mutable-frame-parameters (parameters)
+  "Return mutable frame PARAMETERS."
+  (assq-delete-all 'minibuffer (copy-sequence parameters)))
+
+(defun vertico-buffer-frame--display-alist (alist parameters)
+  "Return display ALIST with child-frame PARAMETERS."
+  (cons (cons 'child-frame-parameters parameters)
+        (assq-delete-all 'child-frame-parameters
+                         (copy-sequence alist))))
 
 (defun vertico-buffer-frame--face-color (function face)
   "Return FACE color from FUNCTION, or nil when it is unspecified."
@@ -342,7 +364,7 @@ TITLE is included to reserve vertical space for the preview heading."
              (no-other-frame . t)
              (skip-taskbar . t)
              (unsplittable . t)
-             (minibuffer-exit . delete-frame)
+             (minibuffer . ,(vertico-buffer-frame--frame-minibuffer-window))
              (share-child-frame . vertico-buffer-frame)))))
     parameters))
 
@@ -374,14 +396,15 @@ When CANDIDATE-FRAME is live, derive the preview size from it."
              (no-other-frame . t)
              (skip-taskbar . t)
              (unsplittable . t)
-             (minibuffer-exit . delete-frame)
+             (minibuffer . ,(vertico-buffer-frame--frame-minibuffer-window))
              (share-child-frame . vertico-buffer-frame-preview)))))
     parameters))
 
 (defun vertico-buffer-frame--apply-frame-parameters (frame parameters)
   "Apply current child-frame PARAMETERS to FRAME when FRAME is live."
   (when (frame-live-p frame)
-    (modify-frame-parameters frame parameters)
+    (modify-frame-parameters
+     frame (vertico-buffer-frame--mutable-frame-parameters parameters))
     (let ((border-color (vertico-buffer-frame--border-color)))
       (set-face-background 'child-frame-border border-color frame)
       (set-face-background 'internal-border border-color frame))))
@@ -447,25 +470,26 @@ When CANDIDATE-FRAME is live, derive the preview size from it."
   "Display BUFFER in a child frame using ALIST.
 This wraps `display-buffer-in-child-frame' so the reused child frame can be
 repositioned after Emacs knows its actual pixel size."
-  (when-let* ((window (display-buffer-in-child-frame buffer alist)))
-    (let ((frame (window-frame window)))
-      (vertico-buffer-frame--hide-window-chrome window)
-      (vertico-buffer-frame--apply-frame-parameters
-       frame (vertico-buffer-frame--child-frame-parameters))
-      (when-let* ((minibuffer-window (active-minibuffer-window)))
-        (with-current-buffer (window-buffer minibuffer-window)
-          (setq-local vertico-buffer-frame--candidate-frame
-                      frame
-                      vertico-buffer-frame--candidate-frame-chrome-hidden
-                      t)))
-      (vertico-buffer-frame--position-frame frame))
-    window))
+  (let* ((parameters (vertico-buffer-frame--child-frame-parameters))
+         (alist (vertico-buffer-frame--display-alist alist parameters)))
+    (when-let* ((window (display-buffer-in-child-frame buffer alist)))
+      (let ((frame (window-frame window)))
+        (vertico-buffer-frame--hide-window-chrome window)
+        (vertico-buffer-frame--apply-frame-parameters
+         frame parameters)
+        (when-let* ((minibuffer-window (active-minibuffer-window)))
+          (with-current-buffer (window-buffer minibuffer-window)
+            (setq-local vertico-buffer-frame--candidate-frame
+                        frame
+                        vertico-buffer-frame--candidate-frame-chrome-hidden
+                        t)))
+        (vertico-buffer-frame--position-frame frame))
+      window)))
 
 (defun vertico-buffer-frame-display-action ()
   "Return a `display-buffer' action for showing Vertico in a child frame."
   `(vertico-buffer-frame--display-buffer
-    (inhibit-switch-frame . t)
-    (child-frame-parameters . ,(vertico-buffer-frame--child-frame-parameters))))
+    (inhibit-switch-frame . t)))
 
 (defun vertico-buffer-frame--refresh-display-action ()
   "Refresh `vertico-buffer-display-action' with current theme colors."
@@ -495,10 +519,35 @@ repositioned after Emacs knows its actual pixel size."
               ((window-live-p window)))
     (window-buffer window)))
 
+(defun vertico-buffer-frame--live-minibuffer-buffer-p (buffer)
+  "Return non-nil when BUFFER is a live minibuffer buffer."
+  (and (buffer-live-p buffer)
+       (with-current-buffer buffer
+         (minibufferp))))
+
+(defun vertico-buffer-frame--remember-minibuffer-buffer (buffer)
+  "Remember BUFFER as the most recent minibuffer buffer."
+  (setq vertico-buffer-frame--minibuffer-buffers
+        (cons buffer
+              (delq buffer vertico-buffer-frame--minibuffer-buffers))))
+
+(defun vertico-buffer-frame--forget-minibuffer-buffer (buffer)
+  "Forget BUFFER from the active minibuffer buffer list."
+  (setq vertico-buffer-frame--minibuffer-buffers
+        (delq buffer vertico-buffer-frame--minibuffer-buffers)))
+
+(defun vertico-buffer-frame--top-minibuffer-buffer ()
+  "Return the most recent live minibuffer buffer, or nil."
+  (setq vertico-buffer-frame--minibuffer-buffers
+        (seq-filter #'vertico-buffer-frame--live-minibuffer-buffer-p
+                    vertico-buffer-frame--minibuffer-buffers))
+  (car vertico-buffer-frame--minibuffer-buffers))
+
 (defun vertico-buffer-frame--minibuffer-buffer ()
   "Return the current or active minibuffer buffer, or nil."
   (or (and (minibufferp) (current-buffer))
-      (vertico-buffer-frame--active-minibuffer-buffer)))
+      (vertico-buffer-frame--active-minibuffer-buffer)
+      (vertico-buffer-frame--top-minibuffer-buffer)))
 
 (defun vertico-buffer-frame--preview-enabled-p (&optional buffer)
   "Return non-nil when preview is enabled for BUFFER.
@@ -544,9 +593,36 @@ When BUFFER has no minibuffer-local preview state, fall back to
   "Return CANDIDATE as a plain string."
   (substring-no-properties (format "%s" candidate)))
 
+(defun vertico-buffer-frame--file-candidate-string (candidate)
+  "Return CANDIDATE's file name string, using unquoted text when available."
+  (vertico-buffer-frame--candidate-string
+   (or (and (stringp candidate)
+            (get-text-property 0 'completion--unquoted candidate))
+       candidate)))
+
+(defun vertico-buffer-frame--file-completion-directory ()
+  "Return the active directory of the current minibuffer file completion."
+  (when (and minibuffer-completing-file-name
+             (minibufferp))
+    (let* ((input (substitute-in-file-name (minibuffer-contents)))
+           (directory (file-name-directory input)))
+      (and directory (expand-file-name directory)))))
+
+(defun vertico-buffer-frame--file-candidate-name (candidate)
+  "Return the absolute file name represented by file CANDIDATE."
+  (let ((name (substitute-in-file-name
+               (vertico-buffer-frame--file-candidate-string candidate))))
+    (expand-file-name
+     name
+     (or (vertico-buffer-frame--file-completion-directory)
+         default-directory))))
+
 (defun vertico-buffer-frame--candidate-key (candidate)
   "Return a stable comparison key for CANDIDATE."
-  (and candidate (vertico-buffer-frame--candidate-string candidate)))
+  (and candidate
+       (if minibuffer-completing-file-name
+           (list 'file (vertico-buffer-frame--file-candidate-name candidate))
+         (vertico-buffer-frame--candidate-string candidate))))
 
 (defun vertico-buffer-frame--candidate-symbol (candidate)
   "Return CANDIDATE as an interned symbol."
@@ -573,7 +649,7 @@ When BUFFER has no minibuffer-local preview state, fall back to
 
 (defun vertico-buffer-frame-preview-file (candidate)
   "Return file preview content for CANDIDATE."
-  (let ((file (expand-file-name (substring-no-properties candidate))))
+  (let ((file (vertico-buffer-frame--file-candidate-name candidate)))
     (cond
      ((file-regular-p file)
       (with-temp-buffer
@@ -1025,8 +1101,45 @@ BUFFER defaults to the current or active minibuffer buffer."
                'vertico-buffer-frame-preview)
            (and (frame-parent frame)
                 (when-let* ((buffer
-                             (get-buffer vertico-buffer-frame--preview-buffer)))
+                              (get-buffer vertico-buffer-frame--preview-buffer)))
                   (get-buffer-window buffer frame))))))
+
+(defun vertico-buffer-frame--candidate-frame-p (frame)
+  "Return non-nil when FRAME belongs to the candidate child frame."
+  (and (frame-live-p frame)
+       (frame-parent frame)
+       (eq (frame-parameter frame 'share-child-frame)
+           'vertico-buffer-frame)))
+
+(defun vertico-buffer-frame--candidate-frame-from-buffer (buffer)
+  "Return live candidate child frame tracked by minibuffer BUFFER."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (or (and (frame-live-p vertico-buffer-frame--candidate-frame)
+               vertico-buffer-frame--candidate-frame)
+          (when-let* (((boundp 'vertico--candidates-ov))
+                      ((overlayp vertico--candidates-ov))
+                      (window (overlay-get vertico--candidates-ov 'window))
+                      ((window-live-p window))
+                      (frame (window-frame window))
+                      ((vertico-buffer-frame--candidate-frame-p frame)))
+            (setq-local vertico-buffer-frame--candidate-frame frame)
+            frame)))))
+
+(defun vertico-buffer-frame--active-minibuffer-candidate-frame-p (frame)
+  "Return non-nil when active minibuffer still uses candidate FRAME."
+  (and (frame-live-p frame)
+       (eq frame
+           (vertico-buffer-frame--candidate-frame-from-buffer
+            (vertico-buffer-frame--active-minibuffer-buffer)))))
+
+(defun vertico-buffer-frame--delete-candidate-frame (frame)
+  "Delete candidate child FRAME when it is still live."
+  (when (and (vertico-buffer-frame--candidate-frame-p frame)
+             (not (vertico-buffer-frame--active-minibuffer-candidate-frame-p
+                   frame)))
+    (let ((delete-frame-functions nil))
+      (delete-frame frame t))))
 
 (defun vertico-buffer-frame--preview-frames ()
   "Return live preview child frames, including stale tracked frames."
@@ -1058,11 +1171,9 @@ BUFFER defaults to the current or active minibuffer buffer."
 
 (defun vertico-buffer-frame--candidate-frame ()
   "Return the current Vertico candidate child frame."
-  (or (and (frame-live-p vertico-buffer-frame--candidate-frame)
-           vertico-buffer-frame--candidate-frame)
-      (when-let* ((window (active-minibuffer-window))
-                  (buffer (window-buffer window)))
-        (buffer-local-value 'vertico-buffer-frame--candidate-frame buffer))))
+  (or (vertico-buffer-frame--candidate-frame-from-buffer (current-buffer))
+      (vertico-buffer-frame--candidate-frame-from-buffer
+       (vertico-buffer-frame--active-minibuffer-buffer))))
 
 (defun vertico-buffer-frame--reset-preview-window (window)
   "Reset WINDOW viewport to the beginning of its preview buffer."
@@ -1180,6 +1291,22 @@ BUFFER defaults to the current or active minibuffer buffer."
           (vertico-buffer-frame--hide-preview buffer)))
     (vertico-buffer-frame--hide-preview)))
 
+(defun vertico-buffer-frame--refresh-minibuffer-preview (&optional buffer)
+  "Refresh preview for minibuffer BUFFER.
+BUFFER defaults to the most recent live minibuffer tracked by
+`vertico-buffer-frame-mode'."
+  (if-let* ((buffer (or buffer
+                        (vertico-buffer-frame--active-minibuffer-buffer)
+                        (vertico-buffer-frame--top-minibuffer-buffer)))
+            ((vertico-buffer-frame--live-minibuffer-buffer-p buffer)))
+      (with-current-buffer buffer
+        (setq-local vertico-buffer-frame--last-preview-candidate nil)
+        (if (and (not vertico-buffer-frame--exiting)
+                 (vertico-buffer-frame--preview-enabled-p buffer))
+            (vertico-buffer-frame--show-preview)
+          (vertico-buffer-frame--hide-preview buffer)))
+    (vertico-buffer-frame--hide-preview)))
+
 ;;;###autoload
 (defun vertico-buffer-frame-toggle-preview (&optional arg)
   "Toggle `vertico-buffer-frame-preview'.
@@ -1203,23 +1330,34 @@ With prefix ARG, enable preview if ARG is positive, otherwise disable it."
 (defun vertico-buffer-frame--exhibit-advice (&rest _)
   "Update preview after Vertico displays candidates."
   (when (and (bound-and-true-p vertico-buffer-frame-mode)
-             (minibufferp)
-             vertico-buffer-frame--candidate-frame)
-    (unless vertico-buffer-frame--candidate-frame-chrome-hidden
-      (vertico-buffer-frame--hide-frame-chrome
-       vertico-buffer-frame--candidate-frame)
-      (setq-local vertico-buffer-frame--candidate-frame-chrome-hidden t))
-    (vertico-buffer-frame--schedule-preview)))
+             (minibufferp))
+    (when-let* ((candidate-frame (vertico-buffer-frame--candidate-frame)))
+      (unless vertico-buffer-frame--candidate-frame-chrome-hidden
+        (vertico-buffer-frame--hide-frame-chrome candidate-frame)
+        (setq-local vertico-buffer-frame--candidate-frame-chrome-hidden t))
+      (vertico-buffer-frame--schedule-preview))))
 
 (defun vertico-buffer-frame--minibuffer-exit ()
   "Clean up child frames associated with the current minibuffer."
-  (setq-local vertico-buffer-frame--exiting t)
-  (vertico-buffer-frame--hide-preview (current-buffer)))
+  (let ((candidate-frame vertico-buffer-frame--candidate-frame)
+        (buffer (current-buffer)))
+    (setq-local vertico-buffer-frame--exiting t
+                vertico-buffer-frame--candidate-frame nil)
+    (vertico-buffer-frame--forget-minibuffer-buffer buffer)
+    (vertico-buffer-frame--hide-preview (current-buffer))
+    (when (vertico-buffer-frame--candidate-frame-p candidate-frame)
+      (run-at-time 0 nil
+                   #'vertico-buffer-frame--delete-candidate-frame
+                   candidate-frame))
+    (run-at-time 0 nil
+                 #'vertico-buffer-frame--refresh-minibuffer-preview
+                 (vertico-buffer-frame--top-minibuffer-buffer))))
 
 (defun vertico-buffer-frame--setup-advice (&rest _)
   "Setup `vertico-buffer-frame' preview for the current minibuffer."
   (when (and (bound-and-true-p vertico-buffer-frame-mode)
              (minibufferp))
+    (vertico-buffer-frame--remember-minibuffer-buffer (current-buffer))
     (setq-local vertico-buffer-frame--exiting nil
                 vertico-buffer-frame--candidate-frame-chrome-hidden nil
                 vertico-buffer-frame--last-preview-candidate nil
