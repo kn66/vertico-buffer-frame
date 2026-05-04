@@ -10,6 +10,13 @@ rectangles, and the candidate frame is centered in the parent frame.  When
 preview is enabled, preview content is shown in a second child frame overlaid on
 the right side of the candidate frame.
 
+This package was split out from the same line of experiments as
+~vertico-posframe-preview~, but it has a different constraint: keep the
+minibuffer input prompt as wide as possible.  File operations such as renaming,
+writing, or opening long paths become awkward when the prompt area is narrowed,
+so the preview frame is intentionally overlaid on the lower-right part of the
+candidate frame instead of being placed side by side with the input area.
+
 * GIF
 
 [[file:gif/vertico-buffer-frame.gif]]
@@ -127,6 +134,36 @@ headings and xref.
 
 This is intentionally a small experiment scaffold.  Focus handling, placement,
 recursive minibuffers, and frame reuse still need real-world testing.
+
+* Difference from vertico-posframe-preview
+
+[[https://github.com/kn66/vertico-posframe-preview][vertico-posframe-preview]] is a related package which adds a second posframe for
+preview content beside the candidate posframe shown by ~vertico-posframe~.  This
+package does not depend on ~posframe~ or ~vertico-posframe~; it uses
+~vertico-buffer-mode~ and Emacs' built-in ~display-buffer-in-child-frame~
+instead.
+
+The main differences are:
+
+- ~vertico-buffer-frame~ depends only on Emacs and Vertico, while
+  ~vertico-posframe-preview~ depends on ~posframe~ and ~vertico-posframe~.
+- ~vertico-buffer-frame~ keeps the minibuffer prompt width intact and overlays
+  the preview on the lower-right side of the candidate frame.  This favors long
+  input workflows, such as file rename and path editing.
+- ~vertico-posframe-preview~ places candidate and preview frames side by side
+  and follows the ~vertico-posframe~ configuration model.  This can make large
+  previews easier to read, but it is a different layout tradeoff.
+- ~vertico-buffer-frame~ avoids advising ~vertico-posframe~ and Consult preview
+  internals.  It previews candidates from completion metadata, text properties,
+  and category-specific functions.  ~vertico-posframe-preview~ mirrors Consult
+  preview state more directly, but it intentionally advises private APIs.
+- Both packages guard preview file I/O by skipping remote paths, bounding local
+  I/O, skipping binary files, and limiting directory previews.
+
+The reason for this package is therefore not to replace
+~vertico-posframe-preview~ feature-for-feature.  It is to explore a lighter
+child-frame display path for Vertico which preserves the prompt area and avoids
+the extra posframe dependency.
 
 * Tests
 
