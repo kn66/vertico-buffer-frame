@@ -81,7 +81,7 @@ intermediate candidates."
   :type 'number
   :group 'vertico-buffer-frame)
 
-(defcustom vertico-buffer-frame-golden-ratio-scale 1.30
+(defcustom vertico-buffer-frame-golden-ratio-scale 1.00
   "Scale factor for the golden-ratio candidate frame size.
 The base size is a golden rectangle derived from the parent frame height.
 This factor is applied to both width and height, so the candidate and preview
