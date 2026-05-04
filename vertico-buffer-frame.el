@@ -160,6 +160,8 @@ Each preview function is called with the current candidate string."
 (defconst vertico-buffer-frame--internal-border-width 8)
 (defconst vertico-buffer-frame--border-width 1)
 (defconst vertico-buffer-frame--preview-max-size 20000)
+(defconst vertico-buffer-frame--preview-frame-name
+  "vertico-buffer-frame-preview")
 (defconst vertico-buffer-frame--preview-location-context 8
   "Fallback line context for location previews.")
 (defconst vertico-buffer-frame--preview-fallback-columns 120
@@ -188,6 +190,9 @@ Each preview function is called with the current candidate string."
 
 (defvar-local vertico-buffer-frame--preview-completing-file-name nil
   "File completion state captured for delayed preview rendering.")
+
+(defvar-local vertico-buffer-frame--preview-enabled nil
+  "Non-nil when preview is enabled for the current minibuffer.")
 
 (defvar-local vertico-buffer-frame--imenu-index-buffer nil
   "Source buffer for `vertico-buffer-frame--imenu-index-cache'.")
@@ -349,7 +354,7 @@ When CANDIDATE-FRAME is live, derive the preview size from it."
                             candidate-frame)))
          (parameters
           (vertico-buffer-frame--compact-alist
-           `((name . "vertico-buffer-frame-preview")
+           `((name . ,vertico-buffer-frame--preview-frame-name)
              (width . ,(car-safe golden-size))
              (height . ,(cdr-safe golden-size))
              (internal-border-width . ,vertico-buffer-frame--internal-border-width)
@@ -483,6 +488,26 @@ repositioned after Emacs knows its actual pixel size."
        (vertico-buffer-frame--preview-frame-parameters candidate-frame))
       (vertico-buffer-frame--hide-frame-chrome
        vertico-buffer-frame--preview-frame))))
+
+(defun vertico-buffer-frame--active-minibuffer-buffer ()
+  "Return the active minibuffer buffer, or nil."
+  (when-let* ((window (active-minibuffer-window))
+              ((window-live-p window)))
+    (window-buffer window)))
+
+(defun vertico-buffer-frame--minibuffer-buffer ()
+  "Return the current or active minibuffer buffer, or nil."
+  (or (and (minibufferp) (current-buffer))
+      (vertico-buffer-frame--active-minibuffer-buffer)))
+
+(defun vertico-buffer-frame--preview-enabled-p (&optional buffer)
+  "Return non-nil when preview is enabled for BUFFER.
+When BUFFER has no minibuffer-local preview state, fall back to
+`vertico-buffer-frame-preview'."
+  (if (and (buffer-live-p buffer)
+           (local-variable-p 'vertico-buffer-frame--preview-enabled buffer))
+      (buffer-local-value 'vertico-buffer-frame--preview-enabled buffer)
+    vertico-buffer-frame-preview))
 
 (defun vertico-buffer-frame--theme-change-advice (&rest _)
   "Refresh child frames after a theme command changes faces."
@@ -969,20 +994,67 @@ PREFIX is the flattened submenu prefix."
        (message "vertico-buffer-frame preview: %s" (error-message-string err))
        nil))))
 
-(defun vertico-buffer-frame--cancel-preview-timer ()
-  "Cancel the pending preview update timer for the current minibuffer."
-  (when (timerp vertico-buffer-frame--preview-timer)
-    (cancel-timer vertico-buffer-frame--preview-timer))
-  (setq-local vertico-buffer-frame--preview-timer nil))
+(defun vertico-buffer-frame--capture-preview-context ()
+  "Capture completion context for delayed preview rendering."
+  (setq-local
+   vertico-buffer-frame--preview-category
+   (ignore-errors (vertico--metadata-get 'category))
+   vertico-buffer-frame--preview-completion-table
+   minibuffer-completion-table
+   vertico-buffer-frame--preview-completing-file-name
+   minibuffer-completing-file-name))
 
-(defun vertico-buffer-frame--hide-preview ()
+(defun vertico-buffer-frame--cancel-preview-timer (&optional buffer)
+  "Cancel the pending preview update timer for BUFFER.
+BUFFER defaults to the current or active minibuffer buffer."
+  (when-let* ((buffer (or buffer
+                          (vertico-buffer-frame--minibuffer-buffer)))
+              ((buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (when (timerp vertico-buffer-frame--preview-timer)
+        (cancel-timer vertico-buffer-frame--preview-timer))
+      (setq-local vertico-buffer-frame--preview-timer nil))))
+
+(defun vertico-buffer-frame--preview-frame-p (frame)
+  "Return non-nil when FRAME belongs to the preview child frame."
+  (and (frame-live-p frame)
+       (or (eq frame vertico-buffer-frame--preview-frame)
+           (equal (frame-parameter frame 'name)
+                  vertico-buffer-frame--preview-frame-name)
+           (eq (frame-parameter frame 'share-child-frame)
+               'vertico-buffer-frame-preview)
+           (and (frame-parent frame)
+                (when-let* ((buffer
+                             (get-buffer vertico-buffer-frame--preview-buffer)))
+                  (get-buffer-window buffer frame))))))
+
+(defun vertico-buffer-frame--preview-frames ()
+  "Return live preview child frames, including stale tracked frames."
+  (let (frames)
+    (when (frame-live-p vertico-buffer-frame--preview-frame)
+      (push vertico-buffer-frame--preview-frame frames))
+    (dolist (frame (frame-list))
+      (when (vertico-buffer-frame--preview-frame-p frame)
+        (push frame frames)))
+    (delete-dups frames)))
+
+(defun vertico-buffer-frame--hide-preview (&optional buffer)
   "Hide the preview child frame."
-  (vertico-buffer-frame--cancel-preview-timer)
-  (when (frame-live-p vertico-buffer-frame--preview-frame)
-    (let ((delete-frame-functions nil))
-      (delete-frame vertico-buffer-frame--preview-frame)))
-  (setq vertico-buffer-frame--preview-frame nil
-        vertico-buffer-frame--last-preview-candidate nil))
+  (when-let* ((buffer (or buffer
+                          (vertico-buffer-frame--minibuffer-buffer)))
+              ((buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (vertico-buffer-frame--cancel-preview-timer buffer)
+      (setq-local vertico-buffer-frame--last-preview-candidate nil)))
+  (let (deleted)
+    (dolist (frame (vertico-buffer-frame--preview-frames))
+      (when (frame-live-p frame)
+        (setq deleted t)
+        (let ((delete-frame-functions nil))
+          (delete-frame frame t))))
+    (setq vertico-buffer-frame--preview-frame nil)
+    (when deleted
+      (redisplay t))))
 
 (defun vertico-buffer-frame--candidate-frame ()
   "Return the current Vertico candidate child frame."
@@ -1018,7 +1090,8 @@ PREFIX is the flattened submenu prefix."
 (defun vertico-buffer-frame--show-preview-content (content)
   "Show preview CONTENT in the preview child frame."
   (if-let* (((and (bound-and-true-p vertico-buffer-frame-mode)
-                 vertico-buffer-frame-preview))
+                 (vertico-buffer-frame--preview-enabled-p
+                  (vertico-buffer-frame--minibuffer-buffer))))
             (candidate-frame (vertico-buffer-frame--candidate-frame))
             ((frame-live-p candidate-frame))
             (content))
@@ -1050,11 +1123,15 @@ PREFIX is the flattened submenu prefix."
 
 (defun vertico-buffer-frame--show-preview ()
   "Show preview for the current Vertico candidate."
-  (when-let* ((candidate (vertico-buffer-frame--current-candidate)))
-    (setq-local vertico-buffer-frame--last-preview-candidate
-                (vertico-buffer-frame--candidate-key candidate))
-    (vertico-buffer-frame--show-preview-content
-     (vertico-buffer-frame--preview-content))))
+  (if (vertico-buffer-frame--preview-enabled-p (current-buffer))
+      (progn
+        (vertico-buffer-frame--capture-preview-context)
+        (when-let* ((candidate (vertico-buffer-frame--current-candidate)))
+          (setq-local vertico-buffer-frame--last-preview-candidate
+                      (vertico-buffer-frame--candidate-key candidate))
+          (vertico-buffer-frame--show-preview-content
+           (vertico-buffer-frame--preview-content))))
+    (vertico-buffer-frame--hide-preview (current-buffer))))
 
 (defun vertico-buffer-frame--show-preview-if-current (buffer candidate-key)
   "Show preview in BUFFER when CANDIDATE-KEY is still current."
@@ -1062,6 +1139,7 @@ PREFIX is the flattened submenu prefix."
     (with-current-buffer buffer
       (setq-local vertico-buffer-frame--preview-timer nil)
       (when-let* (((not vertico-buffer-frame--exiting))
+                  ((vertico-buffer-frame--preview-enabled-p buffer))
                   (candidate (vertico-buffer-frame--current-candidate))
                   ((equal candidate-key
                           (vertico-buffer-frame--candidate-key candidate))))
@@ -1069,22 +1147,14 @@ PREFIX is the flattened submenu prefix."
 
 (defun vertico-buffer-frame--schedule-preview ()
   "Schedule a preview update for the current Vertico candidate."
-  (if (and vertico-buffer-frame-preview
+  (vertico-buffer-frame--capture-preview-context)
+  (if (and (vertico-buffer-frame--preview-enabled-p (current-buffer))
            (not vertico-buffer-frame--exiting))
       (if-let* ((candidate (vertico-buffer-frame--current-candidate)))
           (unless (and (equal (vertico-buffer-frame--candidate-key candidate)
                               vertico-buffer-frame--last-preview-candidate)
                        (frame-live-p vertico-buffer-frame--preview-frame))
             (vertico-buffer-frame--cancel-preview-timer)
-            (setq-local
-             vertico-buffer-frame--preview-category
-             (ignore-errors (vertico--metadata-get 'category))
-             vertico-buffer-frame--preview-command
-             this-command
-             vertico-buffer-frame--preview-completion-table
-             minibuffer-completion-table
-             vertico-buffer-frame--preview-completing-file-name
-             minibuffer-completing-file-name)
             (let ((delay (max 0 (float vertico-buffer-frame-preview-delay)))
                   (candidate-key (vertico-buffer-frame--candidate-key candidate))
                   (buffer (current-buffer)))
@@ -1105,7 +1175,9 @@ PREFIX is the flattened submenu prefix."
             ((window-live-p window))
             (buffer (window-buffer window)))
       (with-current-buffer buffer
-        (vertico-buffer-frame--show-preview))
+        (if (vertico-buffer-frame--preview-enabled-p buffer)
+            (vertico-buffer-frame--show-preview)
+          (vertico-buffer-frame--hide-preview buffer)))
     (vertico-buffer-frame--hide-preview)))
 
 ;;;###autoload
@@ -1113,13 +1185,18 @@ PREFIX is the flattened submenu prefix."
   "Toggle `vertico-buffer-frame-preview'.
 With prefix ARG, enable preview if ARG is positive, otherwise disable it."
   (interactive "P")
-  (setq vertico-buffer-frame-preview
-        (if (null arg)
-            (not vertico-buffer-frame-preview)
-          (> (prefix-numeric-value arg) 0)))
-  (if vertico-buffer-frame-preview
-      (vertico-buffer-frame--refresh-active-preview)
-    (vertico-buffer-frame--hide-preview))
+  (let* ((buffer (vertico-buffer-frame--minibuffer-buffer))
+         (enabled
+          (if (null arg)
+              (not (vertico-buffer-frame--preview-enabled-p buffer))
+            (> (prefix-numeric-value arg) 0))))
+    (setq vertico-buffer-frame-preview enabled)
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (setq-local vertico-buffer-frame--preview-enabled enabled)))
+    (if enabled
+        (vertico-buffer-frame--refresh-active-preview)
+      (vertico-buffer-frame--hide-preview buffer)))
   (message "vertico-buffer-frame preview %s"
            (if vertico-buffer-frame-preview "enabled" "disabled")))
 
@@ -1137,7 +1214,7 @@ With prefix ARG, enable preview if ARG is positive, otherwise disable it."
 (defun vertico-buffer-frame--minibuffer-exit ()
   "Clean up child frames associated with the current minibuffer."
   (setq-local vertico-buffer-frame--exiting t)
-  (vertico-buffer-frame--hide-preview))
+  (vertico-buffer-frame--hide-preview (current-buffer)))
 
 (defun vertico-buffer-frame--setup-advice (&rest _)
   "Setup `vertico-buffer-frame' preview for the current minibuffer."
@@ -1147,9 +1224,11 @@ With prefix ARG, enable preview if ARG is positive, otherwise disable it."
                 vertico-buffer-frame--candidate-frame-chrome-hidden nil
                 vertico-buffer-frame--last-preview-candidate nil
                 vertico-buffer-frame--preview-category nil
-                vertico-buffer-frame--preview-command nil
+                vertico-buffer-frame--preview-command this-command
                 vertico-buffer-frame--preview-completion-table nil
                 vertico-buffer-frame--preview-completing-file-name nil
+                vertico-buffer-frame--preview-enabled
+                vertico-buffer-frame-preview
                 vertico-buffer-frame--imenu-index-buffer nil
                 vertico-buffer-frame--imenu-index-cache nil)
     (add-hook 'minibuffer-exit-hook
