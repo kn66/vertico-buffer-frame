@@ -304,12 +304,10 @@ lines."
           (vertico-buffer-frame--round-positive
            (/ pixel-height (frame-char-height parent))))))
 
-(defun vertico-buffer-frame--golden-leading-margin (outer inner)
-  "Return leading margin after splitting the remaining space by golden ratio.
-The trailing margin is the larger golden-ratio segment."
+(defun vertico-buffer-frame--center-leading-margin (outer inner)
+  "Return leading margin after centering INNER in OUTER."
   (let ((remaining (max 0 (- outer inner))))
-    (round (/ (float remaining)
-              (expt vertico-buffer-frame--golden-ratio 2)))))
+    (round (/ (float remaining) 2))))
 
 (defun vertico-buffer-frame--frame-height-lines (frame)
   "Return FRAME height in lines."
@@ -479,13 +477,13 @@ When CANDIDATE-FRAME is live, derive the preview size from it."
 
 (defun vertico-buffer-frame--candidate-left (parent candidate)
   "Return left pixel position for CANDIDATE in PARENT."
-  (vertico-buffer-frame--golden-leading-margin
+  (vertico-buffer-frame--center-leading-margin
    (frame-pixel-width parent)
    (frame-pixel-width candidate)))
 
 (defun vertico-buffer-frame--candidate-top (parent candidate)
   "Return top pixel position for the candidate child frame."
-  (vertico-buffer-frame--golden-leading-margin
+  (vertico-buffer-frame--center-leading-margin
    (frame-pixel-height parent)
    (frame-pixel-height candidate)))
 

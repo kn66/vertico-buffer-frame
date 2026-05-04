@@ -6,9 +6,9 @@ optional preview child frame.
 The goal is to test whether ~vertico-buffer~ can be shown in a larger child
 frame using only Emacs' built-in ~display-buffer-in-child-frame~, without
 depending on posframe.  The candidate and preview frames are sized as golden
-rectangles, and the remaining parent-frame margins are split by the golden
-ratio.  When preview is enabled, preview content is shown in a second child
-frame overlaid on the right side of the candidate frame.
+rectangles, and the candidate frame is centered in the parent frame.  When
+preview is enabled, preview content is shown in a second child frame overlaid on
+the right side of the candidate frame.
 
 * GIF
 
