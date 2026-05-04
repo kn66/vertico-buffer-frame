@@ -83,9 +83,9 @@ intermediate candidates."
 
 (defcustom vertico-buffer-frame-golden-ratio-scale 1.30
   "Scale factor for the golden-ratio candidate frame size.
-The base size is the parent frame size divided by the golden ratio.  This
-factor is applied to both width and height, so the overlay layout keeps its
-relative proportions while becoming larger or smaller."
+The base size is a golden rectangle derived from the parent frame height.
+This factor is applied to both width and height, so the candidate and preview
+frames keep their golden-ratio proportions while becoming larger or smaller."
   :type 'number
   :group 'vertico-buffer-frame)
 
@@ -162,7 +162,6 @@ The most recently set up minibuffer is first.  This lets recursive minibuffers
 refresh the parent preview after they exit.")
 
 (defconst vertico-buffer-frame--golden-ratio 1.61803398875)
-(defconst vertico-buffer-frame--top-offset 64)
 (defconst vertico-buffer-frame--internal-border-width 8)
 (defconst vertico-buffer-frame--border-width 1)
 (defconst vertico-buffer-frame--preview-max-size 20000)
@@ -232,16 +231,49 @@ refresh the parent preview after they exit.")
         (assq-delete-all 'child-frame-parameters
                          (copy-sequence alist))))
 
-(defun vertico-buffer-frame--face-color (function face)
-  "Return FACE color from FUNCTION, or nil when it is unspecified."
-  (let ((color (funcall function face nil t)))
+(defun vertico-buffer-frame--face-color (function face &optional frame)
+  "Return FACE color from FUNCTION on FRAME, or nil when unspecified."
+  (let ((color (funcall function face frame t)))
     (unless (member color '("unspecified-bg" "unspecified-fg"))
       color)))
 
+(defun vertico-buffer-frame--frame-color (parameter &optional frame)
+  "Return color frame PARAMETER from FRAME, or nil when unspecified."
+  (let ((color (frame-parameter (or frame (selected-frame)) parameter)))
+    (unless (member color '("unspecified-bg" "unspecified-fg"))
+      color)))
+
+(defun vertico-buffer-frame--background-color (&optional frame)
+  "Return the background color for child frames."
+  (or vertico-buffer-frame-background-color
+      (vertico-buffer-frame--face-color #'face-background 'default frame)
+      (vertico-buffer-frame--frame-color 'background-color frame)))
+
+(defun vertico-buffer-frame--foreground-color (&optional frame)
+  "Return the foreground color for child frames."
+  (or vertico-buffer-frame-foreground-color
+      (vertico-buffer-frame--face-color #'face-foreground 'default frame)
+      (vertico-buffer-frame--frame-color 'foreground-color frame)))
+
 (defun vertico-buffer-frame--border-color ()
   "Return the border color for child frames."
-  (or (vertico-buffer-frame--face-color #'face-foreground 'default)
+  (or (vertico-buffer-frame--foreground-color)
       "black"))
+
+(defun vertico-buffer-frame--solid-frame-parameters ()
+  "Return frame parameters that keep child frames visually opaque."
+  '((alpha . 100)
+    (alpha-background . 100)))
+
+(defun vertico-buffer-frame--face-remapping (parameters)
+  "Return a default-face remapping from frame PARAMETERS."
+  (let (spec)
+    (when-let* ((background (cdr (assq 'background-color parameters))))
+      (setq spec (plist-put spec :background background)))
+    (when-let* ((foreground (cdr (assq 'foreground-color parameters))))
+      (setq spec (plist-put spec :foreground foreground)))
+    (when spec
+      `((default ,spec)))))
 
 (defun vertico-buffer-frame--round-positive (number)
   "Round NUMBER to a positive integer."
@@ -256,18 +288,28 @@ refresh the parent preview after they exit.")
 The return value is a cons cell (WIDTH . HEIGHT), in character columns and
 lines."
   (let* ((scale (vertico-buffer-frame--golden-scale))
-         (pixel-width (min (frame-pixel-width parent)
-                           (* (/ (float (frame-pixel-width parent))
-                                 vertico-buffer-frame--golden-ratio)
-                              scale)))
-         (pixel-height (min (frame-pixel-height parent)
-                            (* (/ (float (frame-pixel-height parent))
+         (parent-pixel-width (frame-pixel-width parent))
+         (parent-pixel-height (frame-pixel-height parent))
+         (pixel-height (min parent-pixel-height
+                            (* (/ (float parent-pixel-height)
                                   vertico-buffer-frame--golden-ratio)
-                               scale))))
+                               scale)))
+         (pixel-width (* pixel-height vertico-buffer-frame--golden-ratio)))
+    (when (> pixel-width parent-pixel-width)
+      (setq pixel-width (float parent-pixel-width)
+            pixel-height (/ pixel-width
+                            vertico-buffer-frame--golden-ratio)))
     (cons (vertico-buffer-frame--round-positive
            (/ pixel-width (frame-char-width parent)))
           (vertico-buffer-frame--round-positive
            (/ pixel-height (frame-char-height parent))))))
+
+(defun vertico-buffer-frame--golden-leading-margin (outer inner)
+  "Return leading margin after splitting the remaining space by golden ratio.
+The trailing margin is the larger golden-ratio segment."
+  (let ((remaining (max 0 (- outer inner))))
+    (round (/ (float remaining)
+              (expt vertico-buffer-frame--golden-ratio 2)))))
 
 (defun vertico-buffer-frame--frame-height-lines (frame)
   "Return FRAME height in lines."
@@ -278,12 +320,12 @@ lines."
 
 (defun vertico-buffer-frame--golden-preview-top-lines (candidate-frame)
   "Return preview top inset for CANDIDATE-FRAME in lines.
-The inset is the candidate frame line count divided by the fourth power of the
-golden ratio."
+The inset is the smaller segment after splitting the candidate frame height by
+the golden ratio."
   (max 1
        (round (/ (float (vertico-buffer-frame--frame-height-lines
                          candidate-frame))
-                 (expt vertico-buffer-frame--golden-ratio 4)))))
+                 (expt vertico-buffer-frame--golden-ratio 2)))))
 
 (defun vertico-buffer-frame--golden-preview-size (candidate-frame)
   "Return golden-ratio preview size for CANDIDATE-FRAME.
@@ -350,12 +392,10 @@ TITLE is included to reserve vertical space for the preview heading."
              (internal-border-width . ,vertico-buffer-frame--internal-border-width)
              (child-frame-border-width . ,vertico-buffer-frame--border-width)
              (border-color . ,(vertico-buffer-frame--border-color))
-             (background-color . ,(or vertico-buffer-frame-background-color
-                                      (vertico-buffer-frame--face-color
-                                       #'face-background 'default)))
-             (foreground-color . ,(or vertico-buffer-frame-foreground-color
-                                      (vertico-buffer-frame--face-color
-                                       #'face-foreground 'default)))
+             (background-color . ,(vertico-buffer-frame--background-color
+                                   parent))
+             (foreground-color . ,(vertico-buffer-frame--foreground-color
+                                   parent))
              (menu-bar-lines . 0)
              (tab-bar-lines . 0)
              (tool-bar-lines . 0)
@@ -365,7 +405,8 @@ TITLE is included to reserve vertical space for the preview heading."
              (skip-taskbar . t)
              (unsplittable . t)
              (minibuffer . ,(vertico-buffer-frame--frame-minibuffer-window))
-             (share-child-frame . vertico-buffer-frame)))))
+             (share-child-frame . vertico-buffer-frame)
+             ,@(vertico-buffer-frame--solid-frame-parameters)))))
     parameters))
 
 (defun vertico-buffer-frame--preview-frame-parameters (&optional candidate-frame)
@@ -374,20 +415,21 @@ When CANDIDATE-FRAME is live, derive the preview size from it."
   (let* ((golden-size (and (frame-live-p candidate-frame)
                            (vertico-buffer-frame--golden-preview-size
                             candidate-frame)))
+         (parent (and (frame-live-p candidate-frame)
+                      (or (frame-parent candidate-frame) candidate-frame)))
          (parameters
           (vertico-buffer-frame--compact-alist
            `((name . ,vertico-buffer-frame--preview-frame-name)
+             (parent-frame . ,parent)
              (width . ,(car-safe golden-size))
              (height . ,(cdr-safe golden-size))
              (internal-border-width . ,vertico-buffer-frame--internal-border-width)
              (child-frame-border-width . ,vertico-buffer-frame--border-width)
              (border-color . ,(vertico-buffer-frame--border-color))
-             (background-color . ,(or vertico-buffer-frame-background-color
-                                      (vertico-buffer-frame--face-color
-                                       #'face-background 'default)))
-             (foreground-color . ,(or vertico-buffer-frame-foreground-color
-                                      (vertico-buffer-frame--face-color
-                                       #'face-foreground 'default)))
+             (background-color . ,(vertico-buffer-frame--background-color
+                                   parent))
+             (foreground-color . ,(vertico-buffer-frame--foreground-color
+                                   parent))
              (menu-bar-lines . 0)
              (tab-bar-lines . 0)
              (tool-bar-lines . 0)
@@ -397,7 +439,8 @@ When CANDIDATE-FRAME is live, derive the preview size from it."
              (skip-taskbar . t)
              (unsplittable . t)
              (minibuffer . ,(vertico-buffer-frame--frame-minibuffer-window))
-             (share-child-frame . vertico-buffer-frame-preview)))))
+             (share-child-frame . vertico-buffer-frame-preview)
+             ,@(vertico-buffer-frame--solid-frame-parameters)))))
     parameters))
 
 (defun vertico-buffer-frame--apply-frame-parameters (frame parameters)
@@ -430,19 +473,21 @@ When CANDIDATE-FRAME is live, derive the preview size from it."
   "Position child FRAME according to `vertico-buffer-frame' options."
   (let* ((parent (or (frame-parent frame) (selected-frame)))
          (left (vertico-buffer-frame--candidate-left parent frame))
-         (top (vertico-buffer-frame--candidate-top)))
+         (top (vertico-buffer-frame--candidate-top parent frame)))
     (when (and left top)
       (set-frame-position frame left top))))
 
 (defun vertico-buffer-frame--candidate-left (parent candidate)
   "Return left pixel position for CANDIDATE in PARENT."
-  (max 0 (/ (- (frame-pixel-width parent)
-               (frame-pixel-width candidate))
-            2)))
+  (vertico-buffer-frame--golden-leading-margin
+   (frame-pixel-width parent)
+   (frame-pixel-width candidate)))
 
-(defun vertico-buffer-frame--candidate-top ()
+(defun vertico-buffer-frame--candidate-top (parent candidate)
   "Return top pixel position for the candidate child frame."
-  vertico-buffer-frame--top-offset)
+  (vertico-buffer-frame--golden-leading-margin
+   (frame-pixel-height parent)
+   (frame-pixel-height candidate)))
 
 (defun vertico-buffer-frame--preview-top-offset (candidate-frame)
   "Return preview top offset in pixels for CANDIDATE-FRAME."
@@ -452,7 +497,7 @@ When CANDIDATE-FRAME is live, derive the preview size from it."
 (defun vertico-buffer-frame--position-pair (candidate-frame &optional preview-frame)
   "Position CANDIDATE-FRAME and overlay PREVIEW-FRAME on its right side."
   (let* ((parent (or (frame-parent candidate-frame) (selected-frame)))
-         (top (vertico-buffer-frame--candidate-top))
+         (top (vertico-buffer-frame--candidate-top parent candidate-frame))
          (left (vertico-buffer-frame--candidate-left parent candidate-frame)))
     (when (and left top)
       (set-frame-position candidate-frame left top)
@@ -1208,26 +1253,26 @@ BUFFER defaults to the current or active minibuffer buffer."
             (content))
       (let* ((preview-buffer (get-buffer-create
                               vertico-buffer-frame--preview-buffer))
-             (window (display-buffer-in-child-frame
-                      preview-buffer
-                      `((inhibit-switch-frame . t)
-                        (child-frame-parameters
-                         . ,(vertico-buffer-frame--preview-frame-parameters
-                             candidate-frame))))))
+             (parameters (vertico-buffer-frame--preview-frame-parameters
+                          candidate-frame)))
         (with-current-buffer preview-buffer
           (let ((inhibit-read-only t))
             (setq-local cursor-type nil
                         truncate-lines t
-                        mode-line-format nil)
+                        mode-line-format nil
+                        face-remapping-alist
+                        (vertico-buffer-frame--face-remapping parameters))
             (vertico-buffer-frame--insert-preview-content content)))
-        (when window
+        (when-let* ((window (display-buffer-in-child-frame
+                             preview-buffer
+                             `((inhibit-switch-frame . t)
+                               (child-frame-parameters . ,parameters)))))
           (vertico-buffer-frame--truncate-preview-lines window)
           (vertico-buffer-frame--reset-preview-window window)
           (setq vertico-buffer-frame--preview-frame (window-frame window))
           (vertico-buffer-frame--hide-window-chrome window)
           (vertico-buffer-frame--apply-frame-parameters
-           vertico-buffer-frame--preview-frame
-           (vertico-buffer-frame--preview-frame-parameters candidate-frame))
+           vertico-buffer-frame--preview-frame parameters)
           (vertico-buffer-frame--position-pair
            candidate-frame vertico-buffer-frame--preview-frame)))
     (vertico-buffer-frame--hide-preview)))

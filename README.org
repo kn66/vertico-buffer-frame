@@ -5,15 +5,28 @@ optional preview child frame.
 
 The goal is to test whether ~vertico-buffer~ can be shown in a larger child
 frame using only Emacs' built-in ~display-buffer-in-child-frame~, without
-depending on posframe.  The candidate frame is sized from the parent frame
-using the golden ratio.  When preview is enabled, preview content is shown in a
-second child frame overlaid on the right side of the candidate frame.
+depending on posframe.  The candidate and preview frames are sized as golden
+rectangles, and the remaining parent-frame margins are split by the golden
+ratio.  When preview is enabled, preview content is shown in a second child
+frame overlaid on the right side of the candidate frame.
 
 * GIF
 
 [[file:gif/vertico-buffer-frame.gif]]
 
 * Screenshots
+:PROPERTIES:
+:ID:       ac9e8bfa-0dd4-4897-8d4c-147be0f7f1e6
+:END:
+
+** vertico-buffer-frame-golden-ratio-scale = 1.00
+
+#+DOWNLOADED: screenshot @ 2026-05-04 20:20:38
+[[file:Screenshots/2026-05-04_20-20-38_screenshot.png]]
+
+** vertico-buffer-frame-golden-ratio-scale = 1.30
+
+
 
 ** execute-extended-command
 
@@ -65,7 +78,7 @@ Example:
 #+begin_src elisp
   (setq vertico-buffer-frame-preview t
         vertico-buffer-frame-preview-delay 0.05
-        vertico-buffer-frame-golden-ratio-scale 1.30)
+        vertico-buffer-frame-golden-ratio-scale 1.00)
 #+end_src
 
 To toggle the preview while completing, bind the toggle command in
