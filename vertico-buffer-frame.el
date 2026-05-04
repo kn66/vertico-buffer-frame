@@ -43,6 +43,7 @@
 (declare-function package-desc-version "package")
 (declare-function package-version-join "package")
 (declare-function xref-item-location "xref")
+(declare-function xref-location-group "xref")
 (declare-function xref-location-marker "xref")
 (defvar vertico--candidates-ov)
 (defvar bookmark-alist)
@@ -79,6 +80,31 @@ When nil, use the foreground of the `default' face."
 This keeps rapid candidate navigation responsive by avoiding preview work for
 intermediate candidates."
   :type 'number
+  :group 'vertico-buffer-frame)
+
+(defcustom vertico-buffer-frame-preview-max-size 20000
+  "Maximum number of characters copied into the preview child frame."
+  :type 'natnum
+  :group 'vertico-buffer-frame)
+
+(defcustom vertico-buffer-frame-preview-directory-max-entries 200
+  "Maximum number of directory entries shown in file previews.
+Set this to nil to list all entries."
+  :type '(choice (const nil) natnum)
+  :group 'vertico-buffer-frame)
+
+(defcustom vertico-buffer-frame-preview-io-timeout 0.3
+  "Seconds to wait for filesystem I/O while generating a preview.
+Remote paths are skipped before this timeout is used.  Set this to nil to
+disable the local I/O timeout."
+  :type '(choice (const :tag "No timeout" nil) number)
+  :group 'vertico-buffer-frame)
+
+(defcustom vertico-buffer-frame-preview-binary-detect-bytes 512
+  "Number of leading bytes inspected to decide if a file is binary.
+When the inspected bytes contain a NUL byte, the file is treated as binary and
+skipped.  Set this to nil or 0 to disable the check."
+  :type '(choice (const :tag "Disabled" nil) natnum)
   :group 'vertico-buffer-frame)
 
 (defcustom vertico-buffer-frame-golden-ratio-scale 1.00
@@ -153,7 +179,9 @@ Each preview function is called with the current candidate string."
 (defvar vertico-buffer-frame--preview-buffer " *vertico-buffer-frame-preview*")
 (defvar vertico-buffer-frame--preview-frame nil)
 (defvar vertico-buffer-frame--saved-display-action nil
-  "Previous value of `vertico-buffer-display-action'.")
+  "List containing the previous value of `vertico-buffer-display-action'.")
+(defvar vertico-buffer-frame--saved-buffer-mode nil
+  "List containing whether `vertico-buffer-mode' was enabled before setup.")
 (defvar vertico-buffer-frame--theme-timer nil
   "Timer used to refresh child frame colors after theme changes.")
 (defvar vertico-buffer-frame--minibuffer-buffers nil
@@ -164,7 +192,6 @@ refresh the parent preview after they exit.")
 (defconst vertico-buffer-frame--golden-ratio 1.61803398875)
 (defconst vertico-buffer-frame--internal-border-width 8)
 (defconst vertico-buffer-frame--border-width 1)
-(defconst vertico-buffer-frame--preview-max-size 20000)
 (defconst vertico-buffer-frame--preview-frame-name
   "vertico-buffer-frame-preview")
 (defconst vertico-buffer-frame--preview-location-context 8
@@ -230,6 +257,59 @@ refresh the parent preview after they exit.")
   (cons (cons 'child-frame-parameters parameters)
         (assq-delete-all 'child-frame-parameters
                          (copy-sequence alist))))
+
+(defmacro vertico-buffer-frame--with-io-timeout (&rest body)
+  "Run BODY under `vertico-buffer-frame-preview-io-timeout'.
+Return nil when the timeout fires.  When the option is nil, run BODY without a
+timeout."
+  (declare (indent 0) (debug t))
+  `(if vertico-buffer-frame-preview-io-timeout
+       (with-timeout (vertico-buffer-frame-preview-io-timeout nil)
+         ,@body)
+     (progn ,@body)))
+
+(defun vertico-buffer-frame--local-file-p (file)
+  "Return non-nil when FILE can be previewed without remote I/O."
+  (and file
+       (not (file-remote-p file))
+       (not (file-remote-p default-directory))))
+
+(defun vertico-buffer-frame--binary-file-p (file)
+  "Return non-nil when FILE looks binary based on a leading-byte scan."
+  (when-let* ((bytes vertico-buffer-frame-preview-binary-detect-bytes)
+              ((natnump bytes))
+              ((> bytes 0)))
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (let ((coding-system-for-read 'binary))
+        (insert-file-contents-literally file nil 0 bytes))
+      (goto-char (point-min))
+      (search-forward "\0" nil t))))
+
+(defun vertico-buffer-frame--directory-entries (directory)
+  "Return a bounded list of preview entries for DIRECTORY."
+  (let* ((limit vertico-buffer-frame-preview-directory-max-entries)
+         (entries (directory-files directory
+                                   nil
+                                   directory-files-no-dot-files-regexp
+                                   nil
+                                   (and limit (1+ limit)))))
+    (if (and limit (> (length entries) limit))
+        (append (butlast entries) '("..."))
+      entries)))
+
+(defun vertico-buffer-frame--directory-content (directory)
+  "Return preview content for DIRECTORY."
+  (mapconcat #'identity
+             (vertico-buffer-frame--directory-entries directory)
+             "\n"))
+
+(defun vertico-buffer-frame--file-content (file)
+  "Return preview content for regular FILE."
+  (unless (vertico-buffer-frame--binary-file-p file)
+    (with-temp-buffer
+      (insert-file-contents file nil 0 vertico-buffer-frame-preview-max-size)
+      (buffer-string))))
 
 (defun vertico-buffer-frame--face-color (function face &optional frame)
   "Return FACE color from FUNCTION on FRAME, or nil when unspecified."
@@ -692,23 +772,15 @@ When BUFFER has no minibuffer-local preview state, fall back to
 
 (defun vertico-buffer-frame-preview-file (candidate)
   "Return file preview content for CANDIDATE."
-  (let ((file (vertico-buffer-frame--file-candidate-name candidate)))
-    (cond
-     ((file-regular-p file)
-      (with-temp-buffer
-        (insert-file-contents file nil 0
-                              vertico-buffer-frame--preview-max-size)
-        (buffer-string)))
-     ((file-directory-p file)
-      (mapconcat #'identity
-                 (directory-files file nil directory-files-no-dot-files-regexp)
-                 "\n")))))
+  (when-let* ((file (ignore-errors
+                      (vertico-buffer-frame--file-candidate-name candidate))))
+    (vertico-buffer-frame--file-preview file)))
 
 (defun vertico-buffer-frame-preview-buffer (candidate)
   "Return buffer preview content for CANDIDATE."
   (when-let* ((buffer (if (bufferp candidate)
-                         candidate
-                       (get-buffer (substring-no-properties candidate)))))
+                          candidate
+                        (get-buffer (substring-no-properties candidate)))))
     buffer))
 
 (defun vertico-buffer-frame-preview-string (candidate)
@@ -793,25 +865,39 @@ When BUFFER has no minibuffer-local preview state, fall back to
     (bookmark-maybe-load-default-file)
     (when-let* ((bookmark (assoc (vertico-buffer-frame--candidate-string candidate)
                                  bookmark-alist)))
-      (or (when-let* ((file (bookmark-get-filename bookmark))
-                      ((file-readable-p file)))
-            (let ((buffer (find-file-noselect file)))
-              (if-let* ((position (bookmark-get-position bookmark)))
-                  (vertico-buffer-frame--position-preview
-                   (set-marker (make-marker) position buffer)
-                   (format "%s\n%s:%s\n\n"
-                           (car bookmark)
-                           (abbreviate-file-name file)
-                           position))
-                buffer)))
+      (or (when-let* ((file (ignore-errors
+                              (bookmark-get-filename bookmark))))
+            (let ((position (ignore-errors (bookmark-get-position bookmark))))
+              (vertico-buffer-frame--file-preview
+               file
+               position
+               (format "%s\n%s%s\n\n"
+                       (car bookmark)
+                       (abbreviate-file-name file)
+                       (if position (format ":%s" position) "")))))
           (format "%s\n\n%S" (car bookmark) (cdr bookmark))))))
 
-(defun vertico-buffer-frame--position-marker (position)
-  "Return a marker for POSITION."
+(defun vertico-buffer-frame--position-source-buffer (&optional buffer)
+  "Return source BUFFER for an integer preview position."
+  (or (and (buffer-live-p buffer) buffer)
+      (when (minibufferp)
+        (when-let* ((window (minibuffer-selected-window))
+                    ((window-live-p window)))
+          (window-buffer window)))
+      (current-buffer)))
+
+(defun vertico-buffer-frame--position-marker (position &optional buffer)
+  "Return a marker for POSITION.
+When POSITION is an integer, resolve it in BUFFER or the selected minibuffer
+source buffer."
   (cond
    ((markerp position) position)
    ((integerp position)
-    (copy-marker position))
+    (when-let* ((buffer (vertico-buffer-frame--position-source-buffer buffer))
+                ((buffer-live-p buffer)))
+      (with-current-buffer buffer
+        (copy-marker (max (point-min)
+                          (min (point-max) position))))))
    ((and (consp position) (bufferp (car position)))
     (set-marker (make-marker) (cdr position) (car position)))))
 
@@ -883,11 +969,13 @@ MATCHES is a list of match begin/end pairs relative to POINT."
      (vertico-buffer-frame--position-lines
       point content-lines columns matches))))
 
-(defun vertico-buffer-frame--position-preview (position &optional title matches)
+(defun vertico-buffer-frame--position-preview
+    (position &optional title matches source-buffer)
   "Return preview content around POSITION.
 TITLE is inserted above the preview when non-nil.
-MATCHES is a list of match begin/end pairs relative to POSITION."
-  (let* ((marker (vertico-buffer-frame--position-marker position))
+MATCHES is a list of match begin/end pairs relative to POSITION.
+When POSITION is an integer, resolve it in SOURCE-BUFFER."
+  (let* ((marker (vertico-buffer-frame--position-marker position source-buffer))
          (buffer (and marker (marker-buffer marker)))
          (point (and marker (marker-position marker))))
     (when (buffer-live-p buffer)
@@ -896,6 +984,27 @@ MATCHES is a list of match begin/end pairs relative to POSITION."
           (save-restriction
             (widen)
             (vertico-buffer-frame--position-content point title matches)))))))
+
+(defun vertico-buffer-frame--file-position-content (file position &optional title)
+  "Return preview content for FILE around POSITION."
+  (unless (vertico-buffer-frame--binary-file-p file)
+    (let ((buffer (find-file-noselect file)))
+      (with-current-buffer buffer
+        (vertico-buffer-frame--position-preview position title nil buffer)))))
+
+(defun vertico-buffer-frame--file-preview (file &optional position title)
+  "Return preview content for local FILE.
+When POSITION is an integer or marker and FILE is regular, show content around
+that position using TITLE as the preview heading."
+  (when (vertico-buffer-frame--local-file-p file)
+    (vertico-buffer-frame--with-io-timeout
+      (cond
+       ((file-directory-p file)
+        (vertico-buffer-frame--directory-content file))
+       ((file-regular-p file)
+        (if (or (integerp position) (markerp position))
+            (vertico-buffer-frame--file-position-content file position title)
+          (vertico-buffer-frame--file-content file)))))))
 
 (defun vertico-buffer-frame-preview-location (candidate)
   "Return location preview content for CANDIDATE."
@@ -1009,12 +1118,23 @@ PREFIX is the flattened submenu prefix."
      (t
       (vertico-buffer-frame--position-preview position)))))
 
+(defun vertico-buffer-frame--find-file-noselect-local (file)
+  "Open local FILE with `find-file-noselect'.
+Return nil for remote paths so previews do not block on TRAMP I/O."
+  (when (vertico-buffer-frame--local-file-p file)
+    (find-file-noselect file)))
+
 (defun vertico-buffer-frame-preview-grep (candidate)
   "Return grep location preview content for CANDIDATE."
   (when (and (stringp candidate)
-             (fboundp 'consult--grep-position))
-    (when-let* ((position (ignore-errors
-                            (consult--grep-position candidate #'find-file-noselect)))
+             (fboundp 'consult--grep-position)
+             (not (file-remote-p default-directory)))
+    (when-let* ((position
+                 (vertico-buffer-frame--with-io-timeout
+                   (ignore-errors
+                     (consult--grep-position
+                      candidate
+                      #'vertico-buffer-frame--find-file-noselect-local))))
                 (marker (car-safe position)))
       (vertico-buffer-frame--position-preview marker nil (cdr position)))))
 
@@ -1064,6 +1184,12 @@ PREFIX is the flattened submenu prefix."
                   (vertico-buffer-frame--candidate-string candidate))))
     (format "%s\n\n%s" page (vertico-buffer-frame--candidate-string candidate))))
 
+(defun vertico-buffer-frame--xref-location-remote-p (location)
+  "Return non-nil when xref LOCATION points to a remote file."
+  (when (and location (fboundp 'xref-location-group))
+    (let ((group (ignore-errors (xref-location-group location))))
+      (and (stringp group) (file-remote-p group)))))
+
 (defun vertico-buffer-frame-preview-xref (candidate)
   "Return xref preview content for CANDIDATE."
   (when (and (fboundp 'xref-item-location)
@@ -1073,7 +1199,11 @@ PREFIX is the flattened submenu prefix."
                      (if (consp candidate) (cdr candidate) candidate)))
            (location (ignore-errors (xref-item-location xref)))
            (marker (and location
-                        (ignore-errors (xref-location-marker location)))))
+                        (not (vertico-buffer-frame--xref-location-remote-p
+                              location))
+                        (vertico-buffer-frame--with-io-timeout
+                          (ignore-errors
+                            (xref-location-marker location))))))
       (vertico-buffer-frame--position-preview marker))))
 
 (defun vertico-buffer-frame--insert-preview-content (content)
@@ -1084,14 +1214,14 @@ PREFIX is the flattened submenu prefix."
     (insert (substring content
                        0
                        (min (length content)
-                            vertico-buffer-frame--preview-max-size))))
+                            vertico-buffer-frame-preview-max-size))))
    ((bufferp content)
     (insert-buffer-substring content
                              (with-current-buffer content (point-min))
                              (with-current-buffer content
                                (min (point-max)
                                     (+ (point-min)
-                                       vertico-buffer-frame--preview-max-size))))))
+                                       vertico-buffer-frame-preview-max-size))))))
   (goto-char (point-min)))
 
 (defun vertico-buffer-frame--preview-content ()
@@ -1144,7 +1274,7 @@ BUFFER defaults to the current or active minibuffer buffer."
                'vertico-buffer-frame-preview)
            (and (frame-parent frame)
                 (when-let* ((buffer
-                              (get-buffer vertico-buffer-frame--preview-buffer)))
+                             (get-buffer vertico-buffer-frame--preview-buffer)))
                   (get-buffer-window buffer frame))))))
 
 (defun vertico-buffer-frame--candidate-frame-p (frame)
@@ -1244,8 +1374,8 @@ BUFFER defaults to the current or active minibuffer buffer."
 (defun vertico-buffer-frame--show-preview-content (content)
   "Show preview CONTENT in the preview child frame."
   (if-let* (((and (bound-and-true-p vertico-buffer-frame-mode)
-                 (vertico-buffer-frame--preview-enabled-p
-                  (vertico-buffer-frame--minibuffer-buffer))))
+                  (vertico-buffer-frame--preview-enabled-p
+                   (vertico-buffer-frame--minibuffer-buffer))))
             (candidate-frame (vertico-buffer-frame--candidate-frame))
             ((frame-live-p candidate-frame))
             (content))
@@ -1350,25 +1480,41 @@ BUFFER defaults to the most recent live minibuffer tracked by
           (vertico-buffer-frame--hide-preview buffer)))
     (vertico-buffer-frame--hide-preview)))
 
+(defun vertico-buffer-frame--set-preview-enabled (buffer enabled)
+  "Set preview ENABLED state for BUFFER or globally.
+When BUFFER is a live minibuffer buffer, only the current completion session is
+changed.  Otherwise update the global default."
+  (if (vertico-buffer-frame--live-minibuffer-buffer-p buffer)
+      (with-current-buffer buffer
+        (setq-local vertico-buffer-frame--preview-enabled enabled))
+    (setq vertico-buffer-frame-preview enabled)))
+
+(defun vertico-buffer-frame--preview-scope (buffer)
+  "Return the display scope name for preview state in BUFFER."
+  (if (vertico-buffer-frame--live-minibuffer-buffer-p buffer)
+      "session"
+    "default"))
+
 ;;;###autoload
 (defun vertico-buffer-frame-toggle-preview (&optional arg)
-  "Toggle `vertico-buffer-frame-preview'.
-With prefix ARG, enable preview if ARG is positive, otherwise disable it."
+  "Toggle Vertico child-frame preview visibility.
+When called in an active minibuffer, affect only the current completion
+session.  Outside a minibuffer, update the global default
+`vertico-buffer-frame-preview'.  With prefix ARG, enable preview if ARG is
+positive, otherwise disable it."
   (interactive "P")
   (let* ((buffer (vertico-buffer-frame--minibuffer-buffer))
          (enabled
           (if (null arg)
               (not (vertico-buffer-frame--preview-enabled-p buffer))
             (> (prefix-numeric-value arg) 0))))
-    (setq vertico-buffer-frame-preview enabled)
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (setq-local vertico-buffer-frame--preview-enabled enabled)))
+    (vertico-buffer-frame--set-preview-enabled buffer enabled)
     (if enabled
         (vertico-buffer-frame--refresh-active-preview)
-      (vertico-buffer-frame--hide-preview buffer)))
-  (message "vertico-buffer-frame preview %s"
-           (if vertico-buffer-frame-preview "enabled" "disabled")))
+      (vertico-buffer-frame--hide-preview buffer))
+    (message "vertico-buffer-frame preview %s (%s)"
+             (if enabled "enabled" "disabled")
+             (vertico-buffer-frame--preview-scope buffer))))
 
 (defun vertico-buffer-frame--exhibit-advice (&rest _)
   "Update preview after Vertico displays candidates."
@@ -1425,7 +1571,10 @@ With prefix ARG, enable preview if ARG is positive, otherwise disable it."
       (progn
         (unless vertico-buffer-frame--saved-display-action
           (setq vertico-buffer-frame--saved-display-action
-                vertico-buffer-display-action))
+                (list vertico-buffer-display-action)))
+        (unless vertico-buffer-frame--saved-buffer-mode
+          (setq vertico-buffer-frame--saved-buffer-mode
+                (list (bound-and-true-p vertico-buffer-mode))))
         (setq vertico-buffer-display-action
               (vertico-buffer-frame-display-action))
         (advice-add #'vertico--setup
@@ -1455,9 +1604,13 @@ With prefix ARG, enable preview if ARG is positive, otherwise disable it."
     (vertico-buffer-frame--hide-preview)
     (when vertico-buffer-frame--saved-display-action
       (setq vertico-buffer-display-action
-            vertico-buffer-frame--saved-display-action
+            (car vertico-buffer-frame--saved-display-action)
             vertico-buffer-frame--saved-display-action nil))
-    (vertico-buffer-mode -1)))
+    (when vertico-buffer-frame--saved-buffer-mode
+      (if (car vertico-buffer-frame--saved-buffer-mode)
+          (vertico-buffer-mode 1)
+        (vertico-buffer-mode -1))
+      (setq vertico-buffer-frame--saved-buffer-mode nil))))
 
 (provide 'vertico-buffer-frame)
 ;;; vertico-buffer-frame.el ends here

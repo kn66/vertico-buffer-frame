@@ -80,6 +80,10 @@ Add this directory to ~load-path~, then:
 - ~vertico-buffer-frame-foreground-color~
 - ~vertico-buffer-frame-preview~
 - ~vertico-buffer-frame-preview-delay~
+- ~vertico-buffer-frame-preview-max-size~
+- ~vertico-buffer-frame-preview-directory-max-entries~
+- ~vertico-buffer-frame-preview-io-timeout~
+- ~vertico-buffer-frame-preview-binary-detect-bytes~
 - ~vertico-buffer-frame-golden-ratio-scale~
 - ~vertico-buffer-frame-preview-function~
 - ~vertico-buffer-frame-preview-category-functions~
@@ -90,6 +94,7 @@ Example:
 #+begin_src elisp
   (setq vertico-buffer-frame-preview t
         vertico-buffer-frame-preview-delay 0.05
+        vertico-buffer-frame-preview-io-timeout 0.3
         vertico-buffer-frame-golden-ratio-scale 1.00)
 #+end_src
 
@@ -106,6 +111,11 @@ To toggle the preview while completing, bind the toggle command in
 
 - ~vertico-buffer-frame-toggle-preview~
 
+When called during completion, ~vertico-buffer-frame-toggle-preview~ changes
+preview visibility only for the current minibuffer session.  When called
+outside the minibuffer, it changes the global default
+~vertico-buffer-frame-preview~.
+
 * Preview
 
 Built-in preview functions currently cover files, directories, buffers,
@@ -117,3 +127,15 @@ headings and xref.
 
 This is intentionally a small experiment scaffold.  Focus handling, placement,
 recursive minibuffers, and frame reuse still need real-world testing.
+
+* Tests
+
+Run the non-graphical unit tests with:
+
+#+begin_src sh
+  emacs --batch -Q \
+        --eval "(progn (require 'package) (package-initialize))" \
+        -L . \
+        -l test/vertico-buffer-frame-test.el \
+        -f ert-run-tests-batch-and-exit
+#+end_src
