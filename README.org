@@ -25,23 +25,36 @@ frame overlaid on the right side of the candidate frame.
 [[file:Screenshots/2026-05-04_20-20-38_screenshot.png]]
 
 ** vertico-buffer-frame-golden-ratio-scale = 1.30
+:PROPERTIES:
+:ID:       0827939c-4393-4151-87f2-61202becb885
+:END:
 
+
+#+DOWNLOADED: screenshot @ 2026-05-04 23:11:00
+[[file:Screenshots/2026-05-04_23-11-00_screenshot.png]]
 
 
 ** execute-extended-command
+:PROPERTIES:
+:ID:       e59e33fa-8092-4292-b5bd-5949c33aaae3
+:END:
 
 :PROPERTIES:
 :ID:       4c66979b-9216-4dd3-8878-2634389105bc
 :END:
 
 
-#+DOWNLOADED: screenshot @ 2026-05-04 19:33:56
-[[file:Screenshots/2026-05-04_19-33-56_screenshot.png]]
+#+DOWNLOADED: screenshot @ 2026-05-04 23:13:44
+[[file:Screenshots/2026-05-04_23-13-44_screenshot.png]]
 
 ** consult-line
+:PROPERTIES:
+:ID:       3e57dad3-5580-4a29-9624-db4121da161f
+:END:
 
-#+DOWNLOADED: screenshot @ 2026-05-04 19:34:30
-[[file:Screenshots/2026-05-04_19-34-30_screenshot.png]]
+
+#+DOWNLOADED: screenshot @ 2026-05-04 23:11:58
+[[file:Screenshots/2026-05-04_23-11-58_screenshot.png]]
 
 ** consult-buffer
 :PROPERTIES:
@@ -49,9 +62,8 @@ frame overlaid on the right side of the candidate frame.
 :END:
 
 
-#+DOWNLOADED: screenshot @ 2026-05-04 19:37:29
-[[file:Screenshots/2026-05-04_19-37-29_screenshot.png]]
-
+#+DOWNLOADED: screenshot @ 2026-05-04 23:13:03
+[[file:Screenshots/2026-05-04_23-13-03_screenshot.png]]
 
 * Usage
 
