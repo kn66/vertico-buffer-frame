@@ -38,9 +38,13 @@ candidate frame instead of being placed side by side with the input area.
 :END:
 
 ** vertico-buffer-frame-golden-ratio-scale = 1.00
+:PROPERTIES:
+:ID:       520b8f05-76d8-49e0-8083-75757203bed0
+:END:
 
-#+DOWNLOADED: screenshot @ 2026-05-04 20:20:38
-[[file:Screenshots/2026-05-04_20-20-38_screenshot.png]]
+
+#+DOWNLOADED: screenshot @ 2026-05-05 21:26:08
+[[file:Screenshots/2026-05-05_21-26-08_screenshot.png]]
 
 ** vertico-buffer-frame-golden-ratio-scale = 1.30
 :PROPERTIES:
