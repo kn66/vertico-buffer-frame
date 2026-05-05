@@ -52,8 +52,8 @@ candidate frame instead of being placed side by side with the input area.
 :END:
 
 
-#+DOWNLOADED: screenshot @ 2026-05-04 23:11:00
-[[file:Screenshots/2026-05-04_23-11-00_screenshot.png]]
+#+DOWNLOADED: screenshot @ 2026-05-05 21:27:35
+[[file:Screenshots/2026-05-05_21-27-35_screenshot.png]]
 
 ** vertico-buffer-frame-preview-layout = side-by-side
 :PROPERTIES:
@@ -65,16 +65,12 @@ candidate frame instead of being placed side by side with the input area.
 
 ** execute-extended-command
 :PROPERTIES:
-:ID:       e59e33fa-8092-4292-b5bd-5949c33aaae3
-:END:
-
-:PROPERTIES:
-:ID:       4c66979b-9216-4dd3-8878-2634389105bc
+:ID:       48e031c9-7993-4613-bc41-40f98a99a25a
 :END:
 
 
-#+DOWNLOADED: screenshot @ 2026-05-04 23:13:44
-[[file:Screenshots/2026-05-04_23-13-44_screenshot.png]]
+#+DOWNLOADED: screenshot @ 2026-05-05 21:29:08
+[[file:Screenshots/2026-05-05_21-29-08_screenshot.png]]
 
 ** consult-line
 :PROPERTIES:
@@ -82,8 +78,9 @@ candidate frame instead of being placed side by side with the input area.
 :END:
 
 
-#+DOWNLOADED: screenshot @ 2026-05-04 23:11:58
-[[file:Screenshots/2026-05-04_23-11-58_screenshot.png]]
+#+DOWNLOADED: screenshot @ 2026-05-05 21:30:14
+[[file:Screenshots/2026-05-05_21-30-14_screenshot.png]]
+
 
 ** consult-buffer
 :PROPERTIES:
@@ -91,8 +88,8 @@ candidate frame instead of being placed side by side with the input area.
 :END:
 
 
-#+DOWNLOADED: screenshot @ 2026-05-04 23:13:03
-[[file:Screenshots/2026-05-04_23-13-03_screenshot.png]]
+#+DOWNLOADED: screenshot @ 2026-05-05 21:30:41
+[[file:Screenshots/2026-05-05_21-30-41_screenshot.png]]
 
 * Usage
 
