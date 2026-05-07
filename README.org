@@ -185,8 +185,10 @@ The main differences are:
   make large previews easier to read, but it is a different layout tradeoff.
 - ~vertico-buffer-frame~ avoids advising ~vertico-posframe~ and Consult preview
   internals.  It previews candidates from completion metadata, text properties,
-  and category-specific functions.  ~vertico-posframe-preview~ mirrors Consult
-  preview state more directly, but it intentionally advises private APIs.
+  and category-specific functions.  Completion categories are read through
+  Emacs' built-in ~completion-metadata~ API.  ~vertico-posframe-preview~
+  mirrors Consult preview state more directly, but it intentionally advises
+  private APIs.
 - Both packages guard preview file I/O by skipping remote paths, bounding local
   I/O, skipping binary files, and limiting directory previews.
 
