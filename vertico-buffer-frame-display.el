@@ -418,6 +418,61 @@ lines."
                    :preview-size))
     (vertico-buffer-frame--golden-preview-size candidate-frame)))
 
+(defun vertico-buffer-frame--preview-parent (candidate-frame)
+  "Return parent frame for live CANDIDATE-FRAME."
+  (and (frame-live-p candidate-frame)
+       (or (frame-parent candidate-frame) candidate-frame)))
+
+(defun vertico-buffer-frame--preview-side-layout (parent)
+  "Return side-by-side layout for PARENT when active."
+  (and parent
+       (vertico-buffer-frame--side-by-side-layout-p)
+       (vertico-buffer-frame--side-by-side-layout parent)))
+
+(defun vertico-buffer-frame--preview-size-for-frame
+    (candidate-frame side-layout)
+  "Return preview size for CANDIDATE-FRAME using SIDE-LAYOUT."
+  (and (frame-live-p candidate-frame)
+       (or (plist-get side-layout :preview-size)
+           (vertico-buffer-frame--golden-preview-size candidate-frame))))
+
+(defun vertico-buffer-frame--preview-candidate-left
+    (parent candidate-frame side-layout)
+  "Return CANDIDATE-FRAME left position in PARENT using SIDE-LAYOUT."
+  (and (frame-live-p candidate-frame)
+       (or (plist-get side-layout :candidate-left)
+           (vertico-buffer-frame--candidate-left parent candidate-frame))))
+
+(defun vertico-buffer-frame--preview-candidate-top
+    (parent candidate-frame side-layout)
+  "Return CANDIDATE-FRAME top position in PARENT using SIDE-LAYOUT."
+  (and (frame-live-p candidate-frame)
+       (or (plist-get side-layout :candidate-top)
+           (vertico-buffer-frame--candidate-top parent candidate-frame))))
+
+(defun vertico-buffer-frame--preview-left
+    (candidate-frame side-layout candidate-left preview-units)
+  "Return preview left position for CANDIDATE-FRAME.
+SIDE-LAYOUT is the active side-by-side layout, or nil.  CANDIDATE-LEFT is the
+candidate frame's left position, and PREVIEW-UNITS is the preview size in
+display units."
+  (or (plist-get side-layout :preview-left)
+      (and candidate-left
+           preview-units
+           (max candidate-left
+                (- (+ candidate-left (frame-pixel-width candidate-frame))
+                   (car preview-units))))))
+
+(defun vertico-buffer-frame--preview-top
+    (candidate-frame side-layout candidate-top)
+  "Return preview top position for CANDIDATE-FRAME.
+SIDE-LAYOUT is the active side-by-side layout, or nil.  CANDIDATE-TOP is the
+candidate frame's top position."
+  (or (plist-get side-layout :preview-top)
+      (and candidate-top
+           (+ candidate-top
+              (vertico-buffer-frame--preview-top-offset candidate-frame)))))
+
 (defun vertico-buffer-frame--preview-height-lines ()
   "Return current preview frame height in lines."
   (or (and (frame-live-p vertico-buffer-frame--preview-frame)
@@ -461,39 +516,26 @@ lines."
 (defun vertico-buffer-frame--preview-frame-parameters (&optional candidate-frame)
   "Return frame parameters for the preview child frame.
 When CANDIDATE-FRAME is live, derive the preview size from it."
-  (let* ((parent (and (frame-live-p candidate-frame)
-                      (or (frame-parent candidate-frame) candidate-frame)))
-         (side-layout (and parent
-                           (vertico-buffer-frame--side-by-side-layout-p)
-                           (vertico-buffer-frame--side-by-side-layout
-                            parent)))
-         (preview-size (and (frame-live-p candidate-frame)
-                            (or (plist-get side-layout :preview-size)
-                                (vertico-buffer-frame--golden-preview-size
-                                 candidate-frame))))
-         (candidate-left (and (frame-live-p candidate-frame)
-                              (or (plist-get side-layout :candidate-left)
-                                  (vertico-buffer-frame--candidate-left
-                                   parent candidate-frame))))
-         (candidate-top (and (frame-live-p candidate-frame)
-                             (or (plist-get side-layout :candidate-top)
-                                 (vertico-buffer-frame--candidate-top
-                                  parent candidate-frame))))
+  (let* ((parent (vertico-buffer-frame--preview-parent candidate-frame))
+         (side-layout (vertico-buffer-frame--preview-side-layout parent))
+         (preview-size
+          (vertico-buffer-frame--preview-size-for-frame
+           candidate-frame side-layout))
+         (candidate-left
+          (vertico-buffer-frame--preview-candidate-left
+           parent candidate-frame side-layout))
+         (candidate-top
+          (vertico-buffer-frame--preview-candidate-top
+           parent candidate-frame side-layout))
          (preview-units (and preview-size parent
                              (vertico-buffer-frame--size-display-units
                               parent preview-size)))
-         (preview-left (or (plist-get side-layout :preview-left)
-                           (and candidate-left preview-units
-                                (max candidate-left
-                                     (- (+ candidate-left
-                                           (frame-pixel-width
-                                            candidate-frame))
-                                        (car preview-units))))))
-         (preview-top (or (plist-get side-layout :preview-top)
-                          (and candidate-top
-                               (+ candidate-top
-                                  (vertico-buffer-frame--preview-top-offset
-                                   candidate-frame))))))
+         (preview-left
+          (vertico-buffer-frame--preview-left
+           candidate-frame side-layout candidate-left preview-units))
+         (preview-top
+          (vertico-buffer-frame--preview-top
+           candidate-frame side-layout candidate-top)))
     (vertico-buffer-frame--frame-parameters
      parent vertico-buffer-frame--preview-frame-name preview-size
      preview-left preview-top 'vertico-buffer-frame-preview)))

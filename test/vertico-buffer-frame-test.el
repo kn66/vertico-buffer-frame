@@ -10,6 +10,9 @@
 (require 'imenu)
 (require 'vertico-buffer-frame)
 
+(defvar x-fast-protocol-requests)
+(defvar x-gtk-resize-child-frames)
+
 (defmacro vertico-buffer-frame-test--with-mode-cleanup (&rest body)
   "Run BODY while preserving global Vertico display state."
   (declare (indent 0) (debug t))
@@ -1018,19 +1021,19 @@
   (let ((default-directory "/ssh:example:/tmp/"))
     (cl-letf (((symbol-function 'consult--grep-position)
                (lambda (&rest _)
-                 (error "consult--grep-position should not be called"))))
+                 (error "Consult--grep-position should not be called"))))
       (should-not (vertico-buffer-frame-preview-grep "candidate")))))
 
 (ert-deftest vertico-buffer-frame-xref-skips-remote-locations ()
   (let ((marker-called nil))
     (cl-letf (((symbol-function 'xref-item-location)
-               (lambda (_xref) 'remote-location))
-              ((symbol-function 'xref-location-group)
-               (lambda (_location) "/ssh:example:/tmp/file"))
+              (lambda (_xref) 'remote-location))
+             ((symbol-function 'xref-location-group)
+              (lambda (_location) "/ssh:example:/tmp/file"))
               ((symbol-function 'xref-location-marker)
                (lambda (_location)
                  (setq marker-called t)
-                 (error "xref-location-marker should not be called"))))
+                 (error "Xref-location-marker should not be called"))))
       (should-not (vertico-buffer-frame-preview-xref 'xref-item))
       (should-not marker-called))))
 

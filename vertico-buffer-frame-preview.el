@@ -224,7 +224,9 @@ minibuffer completion state."
 
 (defun vertico-buffer-frame--completion-context-current-p
     (input table predicate extra-properties completing-file-name)
-  "Return non-nil when captured completion context matches current state."
+  "Return non-nil when captured completion context matches current state.
+INPUT, TABLE, PREDICATE, EXTRA-PROPERTIES, and COMPLETING-FILE-NAME are the
+state values to compare with the current preview context."
   (and vertico-buffer-frame--preview-completion-context-valid
        (equal input vertico-buffer-frame--preview-completion-input)
        (eq table vertico-buffer-frame--preview-completion-table)
@@ -1014,6 +1016,49 @@ preview content."
       (set-window-start window (point-min) t))
     (set-window-hscroll window 0)))
 
+(defun vertico-buffer-frame--preview-buffer-with-content
+    (content parameters)
+  "Return preview buffer containing CONTENT styled by PARAMETERS."
+  (let ((preview-buffer (get-buffer-create
+                         vertico-buffer-frame--preview-buffer)))
+    (with-current-buffer preview-buffer
+      (let ((inhibit-read-only t)
+            (inhibit-modification-hooks t)
+            (buffer-undo-list t))
+        (setq-local cursor-type nil
+                    truncate-lines t
+                    mode-line-format nil
+                    face-remapping-alist
+                    (vertico-buffer-frame--face-remapping parameters))
+        (vertico-buffer-frame--insert-preview-content content)))
+    preview-buffer))
+
+(defun vertico-buffer-frame--show-preview-window
+    (preview-buffer parameters candidate-frame)
+  "Show PREVIEW-BUFFER with PARAMETERS next to CANDIDATE-FRAME."
+  (when-let* ((window (vertico-buffer-frame--preview-window
+                       preview-buffer parameters)))
+    (vertico-buffer-frame--reset-preview-window window)
+    (setq vertico-buffer-frame--preview-frame (window-frame window))
+    (vertico-buffer-frame--hide-window-chrome window)
+    (vertico-buffer-frame--apply-frame-parameters
+     vertico-buffer-frame--preview-frame parameters)
+    (vertico-buffer-frame--position-pair
+     candidate-frame vertico-buffer-frame--preview-frame)
+    (vertico-buffer-frame--ensure-frame-visible
+     vertico-buffer-frame--preview-frame)))
+
+(defun vertico-buffer-frame--show-nonempty-preview
+    (content candidate-frame)
+  "Show nonempty preview CONTENT for CANDIDATE-FRAME."
+  (let* ((parameters (vertico-buffer-frame--preview-frame-parameters
+                      candidate-frame))
+         (preview-buffer
+          (vertico-buffer-frame--preview-buffer-with-content
+           content parameters)))
+    (vertico-buffer-frame--show-preview-window
+     preview-buffer parameters candidate-frame)))
+
 (defun vertico-buffer-frame--show-preview-content (content)
   "Show preview CONTENT in the preview child frame."
   (let* ((minibuffer-buffer (vertico-buffer-frame--minibuffer-buffer))
@@ -1024,38 +1069,16 @@ preview content."
                                (vertico-buffer-frame--candidate-frame))))
     (cond
      ((and enabled (frame-live-p candidate-frame) content)
-      (let* ((preview-buffer (get-buffer-create
-                              vertico-buffer-frame--preview-buffer))
-             (parameters (vertico-buffer-frame--preview-frame-parameters
-                          candidate-frame)))
-        (with-current-buffer preview-buffer
-          (let ((inhibit-read-only t)
-                (inhibit-modification-hooks t)
-                (buffer-undo-list t))
-            (setq-local cursor-type nil
-                        truncate-lines t
-                        mode-line-format nil
-                        face-remapping-alist
-                        (vertico-buffer-frame--face-remapping parameters))
-            (vertico-buffer-frame--insert-preview-content content)))
-        (when-let* ((window (vertico-buffer-frame--preview-window
-                             preview-buffer parameters)))
-          (vertico-buffer-frame--reset-preview-window window)
-          (setq vertico-buffer-frame--preview-frame (window-frame window))
-          (vertico-buffer-frame--hide-window-chrome window)
-          (vertico-buffer-frame--apply-frame-parameters
-           vertico-buffer-frame--preview-frame parameters)
-          (vertico-buffer-frame--position-pair
-           candidate-frame vertico-buffer-frame--preview-frame)
-          (vertico-buffer-frame--ensure-frame-visible
-           vertico-buffer-frame--preview-frame))))
+      (vertico-buffer-frame--show-nonempty-preview content candidate-frame))
      ((and enabled (frame-live-p candidate-frame))
       (vertico-buffer-frame--hide-preview-temporarily))
      (t
       (vertico-buffer-frame--hide-preview minibuffer-buffer)))))
 
 (defun vertico-buffer-frame--show-preview (&optional captured-context)
-  "Show preview for the current Vertico candidate."
+  "Show preview for the current Vertico candidate.
+When CAPTURED-CONTEXT is non-nil, reuse the caller's captured completion
+state."
   (if (vertico-buffer-frame--preview-enabled-p (current-buffer))
       (progn
         (unless captured-context
@@ -1073,7 +1096,9 @@ preview content."
 
 (defun vertico-buffer-frame--show-preview-if-current
     (buffer candidate-key &optional captured-context)
-  "Show preview in BUFFER when CANDIDATE-KEY is still current."
+  "Show preview in BUFFER when CANDIDATE-KEY is still current.
+When CAPTURED-CONTEXT is non-nil, reuse the caller's captured completion
+state."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (setq-local vertico-buffer-frame--preview-timer nil)

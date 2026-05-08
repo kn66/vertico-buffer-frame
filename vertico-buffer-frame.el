@@ -406,47 +406,66 @@ positive, otherwise disable it."
               #'vertico-buffer-frame--minibuffer-exit
               nil 'local)))
 
+(defun vertico-buffer-frame--enable ()
+  "Enable `vertico-buffer-frame-mode' internals."
+  (unless vertico-buffer-frame--saved-display-action
+    (setq vertico-buffer-frame--saved-display-action
+          (list vertico-buffer-display-action)))
+  (unless vertico-buffer-frame--saved-buffer-mode
+    (setq vertico-buffer-frame--saved-buffer-mode
+          (list (bound-and-true-p vertico-buffer-mode))))
+  (setq vertico-buffer-display-action
+        (vertico-buffer-frame-display-action))
+  (add-hook 'minibuffer-setup-hook
+            #'vertico-buffer-frame--setup-minibuffer)
+  (add-hook 'enable-theme-functions
+            #'vertico-buffer-frame--theme-change-advice)
+  (add-hook 'disable-theme-functions
+            #'vertico-buffer-frame--theme-change-advice)
+  (vertico-buffer-mode 1))
+
+(defun vertico-buffer-frame--cancel-theme-timer ()
+  "Cancel pending child-frame theme refresh timer."
+  (when (timerp vertico-buffer-frame--theme-timer)
+    (cancel-timer vertico-buffer-frame--theme-timer)
+    (setq vertico-buffer-frame--theme-timer nil)))
+
+(defun vertico-buffer-frame--restore-display-action ()
+  "Restore `vertico-buffer-display-action' saved before mode enablement."
+  (when vertico-buffer-frame--saved-display-action
+    (setq vertico-buffer-display-action
+          (car vertico-buffer-frame--saved-display-action)
+          vertico-buffer-frame--saved-display-action nil)))
+
+(defun vertico-buffer-frame--restore-buffer-mode ()
+  "Restore `vertico-buffer-mode' state saved before mode enablement."
+  (when vertico-buffer-frame--saved-buffer-mode
+    (if (car vertico-buffer-frame--saved-buffer-mode)
+        (vertico-buffer-mode 1)
+      (vertico-buffer-mode -1))
+    (setq vertico-buffer-frame--saved-buffer-mode nil)))
+
+(defun vertico-buffer-frame--disable ()
+  "Disable `vertico-buffer-frame-mode' internals."
+  (remove-hook 'minibuffer-setup-hook
+               #'vertico-buffer-frame--setup-minibuffer)
+  (remove-hook 'enable-theme-functions
+               #'vertico-buffer-frame--theme-change-advice)
+  (remove-hook 'disable-theme-functions
+               #'vertico-buffer-frame--theme-change-advice)
+  (vertico-buffer-frame--cancel-theme-timer)
+  (vertico-buffer-frame--hide-preview)
+  (vertico-buffer-frame--restore-display-action)
+  (vertico-buffer-frame--restore-buffer-mode))
+
 ;;;###autoload
 (define-minor-mode vertico-buffer-frame-mode
   "Show `vertico-buffer-mode' using an Emacs child frame."
   :global t
   :group 'vertico-buffer-frame
   (if vertico-buffer-frame-mode
-      (progn
-        (unless vertico-buffer-frame--saved-display-action
-          (setq vertico-buffer-frame--saved-display-action
-                (list vertico-buffer-display-action)))
-        (unless vertico-buffer-frame--saved-buffer-mode
-          (setq vertico-buffer-frame--saved-buffer-mode
-                (list (bound-and-true-p vertico-buffer-mode))))
-        (setq vertico-buffer-display-action
-              (vertico-buffer-frame-display-action))
-        (add-hook 'minibuffer-setup-hook
-                  #'vertico-buffer-frame--setup-minibuffer)
-        (add-hook 'enable-theme-functions
-                  #'vertico-buffer-frame--theme-change-advice)
-        (add-hook 'disable-theme-functions
-                  #'vertico-buffer-frame--theme-change-advice)
-        (vertico-buffer-mode 1))
-    (remove-hook 'minibuffer-setup-hook
-                 #'vertico-buffer-frame--setup-minibuffer)
-    (remove-hook 'enable-theme-functions
-                 #'vertico-buffer-frame--theme-change-advice)
-    (remove-hook 'disable-theme-functions
-                 #'vertico-buffer-frame--theme-change-advice)
-    (when (timerp vertico-buffer-frame--theme-timer)
-      (cancel-timer vertico-buffer-frame--theme-timer)
-      (setq vertico-buffer-frame--theme-timer nil))
-    (vertico-buffer-frame--hide-preview)
-    (when vertico-buffer-frame--saved-display-action
-      (setq vertico-buffer-display-action
-            (car vertico-buffer-frame--saved-display-action)
-            vertico-buffer-frame--saved-display-action nil))
-    (when vertico-buffer-frame--saved-buffer-mode
-      (if (car vertico-buffer-frame--saved-buffer-mode)
-          (vertico-buffer-mode 1)
-        (vertico-buffer-mode -1))
-      (setq vertico-buffer-frame--saved-buffer-mode nil))))
+      (vertico-buffer-frame--enable)
+    (vertico-buffer-frame--disable)))
 
 (provide 'vertico-buffer-frame)
 ;;; vertico-buffer-frame.el ends here

@@ -8,5 +8,6 @@
 \#*\#
 
 # Local build and package artifacts
+.elsa/
 .eldev/
 dist/
