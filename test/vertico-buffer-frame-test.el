@@ -270,8 +270,23 @@
     (should-not (assq 'alpha preview-parameters))
     (should-not (assq 'alpha-background preview-parameters))))
 
+(ert-deftest vertico-buffer-frame-parameters-include-stable-frame-settings ()
+  (cl-letf (((symbol-function 'frame-parameter)
+             (lambda (_frame parameter)
+               (and (eq parameter 'font) "Parent Font"))))
+    (let ((parameters (vertico-buffer-frame--child-frame-parameters)))
+      (should (equal (cdr (assq 'font parameters)) "Parent Font"))
+      (should (assq 'fullscreen parameters))
+      (should-not (cdr (assq 'fullscreen parameters)))
+      (should (assq 'cursor-type parameters))
+      (should-not (cdr (assq 'cursor-type parameters)))
+      (should (eq (cdr (assq 'no-special-glyphs parameters)) t))
+      (should (eq (cdr (assq 'desktop-dont-save parameters)) t))
+      (should (eq (cdr (assq 'inhibit-double-buffering parameters)) t)))))
+
 (ert-deftest vertico-buffer-frame-ensure-frame-visible-redraws-frame ()
-  (let (made-visible redrawn)
+  (let ((vertico-buffer-frame-redraw-after-show t)
+        made-visible redrawn)
     (cl-letf (((symbol-function 'frame-live-p)
                (lambda (frame) (eq frame 'frame)))
               ((symbol-function 'frame-visible-p)
@@ -285,6 +300,59 @@
       (vertico-buffer-frame--ensure-frame-visible 'frame)
       (should (eq made-visible 'frame))
       (should (eq redrawn 'frame)))))
+
+(ert-deftest vertico-buffer-frame-ensure-frame-visible-can-skip-redraw ()
+  (let ((vertico-buffer-frame-redraw-after-show nil)
+        made-visible redrawn)
+    (cl-letf (((symbol-function 'frame-live-p)
+               (lambda (frame) (eq frame 'frame)))
+              ((symbol-function 'frame-visible-p)
+               (lambda (_frame) nil))
+              ((symbol-function 'make-frame-visible)
+               (lambda (frame)
+                 (setq made-visible frame)))
+              ((symbol-function 'redraw-frame)
+               (lambda (frame)
+                 (setq redrawn frame))))
+      (vertico-buffer-frame--ensure-frame-visible 'frame)
+      (should (eq made-visible 'frame))
+      (should-not redrawn))))
+
+(ert-deftest vertico-buffer-frame-ensure-frame-visible-skips-visible-redraw ()
+  (let ((vertico-buffer-frame-redraw-after-show t)
+        made-visible redrawn)
+    (cl-letf (((symbol-function 'frame-live-p)
+               (lambda (frame) (eq frame 'frame)))
+              ((symbol-function 'frame-visible-p)
+               (lambda (_frame) t))
+              ((symbol-function 'make-frame-visible)
+               (lambda (frame)
+                 (setq made-visible frame)))
+              ((symbol-function 'redraw-frame)
+               (lambda (frame)
+                 (setq redrawn frame))))
+      (vertico-buffer-frame--ensure-frame-visible 'frame)
+      (should-not made-visible)
+      (should-not redrawn))))
+
+(ert-deftest vertico-buffer-frame-display-buffer-in-child-frame-stabilizes-bindings ()
+  (let ((vertico-buffer-frame--gtk-resize-child-frames 'resize-mode)
+        captured)
+    (cl-letf (((symbol-function 'display-buffer-in-child-frame)
+               (lambda (_buffer _alist)
+                 (setq captured
+                       (list window-min-height
+                             window-min-width
+                             inhibit-redisplay
+                             before-make-frame-hook
+                             after-make-frame-functions
+                             x-fast-protocol-requests
+                             x-gtk-resize-child-frames))
+                 'window)))
+      (should (eq (vertico-buffer-frame--display-buffer-in-child-frame
+                   'buffer nil)
+                  'window))
+      (should (equal captured '(1 1 t nil nil t resize-mode))))))
 
 (ert-deftest vertico-buffer-frame-preview-window-reuses-live-frame ()
   (let ((vertico-buffer-frame--preview-frame (selected-frame))
@@ -356,6 +424,41 @@
                     (left . 1)
                     (top . 2)))
                  '((left . 1) (top . 2)))))
+
+(ert-deftest vertico-buffer-frame-changed-parameters-keep-only-differences ()
+  (cl-letf (((symbol-function 'frame-parameter)
+             (lambda (_frame parameter)
+               (pcase parameter
+                 ('left 1)
+                 ('top 4)
+                 (_ nil)))))
+    (should (equal (vertico-buffer-frame--changed-frame-parameters
+                    'frame '((left . 1) (top . 2) (width . 80)))
+                   '((top . 2) (width . 80))))))
+
+(ert-deftest vertico-buffer-frame-set-face-background-skips-current-color ()
+  (let (set)
+    (cl-letf (((symbol-function 'face-attribute)
+               (lambda (_face _attribute _frame _inherit)
+                 "gray20"))
+              ((symbol-function 'set-face-background)
+               (lambda (&rest args)
+                 (setq set args))))
+      (vertico-buffer-frame--set-face-background-if-changed
+       'child-frame-border "gray20" 'frame)
+      (should-not set))))
+
+(ert-deftest vertico-buffer-frame-set-face-background-updates-changed-color ()
+  (let (set)
+    (cl-letf (((symbol-function 'face-attribute)
+               (lambda (_face _attribute _frame _inherit)
+                 "gray20"))
+              ((symbol-function 'set-face-background)
+               (lambda (&rest args)
+                 (setq set args))))
+      (vertico-buffer-frame--set-face-background-if-changed
+       'child-frame-border "gray30" 'frame)
+      (should (equal set '(child-frame-border "gray30" frame))))))
 
 (ert-deftest vertico-buffer-frame-toggle-preview-is-session-local ()
   (let ((buffer (generate-new-buffer " *vbf-toggle*"))
@@ -604,6 +707,64 @@
     (should (eq (vertico-buffer-frame--completion-category)
                 'custom-category))))
 
+(ert-deftest vertico-buffer-frame-metadata-preview-uses-affixation-and-group ()
+  (let* ((affixation
+          (lambda (candidates)
+            (mapcar (lambda (candidate)
+                      (list candidate "[prefix] " " -- suffix"))
+                    candidates)))
+         (group
+          (lambda (_candidate transform)
+            (unless transform "Built-in group")))
+         (minibuffer-completion-table
+          (lambda (_string _predicate action)
+            (when (eq action 'metadata)
+              `(metadata
+                (affixation-function . ,affixation)
+                (group-function . ,group)))))
+         (minibuffer-completion-predicate nil)
+         (completion-extra-properties nil))
+    (let ((preview (vertico-buffer-frame-preview-metadata "alpha")))
+      (should (string-match-p "alpha" preview))
+      (should (string-match-p "Group: Built-in group" preview))
+      (should (string-match-p "\\[prefix\\].*suffix" preview)))))
+
+(ert-deftest vertico-buffer-frame-metadata-preview-uses-extra-annotation ()
+  (let ((minibuffer-completion-table '("alpha"))
+        (minibuffer-completion-predicate nil)
+        (completion-extra-properties
+         '(:annotation-function
+           (lambda (_candidate) " annotation"))))
+    (should (string-match-p
+             "annotation"
+             (vertico-buffer-frame-preview-metadata "alpha")))))
+
+(ert-deftest vertico-buffer-frame-command-preview-includes-signature ()
+  (should (string-match-p
+           "Signature: (car list)"
+           (vertico-buffer-frame-preview-function "car"))))
+
+(ert-deftest vertico-buffer-frame-environment-variable-preview-shows-value ()
+  (let ((process-environment
+         (cons "VBF_TEST_ENV=present" process-environment)))
+    (let ((preview
+           (vertico-buffer-frame-preview-environment-variable
+            "VBF_TEST_ENV")))
+      (should (string-match-p "VBF_TEST_ENV" preview))
+      (should (string-match-p "present" preview)))))
+
+(ert-deftest vertico-buffer-frame-unicode-name-preview-shows-code-point ()
+  (let ((preview
+         (vertico-buffer-frame-preview-unicode-name
+          "LATIN CAPITAL LETTER A")))
+    (should (string-match-p "Character: A" preview))
+    (should (string-match-p "Code point: U\\+0041" preview))))
+
+(ert-deftest vertico-buffer-frame-color-preview-shows-rgb ()
+  (let ((preview (vertico-buffer-frame-preview-color "red")))
+    (should (string-match-p "red" preview))
+    (should (string-match-p "#FF0000" preview))))
+
 (ert-deftest vertico-buffer-frame-captures-completion-context ()
   (let ((predicate (lambda (_candidate) t))
         seen-predicate)
@@ -624,8 +785,59 @@
                     predicate))
         (should (equal vertico-buffer-frame--preview-completion-extra-properties
                        completion-extra-properties))
+        (should (equal vertico-buffer-frame--preview-completion-input ""))
+        (should (equal vertico-buffer-frame--preview-completion-metadata
+                       '(metadata (category . variable))))
+        (should vertico-buffer-frame--preview-completion-context-valid)
         (should vertico-buffer-frame--preview-completing-file-name)
         (should (eq seen-predicate predicate))))))
+
+(ert-deftest vertico-buffer-frame-uses-captured-completion-metadata ()
+  (let ((calls 0)
+        (minibuffer-completion-predicate nil)
+        (completion-extra-properties nil))
+    (with-temp-buffer
+      (let ((minibuffer-completion-table
+             (lambda (_string _predicate action)
+               (when (eq action 'metadata)
+                 (cl-incf calls)
+                 '(metadata (category . command))))))
+        (vertico-buffer-frame--capture-preview-context)
+        (should (= calls 1))
+        (should (eq (vertico-buffer-frame--completion-category) 'command))
+        (should (= calls 1))))))
+
+(ert-deftest vertico-buffer-frame-capture-preview-context-reuses-same-state ()
+  (let ((calls 0)
+        (minibuffer-completion-predicate nil)
+        (completion-extra-properties nil))
+    (with-temp-buffer
+      (let ((minibuffer-completion-table
+             (lambda (_string _predicate action)
+               (when (eq action 'metadata)
+                 (cl-incf calls)
+                 '(metadata (category . command))))))
+        (vertico-buffer-frame--capture-preview-context)
+        (vertico-buffer-frame--capture-preview-context)
+        (should (= calls 1))))))
+
+(ert-deftest vertico-buffer-frame-capture-preview-context-recomputes-new-input ()
+  (let ((calls 0))
+    (with-temp-buffer
+      (let ((minibuffer-completion-table
+             (lambda (_string _predicate action)
+               (when (eq action 'metadata)
+                 (cl-incf calls)
+                 '(metadata (category . command)))))
+            (minibuffer-completion-predicate nil)
+            (completion-extra-properties nil))
+        (cl-letf (((symbol-function 'vertico-buffer-frame--completion-input)
+                   (lambda () "alpha")))
+          (vertico-buffer-frame--capture-preview-context))
+        (cl-letf (((symbol-function 'vertico-buffer-frame--completion-input)
+                   (lambda () "beta")))
+          (vertico-buffer-frame--capture-preview-context))
+        (should (= calls 2))))))
 
 (ert-deftest vertico-buffer-frame-imenu-uses-completion-table ()
   (with-temp-buffer
@@ -693,6 +905,22 @@
       (should-not vertico-buffer-frame--preview-frame)
       (should redisplayed))))
 
+(ert-deftest vertico-buffer-frame-hide-preview-temporarily-keeps-frame ()
+  (let ((vertico-buffer-frame--preview-frame 'frame)
+        hidden deleted)
+    (cl-letf (((symbol-function 'frame-live-p)
+               (lambda (frame) (eq frame 'frame)))
+              ((symbol-function 'make-frame-invisible)
+               (lambda (frame &optional force)
+                 (setq hidden (list frame force))))
+              ((symbol-function 'delete-frame)
+               (lambda (&rest _)
+                 (setq deleted t))))
+      (vertico-buffer-frame--hide-preview-temporarily)
+      (should (equal hidden '(frame t)))
+      (should-not deleted)
+      (should (eq vertico-buffer-frame--preview-frame 'frame)))))
+
 (ert-deftest vertico-buffer-frame-show-preview-if-current-skips-stale-candidate ()
   (let ((buffer (generate-new-buffer " *vbf-stale-preview*"))
         shown)
@@ -700,7 +928,8 @@
         (cl-letf (((symbol-function 'vertico-buffer-frame--current-candidate)
                    (lambda () "current"))
                   ((symbol-function 'vertico-buffer-frame--show-preview)
-                   (lambda () (setq shown t))))
+                   (lambda (&optional _captured-context)
+                     (setq shown t))))
           (with-current-buffer buffer
             (setq-local vertico-buffer-frame--exiting nil
                         vertico-buffer-frame--preview-enabled t
@@ -717,13 +946,73 @@
         (cl-letf (((symbol-function 'vertico-buffer-frame--current-candidate)
                    (lambda () "current"))
                   ((symbol-function 'vertico-buffer-frame--show-preview)
-                   (lambda () (setq shown t))))
+                   (lambda (&optional captured-context)
+                     (setq shown captured-context))))
           (with-current-buffer buffer
             (setq-local vertico-buffer-frame--exiting nil
                         vertico-buffer-frame--preview-enabled t)
-            (vertico-buffer-frame--show-preview-if-current buffer "current"))
-          (should shown))
+            (vertico-buffer-frame--show-preview-if-current
+             buffer "current" 'captured))
+          (should (eq shown 'captured)))
       (kill-buffer buffer))))
+
+(ert-deftest vertico-buffer-frame-schedule-preview-skips-disabled-context ()
+  (let (captured hidden)
+    (with-temp-buffer
+      (setq-local vertico-buffer-frame--exiting nil
+                  vertico-buffer-frame--preview-enabled nil)
+      (cl-letf (((symbol-function
+                  'vertico-buffer-frame--capture-preview-context)
+                 (lambda () (setq captured t)))
+                ((symbol-function 'vertico-buffer-frame--hide-preview)
+                 (lambda (&optional _buffer) (setq hidden t))))
+        (vertico-buffer-frame--schedule-preview)
+        (should-not captured)
+        (should hidden)))))
+
+(ert-deftest vertico-buffer-frame-schedule-preview-captures-once-immediate ()
+  (let ((captures 0)
+        shown)
+    (with-temp-buffer
+      (setq-local vertico-buffer-frame--exiting nil
+                  vertico-buffer-frame--preview-enabled t)
+      (let ((vertico-buffer-frame-preview-delay 0))
+        (cl-letf (((symbol-function 'vertico-buffer-frame--current-candidate)
+                   (lambda () "candidate"))
+                  ((symbol-function
+                    'vertico-buffer-frame--capture-preview-context)
+                   (lambda () (cl-incf captures)))
+                  ((symbol-function
+                    'vertico-buffer-frame--preview-content-while-no-input)
+                   (lambda () (cons t "content")))
+                  ((symbol-function
+                    'vertico-buffer-frame--show-preview-content)
+                   (lambda (content) (setq shown content))))
+          (vertico-buffer-frame--schedule-preview)
+          (should (= captures 1))
+          (should (equal shown "content"))
+          (should (equal vertico-buffer-frame--last-preview-candidate
+                         "candidate"))
+          (should (eq vertico-buffer-frame--last-preview-state
+                      'content)))))))
+
+(ert-deftest vertico-buffer-frame-schedule-preview-reuses-empty-preview ()
+  (let (captured shown)
+    (with-temp-buffer
+      (setq-local vertico-buffer-frame--exiting nil
+                  vertico-buffer-frame--preview-enabled t
+                  vertico-buffer-frame--last-preview-candidate "candidate"
+                  vertico-buffer-frame--last-preview-state 'empty)
+      (cl-letf (((symbol-function 'vertico-buffer-frame--current-candidate)
+                 (lambda () "candidate"))
+                ((symbol-function
+                  'vertico-buffer-frame--capture-preview-context)
+                 (lambda () (setq captured t)))
+                ((symbol-function 'vertico-buffer-frame--show-preview)
+                 (lambda (&optional _captured-context) (setq shown t))))
+        (vertico-buffer-frame--schedule-preview)
+        (should-not captured)
+        (should-not shown)))))
 
 (ert-deftest vertico-buffer-frame-grep-skips-remote-default-directory ()
   (let ((default-directory "/ssh:example:/tmp/"))

@@ -26,6 +26,7 @@
 (declare-function package-desc-summary "package")
 (declare-function package-desc-version "package")
 (declare-function package-version-join "package")
+(declare-function help-function-arglist "help-fns")
 (declare-function xref-item-location "xref")
 (declare-function xref-location-group "xref")
 (declare-function xref-location-marker "xref")
@@ -64,11 +65,15 @@
 (defvar vertico-buffer-frame--imenu-index-buffer)
 (defvar vertico-buffer-frame--imenu-index-cache)
 (defvar vertico-buffer-frame--last-preview-candidate)
+(defvar vertico-buffer-frame--last-preview-state)
 (defvar vertico-buffer-frame--preview-buffer)
 (defvar vertico-buffer-frame--preview-category)
 (defvar vertico-buffer-frame--preview-command)
 (defvar vertico-buffer-frame--preview-completing-file-name)
+(defvar vertico-buffer-frame--preview-completion-context-valid)
 (defvar vertico-buffer-frame--preview-completion-extra-properties)
+(defvar vertico-buffer-frame--preview-completion-input)
+(defvar vertico-buffer-frame--preview-completion-metadata)
 (defvar vertico-buffer-frame--preview-completion-predicate)
 (defvar vertico-buffer-frame--preview-completion-table)
 (defvar vertico-buffer-frame--preview-enabled)
@@ -176,9 +181,9 @@ TITLE is included to reserve vertical space for the preview heading."
       (minibuffer-contents)
     ""))
 
-(defun vertico-buffer-frame--completion-metadata-category
+(defun vertico-buffer-frame--completion-metadata
     (&optional input table predicate extra-properties)
-  "Return completion category using Emacs completion metadata.
+  "Return Emacs completion metadata for the current completion state.
 INPUT, TABLE, PREDICATE, and EXTRA-PROPERTIES default to the current
 minibuffer completion state."
   (let ((table (or table minibuffer-completion-table))
@@ -187,12 +192,47 @@ minibuffer completion state."
          (or extra-properties completion-extra-properties)))
     (when table
       (ignore-errors
-        (completion-metadata-get
-         (completion-metadata (or input
-                                  (vertico-buffer-frame--completion-input))
-                              table
-                              predicate)
-         'category)))))
+        (completion-metadata (or input
+                                 (vertico-buffer-frame--completion-input))
+                             table
+                             predicate)))))
+
+(defun vertico-buffer-frame--completion-metadata-for-state
+    (&optional input table predicate extra-properties)
+  "Return captured completion metadata, or compute it from current state.
+When INPUT, TABLE, PREDICATE, or EXTRA-PROPERTIES are non-nil, always compute
+metadata for that explicit state."
+  (if (or input table predicate extra-properties)
+      (vertico-buffer-frame--completion-metadata
+       input table predicate extra-properties)
+    (if vertico-buffer-frame--preview-completion-context-valid
+        vertico-buffer-frame--preview-completion-metadata
+      (vertico-buffer-frame--completion-metadata))))
+
+(defun vertico-buffer-frame--completion-metadata-category
+    (&optional input table predicate extra-properties)
+  "Return completion category using Emacs completion metadata.
+INPUT, TABLE, PREDICATE, and EXTRA-PROPERTIES default to the current
+minibuffer completion state."
+  (when-let* ((metadata (vertico-buffer-frame--completion-metadata-for-state
+                         input table predicate extra-properties)))
+    (completion-metadata-get metadata 'category)))
+
+(defun vertico-buffer-frame--copy-completion-extra-properties (properties)
+  "Return a cache copy of completion extra PROPERTIES."
+  (and properties (copy-tree properties)))
+
+(defun vertico-buffer-frame--completion-context-current-p
+    (input table predicate extra-properties completing-file-name)
+  "Return non-nil when captured completion context matches current state."
+  (and vertico-buffer-frame--preview-completion-context-valid
+       (equal input vertico-buffer-frame--preview-completion-input)
+       (eq table vertico-buffer-frame--preview-completion-table)
+       (eq predicate vertico-buffer-frame--preview-completion-predicate)
+       (equal extra-properties
+              vertico-buffer-frame--preview-completion-extra-properties)
+       (eq completing-file-name
+           vertico-buffer-frame--preview-completing-file-name)))
 
 (defun vertico-buffer-frame--file-candidate-string (candidate)
   "Return CANDIDATE's file name string, using unquoted text when available."
@@ -229,10 +269,42 @@ minibuffer completion state."
   "Return CANDIDATE as an interned symbol."
   (intern-soft (vertico-buffer-frame--candidate-string candidate)))
 
-(defun vertico-buffer-frame--documentation (title body)
-  "Return preview text from TITLE and BODY."
+(defun vertico-buffer-frame--documentation (title body &optional details)
+  "Return preview text from TITLE, BODY, and optional DETAILS."
   (when body
-    (concat title "\n\n" (string-trim (substitute-command-keys body)))))
+    (string-join
+     (append (list title)
+             (delq nil details)
+             (list "" (string-trim (substitute-command-keys body))))
+     "\n")))
+
+(defun vertico-buffer-frame--function-signature (symbol)
+  "Return a function signature line for SYMBOL, or nil."
+  (when (and (fboundp 'help-function-arglist)
+             (fboundp symbol))
+    (let ((arglist (ignore-errors (help-function-arglist symbol t))))
+      (cond
+       ((listp arglist)
+        (format "Signature: %S" (cons symbol arglist)))
+       ((and (stringp arglist)
+             (not (string-empty-p arglist)))
+        (format "Signature: %s" arglist))))))
+
+(defun vertico-buffer-frame--command-key-bindings (symbol)
+  "Return a concise key binding line for command SYMBOL, or nil."
+  (when (commandp symbol)
+    (when-let* ((keys (where-is-internal symbol nil nil nil)))
+      (let* ((non-menu-keys
+              (seq-remove (lambda (key)
+                            (and (vectorp key)
+                                 (> (length key) 0)
+                                 (eq (aref key 0) 'menu-bar)))
+                          keys))
+             (descriptions
+              (mapcar #'key-description
+                      (seq-take (or non-menu-keys keys) 3))))
+        (when descriptions
+          (format "Keys: %s" (string-join descriptions ", ")))))))
 
 (defun vertico-buffer-frame--symbol-documentation (candidate predicate)
   "Return documentation for CANDIDATE when its symbol satisfies PREDICATE."
@@ -240,7 +312,10 @@ minibuffer completion state."
               ((funcall predicate symbol)))
     (vertico-buffer-frame--documentation
      (format "%s" symbol)
-     (documentation symbol t))))
+     (documentation symbol t)
+     (delq nil
+           (list (vertico-buffer-frame--function-signature symbol)
+                 (vertico-buffer-frame--command-key-bindings symbol))))))
 
 (defun vertico-buffer-frame-preview-default (candidate)
   "Return preview content for CANDIDATE using built-in preview rules."
@@ -254,7 +329,8 @@ minibuffer completion state."
                                          vertico-buffer-frame-preview-command-functions))))
           (funcall function target))
         (when minibuffer-completing-file-name
-          (vertico-buffer-frame-preview-file candidate)))))
+          (vertico-buffer-frame-preview-file candidate))
+        (vertico-buffer-frame-preview-metadata candidate))))
 
 (defun vertico-buffer-frame-preview-file (candidate)
   "Return file preview content for CANDIDATE."
@@ -272,6 +348,58 @@ minibuffer completion state."
 (defun vertico-buffer-frame-preview-string (candidate)
   "Return CANDIDATE as preview content."
   (vertico-buffer-frame--candidate-string candidate))
+
+(defun vertico-buffer-frame--completion-affix (candidate metadata)
+  "Return completion affix display text for CANDIDATE using METADATA."
+  (let ((candidate (vertico-buffer-frame--candidate-string candidate)))
+    (or (when-let* ((function (completion-metadata-get
+                               metadata 'affixation-function)))
+          (pcase (car-safe (ignore-errors
+                             (funcall function (list candidate))))
+            (`(,_ ,prefix ,suffix)
+             (let ((text (string-trim
+                          (concat (and (stringp prefix) prefix)
+                                  candidate
+                                  (and (stringp suffix) suffix)))))
+               (unless (string-empty-p text)
+                 text)))))
+        (when-let* ((function (completion-metadata-get
+                               metadata 'annotation-function))
+                    (annotation (ignore-errors
+                                  (funcall function candidate)))
+                    ((stringp annotation))
+                    ((not (string-empty-p annotation))))
+          (string-trim (concat candidate annotation))))))
+
+(defun vertico-buffer-frame--completion-group (candidate metadata)
+  "Return completion group for CANDIDATE using METADATA."
+  (when-let* ((function (completion-metadata-get metadata 'group-function))
+              (group (ignore-errors
+                       (funcall function
+                                (vertico-buffer-frame--candidate-string
+                                 candidate)
+                                nil)))
+              ((stringp group))
+              ((not (string-empty-p group))))
+    group))
+
+(defun vertico-buffer-frame-preview-metadata (candidate)
+  "Return generic preview text for CANDIDATE from completion metadata.
+This uses Emacs' built-in `affixation-function', `annotation-function', and
+`group-function' metadata when a completion table provides them."
+  (when-let* ((metadata (vertico-buffer-frame--completion-metadata-for-state)))
+    (let* ((candidate-string (vertico-buffer-frame--candidate-string candidate))
+           (group (vertico-buffer-frame--completion-group candidate metadata))
+           (affix (vertico-buffer-frame--completion-affix
+                   candidate metadata)))
+      (when (or group affix)
+        (string-join
+         (delq nil
+               (list candidate-string
+                     ""
+                     (and group (format "Group: %s" group))
+                     (and affix (format "Display: %s" affix))))
+         "\n")))))
 
 (defun vertico-buffer-frame-preview-command (candidate)
   "Return command documentation preview for CANDIDATE."
@@ -298,6 +426,48 @@ minibuffer completion state."
     (or (vertico-buffer-frame-preview-function (symbol-name symbol))
         (vertico-buffer-frame-preview-variable (symbol-name symbol))
         (format "%s" symbol))))
+
+(defun vertico-buffer-frame-preview-color (candidate)
+  "Return color preview for CANDIDATE."
+  (let* ((color (vertico-buffer-frame--candidate-string candidate))
+         (values (ignore-errors (color-values color))))
+    (when values
+      (let* ((components (mapcar (lambda (value)
+                                   (round (/ value 257.0)))
+                                 values))
+             (hex (apply #'format "#%02X%02X%02X" components))
+             (swatch (propertize "        " 'face `(:background ,color))))
+        (format "%s %s\n\nRGB: %s\n16-bit: %S"
+                swatch color hex values)))))
+
+(defun vertico-buffer-frame-preview-environment-variable (candidate)
+  "Return environment variable preview for CANDIDATE."
+  (let* ((name (vertico-buffer-frame--candidate-string candidate))
+         (value (getenv name)))
+    (format "%s\n\n%s"
+            name
+            (if value
+                (format "Value:\n%s" value)
+              "Unset."))))
+
+(defun vertico-buffer-frame-preview-unicode-name (candidate)
+  "Return Unicode character preview for CANDIDATE."
+  (let* ((name (vertico-buffer-frame--candidate-string candidate))
+         (char (char-from-name name t)))
+    (when char
+      (string-join
+       (delq nil
+             (list
+              (or (char-to-name char) name)
+              ""
+              (format "Character: %s" (single-key-description char))
+              (format "Code point: U+%04X" char)
+              (when-let* ((category
+                           (get-char-code-property char 'general-category)))
+                (format "General category: %s" category))
+              (when-let* ((old-name (get-char-code-property char 'old-name)))
+                (format "Old name: %s" old-name))))
+       "\n"))))
 
 (defun vertico-buffer-frame-preview-face (candidate)
   "Return face preview for CANDIDATE."
@@ -422,13 +592,15 @@ pairs relative to POINT.  COLUMNS limits how much of the line is copied."
 CONTENT-LINES is the maximum number of lines to include.  COLUMNS limits each
 line slice.  MATCHES is a list of match begin/end pairs relative to POINT."
   (let ((lines nil)
+        (remaining content-lines)
         (before-lines (/ (1- content-lines) 2)))
     (goto-char point)
     (forward-line (- before-lines))
-    (while (and (< (length lines) content-lines)
+    (while (and (> remaining 0)
                 (not (eobp)))
       (push (vertico-buffer-frame--line-slice point matches columns)
             lines)
+      (setq remaining (1- remaining))
       (forward-line 1))
     (mapconcat #'identity (nreverse lines) "\n")))
 
@@ -711,35 +883,68 @@ Return nil for remote paths so previews do not block on TRAMP I/O."
         (let ((this-command (or vertico-buffer-frame--preview-command
                                 this-command))
               (minibuffer-completion-table
-               (or vertico-buffer-frame--preview-completion-table
-                   minibuffer-completion-table))
+               (if vertico-buffer-frame--preview-completion-context-valid
+                   vertico-buffer-frame--preview-completion-table
+                 minibuffer-completion-table))
               (minibuffer-completion-predicate
-               (or vertico-buffer-frame--preview-completion-predicate
-                   minibuffer-completion-predicate))
+               (if vertico-buffer-frame--preview-completion-context-valid
+                   vertico-buffer-frame--preview-completion-predicate
+                 minibuffer-completion-predicate))
               (completion-extra-properties
-               (or vertico-buffer-frame--preview-completion-extra-properties
-                   completion-extra-properties))
+               (if vertico-buffer-frame--preview-completion-context-valid
+                   vertico-buffer-frame--preview-completion-extra-properties
+                 completion-extra-properties))
               (minibuffer-completing-file-name
-               (or vertico-buffer-frame--preview-completing-file-name
-                   minibuffer-completing-file-name)))
+               (if vertico-buffer-frame--preview-completion-context-valid
+                   vertico-buffer-frame--preview-completing-file-name
+                 minibuffer-completing-file-name)))
           (funcall function candidate))
       (error
        (message "vertico-buffer-frame preview: %s" (error-message-string err))
        nil))))
 
+(defun vertico-buffer-frame--preview-content-while-no-input ()
+  "Return a cons cell (FINISHED . CONTENT) for the current preview.
+FINISHED is nil when Emacs receives input while the preview is being generated."
+  (let ((sentinel (make-symbol "vertico-buffer-frame-preview-done"))
+        content)
+    (if (eq (while-no-input
+              (setq content (vertico-buffer-frame--preview-content))
+              sentinel)
+            sentinel)
+        (cons t content)
+      (cons nil nil))))
+
 (defun vertico-buffer-frame--capture-preview-context ()
   "Capture completion context for delayed preview rendering."
-  (setq-local
-   vertico-buffer-frame--preview-category
-   (vertico-buffer-frame--completion-metadata-category)
-   vertico-buffer-frame--preview-completion-table
-   minibuffer-completion-table
-   vertico-buffer-frame--preview-completion-predicate
-   minibuffer-completion-predicate
-   vertico-buffer-frame--preview-completion-extra-properties
-   completion-extra-properties
-   vertico-buffer-frame--preview-completing-file-name
-   minibuffer-completing-file-name))
+  (let ((input (vertico-buffer-frame--completion-input))
+        (table minibuffer-completion-table)
+        (predicate minibuffer-completion-predicate)
+        (extra-properties completion-extra-properties)
+        (completing-file-name minibuffer-completing-file-name))
+    (unless (vertico-buffer-frame--completion-context-current-p
+             input table predicate extra-properties completing-file-name)
+      (let ((metadata
+             (vertico-buffer-frame--completion-metadata
+              input table predicate extra-properties)))
+        (setq-local
+         vertico-buffer-frame--preview-category
+         (and metadata (completion-metadata-get metadata 'category))
+         vertico-buffer-frame--preview-completion-input
+         input
+         vertico-buffer-frame--preview-completion-table
+         table
+         vertico-buffer-frame--preview-completion-predicate
+         predicate
+         vertico-buffer-frame--preview-completion-extra-properties
+         (vertico-buffer-frame--copy-completion-extra-properties
+          extra-properties)
+         vertico-buffer-frame--preview-completion-metadata
+         metadata
+         vertico-buffer-frame--preview-completion-context-valid
+         t
+         vertico-buffer-frame--preview-completing-file-name
+         completing-file-name)))))
 
 (defun vertico-buffer-frame--cancel-preview-timer (&optional buffer)
   "Cancel the pending preview update timer for BUFFER.
@@ -782,7 +987,8 @@ BUFFER defaults to the current or active minibuffer buffer."
               ((buffer-live-p buffer)))
     (with-current-buffer buffer
       (vertico-buffer-frame--cancel-preview-timer buffer)
-      (setq-local vertico-buffer-frame--last-preview-candidate nil)))
+      (setq-local vertico-buffer-frame--last-preview-candidate nil
+                  vertico-buffer-frame--last-preview-state nil)))
   (let (deleted)
     (dolist (frame (vertico-buffer-frame--preview-frames))
       (when (frame-live-p frame)
@@ -793,6 +999,13 @@ BUFFER defaults to the current or active minibuffer buffer."
     (when deleted
       (redisplay t))))
 
+(defun vertico-buffer-frame--hide-preview-temporarily ()
+  "Hide the preview child frame without deleting it.
+This keeps the child frame reusable when adjacent candidates do not produce
+preview content."
+  (when (frame-live-p vertico-buffer-frame--preview-frame)
+    (make-frame-invisible vertico-buffer-frame--preview-frame t)))
+
 (defun vertico-buffer-frame--reset-preview-window (window)
   "Reset WINDOW viewport to the beginning of its preview buffer."
   (when (window-live-p window)
@@ -801,35 +1014,24 @@ BUFFER defaults to the current or active minibuffer buffer."
       (set-window-start window (point-min) t))
     (set-window-hscroll window 0)))
 
-(defun vertico-buffer-frame--truncate-preview-lines (window)
-  "Limit preview buffer lines to WINDOW's visible width."
-  (when (window-live-p window)
-    (with-current-buffer (window-buffer window)
-      (let ((inhibit-read-only t)
-            (width (max 1 (window-body-width window))))
-        (save-excursion
-          (goto-char (point-min))
-          (while (not (eobp))
-            (let ((end (line-end-position)))
-              (move-to-column width)
-              (when (< (point) end)
-                (delete-region (point) end)))
-            (forward-line 1)))))))
-
 (defun vertico-buffer-frame--show-preview-content (content)
   "Show preview CONTENT in the preview child frame."
-  (if-let* (((and (bound-and-true-p vertico-buffer-frame-mode)
-                  (vertico-buffer-frame--preview-enabled-p
-                   (vertico-buffer-frame--minibuffer-buffer))))
-            (candidate-frame (vertico-buffer-frame--candidate-frame))
-            ((frame-live-p candidate-frame))
-            (content))
+  (let* ((minibuffer-buffer (vertico-buffer-frame--minibuffer-buffer))
+         (enabled (and (bound-and-true-p vertico-buffer-frame-mode)
+                       (vertico-buffer-frame--preview-enabled-p
+                        minibuffer-buffer)))
+         (candidate-frame (and enabled
+                               (vertico-buffer-frame--candidate-frame))))
+    (cond
+     ((and enabled (frame-live-p candidate-frame) content)
       (let* ((preview-buffer (get-buffer-create
                               vertico-buffer-frame--preview-buffer))
              (parameters (vertico-buffer-frame--preview-frame-parameters
                           candidate-frame)))
         (with-current-buffer preview-buffer
-          (let ((inhibit-read-only t))
+          (let ((inhibit-read-only t)
+                (inhibit-modification-hooks t)
+                (buffer-undo-list t))
             (setq-local cursor-type nil
                         truncate-lines t
                         mode-line-format nil
@@ -838,7 +1040,6 @@ BUFFER defaults to the current or active minibuffer buffer."
             (vertico-buffer-frame--insert-preview-content content)))
         (when-let* ((window (vertico-buffer-frame--preview-window
                              preview-buffer parameters)))
-          (vertico-buffer-frame--truncate-preview-lines window)
           (vertico-buffer-frame--reset-preview-window window)
           (setq vertico-buffer-frame--preview-frame (window-frame window))
           (vertico-buffer-frame--hide-window-chrome window)
@@ -847,22 +1048,31 @@ BUFFER defaults to the current or active minibuffer buffer."
           (vertico-buffer-frame--position-pair
            candidate-frame vertico-buffer-frame--preview-frame)
           (vertico-buffer-frame--ensure-frame-visible
-           vertico-buffer-frame--preview-frame)))
-    (vertico-buffer-frame--hide-preview)))
+           vertico-buffer-frame--preview-frame))))
+     ((and enabled (frame-live-p candidate-frame))
+      (vertico-buffer-frame--hide-preview-temporarily))
+     (t
+      (vertico-buffer-frame--hide-preview minibuffer-buffer)))))
 
-(defun vertico-buffer-frame--show-preview ()
+(defun vertico-buffer-frame--show-preview (&optional captured-context)
   "Show preview for the current Vertico candidate."
   (if (vertico-buffer-frame--preview-enabled-p (current-buffer))
       (progn
-        (vertico-buffer-frame--capture-preview-context)
+        (unless captured-context
+          (vertico-buffer-frame--capture-preview-context))
         (when-let* ((candidate (vertico-buffer-frame--current-candidate)))
-          (setq-local vertico-buffer-frame--last-preview-candidate
-                      (vertico-buffer-frame--candidate-key candidate))
-          (vertico-buffer-frame--show-preview-content
-           (vertico-buffer-frame--preview-content))))
+          (let ((candidate-key (vertico-buffer-frame--candidate-key candidate))
+                (result (vertico-buffer-frame--preview-content-while-no-input)))
+            (when (car result)
+              (setq-local vertico-buffer-frame--last-preview-candidate
+                          candidate-key
+                          vertico-buffer-frame--last-preview-state
+                          (if (cdr result) 'content 'empty))
+              (vertico-buffer-frame--show-preview-content (cdr result))))))
     (vertico-buffer-frame--hide-preview (current-buffer))))
 
-(defun vertico-buffer-frame--show-preview-if-current (buffer candidate-key)
+(defun vertico-buffer-frame--show-preview-if-current
+    (buffer candidate-key &optional captured-context)
   "Show preview in BUFFER when CANDIDATE-KEY is still current."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
@@ -872,29 +1082,34 @@ BUFFER defaults to the current or active minibuffer buffer."
                   (candidate (vertico-buffer-frame--current-candidate))
                   ((equal candidate-key
                           (vertico-buffer-frame--candidate-key candidate))))
-        (vertico-buffer-frame--show-preview)))))
+        (vertico-buffer-frame--show-preview captured-context)))))
+
+(defun vertico-buffer-frame--preview-current-p (candidate-key)
+  "Return non-nil when CANDIDATE-KEY already has an up-to-date preview."
+  (and (equal candidate-key vertico-buffer-frame--last-preview-candidate)
+       (pcase vertico-buffer-frame--last-preview-state
+         ('content (frame-live-p vertico-buffer-frame--preview-frame))
+         ('empty t))))
 
 (defun vertico-buffer-frame--schedule-preview ()
   "Schedule a preview update for the current Vertico candidate."
-  (vertico-buffer-frame--capture-preview-context)
   (if (and (vertico-buffer-frame--preview-enabled-p (current-buffer))
            (not vertico-buffer-frame--exiting))
       (if-let* ((candidate (vertico-buffer-frame--current-candidate)))
-          (unless (and (equal (vertico-buffer-frame--candidate-key candidate)
-                              vertico-buffer-frame--last-preview-candidate)
-                       (frame-live-p vertico-buffer-frame--preview-frame))
-            (vertico-buffer-frame--cancel-preview-timer)
-            (let ((delay (max 0 (float vertico-buffer-frame-preview-delay)))
-                  (candidate-key (vertico-buffer-frame--candidate-key candidate))
-                  (buffer (current-buffer)))
-              (if (zerop delay)
-                  (vertico-buffer-frame--show-preview)
-                (setq-local
-                 vertico-buffer-frame--preview-timer
-                 (run-with-idle-timer
-                  delay nil
-                  #'vertico-buffer-frame--show-preview-if-current
-                  buffer candidate-key)))))
+          (let ((candidate-key (vertico-buffer-frame--candidate-key candidate)))
+            (unless (vertico-buffer-frame--preview-current-p candidate-key)
+              (vertico-buffer-frame--cancel-preview-timer)
+              (vertico-buffer-frame--capture-preview-context)
+              (let ((delay (max 0 (float vertico-buffer-frame-preview-delay)))
+                    (buffer (current-buffer)))
+                (if (zerop delay)
+                    (vertico-buffer-frame--show-preview t)
+                  (setq-local
+                   vertico-buffer-frame--preview-timer
+                   (run-with-idle-timer
+                    delay nil
+                    #'vertico-buffer-frame--show-preview-if-current
+                    buffer candidate-key t))))))
         (vertico-buffer-frame--hide-preview))
     (vertico-buffer-frame--hide-preview)))
 
@@ -918,7 +1133,8 @@ BUFFER defaults to the most recent live minibuffer tracked by
                         (vertico-buffer-frame--top-minibuffer-buffer)))
             ((vertico-buffer-frame--live-minibuffer-buffer-p buffer)))
       (with-current-buffer buffer
-        (setq-local vertico-buffer-frame--last-preview-candidate nil)
+        (setq-local vertico-buffer-frame--last-preview-candidate nil
+                    vertico-buffer-frame--last-preview-state nil)
         (if (and (not vertico-buffer-frame--exiting)
                  (vertico-buffer-frame--preview-enabled-p buffer))
             (vertico-buffer-frame--show-preview)

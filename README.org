@@ -111,6 +111,7 @@ Add this directory to ~load-path~, then:
 - ~vertico-buffer-frame-preview-directory-max-entries~
 - ~vertico-buffer-frame-preview-io-timeout~
 - ~vertico-buffer-frame-preview-binary-detect-bytes~
+- ~vertico-buffer-frame-redraw-after-show~
 - ~vertico-buffer-frame-golden-ratio-scale~
 - ~vertico-buffer-frame-tty-cell-height-ratio~
 - ~vertico-buffer-frame-preview-function~
@@ -124,6 +125,7 @@ Example:
         vertico-buffer-frame-preview-layout 'overlay
         vertico-buffer-frame-preview-delay 0.2
         vertico-buffer-frame-preview-io-timeout 0.3
+        vertico-buffer-frame-redraw-after-show nil
         vertico-buffer-frame-golden-ratio-scale 1.00)
 #+end_src
 
@@ -155,10 +157,16 @@ outside the minibuffer, it changes the global default
 
 Built-in preview functions currently cover files, directories, buffers,
 bookmarks, documentation-like categories such as commands, functions, variables,
-symbols and faces, text-like categories such as kill-ring and expressions, and
-location-like candidates from common completion categories such as Consult grep,
-Consult compile errors, Consult Flymake diagnostics, Consult Info, imenu, Org
-headings and xref.
+symbols, faces, environment variables, Unicode names and colors, text-like
+categories such as kill-ring and expressions, and location-like candidates from
+common completion categories such as Consult grep, Consult compile errors,
+Consult Flymake diagnostics, Consult Info, imenu, Org headings and xref.
+
+When a completion table exposes Emacs' standard completion metadata, the
+preview can also use its ~affixation-function~, ~annotation-function~, and
+~group-function~ as a generic fallback.  This gives useful previews to more
+built-in and third-party completion tables without adding package-specific
+advice.
 
 This is intentionally a small experiment scaffold.  Focus handling, placement,
 recursive minibuffers, and frame reuse still need real-world testing.

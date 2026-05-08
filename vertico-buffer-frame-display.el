@@ -24,6 +24,7 @@
 (defvar vertico-buffer-frame-mode)
 (defvar vertico-buffer-frame-preview)
 (defvar vertico-buffer-frame-preview-layout)
+(defvar vertico-buffer-frame-redraw-after-show)
 (defvar vertico-buffer-frame-tty-cell-height-ratio)
 (defvar vertico-buffer-frame--border-width)
 (defvar vertico-buffer-frame--candidate-frame)
@@ -36,6 +37,17 @@
 (defvar vertico-buffer-frame--preview-side-by-side-gap)
 (defvar vertico-buffer-frame--theme-timer)
 (defvar vertico-buffer-frame--window-parameters)
+(defvar x-fast-protocol-requests)
+(defvar x-gtk-resize-child-frames)
+
+(defvar vertico-buffer-frame--gtk-resize-child-frames
+  (let ((case-fold-search t))
+    (and (string-match-p "gtk3" system-configuration-features)
+         (string-match-p "gnome\\|cinnamon"
+                         (or (getenv "XDG_CURRENT_DESKTOP")
+                             (getenv "DESKTOP_SESSION") ""))
+         'resize-mode))
+  "Value bound to `x-gtk-resize-child-frames' while displaying child frames.")
 
 (defun vertico-buffer-frame--compact-alist (alist)
   "Return ALIST without entries whose value is nil."
@@ -56,6 +68,13 @@
                    (assq-delete-all 'minibuffer
                                     (copy-sequence parameters))))
 
+(defun vertico-buffer-frame--changed-frame-parameters (frame parameters)
+  "Return PARAMETERS whose values differ from FRAME's current parameters."
+  (let (changed)
+    (dolist (parameter parameters (nreverse changed))
+      (unless (equal (frame-parameter frame (car parameter)) (cdr parameter))
+        (push parameter changed)))))
+
 (defun vertico-buffer-frame--display-alist (alist parameters)
   "Return display ALIST with child-frame PARAMETERS."
   (let ((alist (assq-delete-all 'window-parameters
@@ -64,6 +83,18 @@
     `((child-frame-parameters . ,parameters)
       (window-parameters . ,vertico-buffer-frame--window-parameters)
       ,@alist)))
+
+(defun vertico-buffer-frame--display-buffer-in-child-frame (buffer alist)
+  "Display BUFFER in a child frame using ALIST with stable frame bindings."
+  (let ((window-min-height 1)
+        (window-min-width 1)
+        (inhibit-redisplay t)
+        (x-fast-protocol-requests t)
+        (x-gtk-resize-child-frames
+         vertico-buffer-frame--gtk-resize-child-frames)
+        (before-make-frame-hook nil)
+        (after-make-frame-functions nil))
+    (display-buffer-in-child-frame buffer alist)))
 
 (defun vertico-buffer-frame--tty-child-frames-p (&optional frame)
   "Return non-nil when FRAME is a TTY frame with child-frame support."
@@ -136,6 +167,7 @@ cell (WIDTH . HEIGHT).  LEFT and TOP are display-unit positions.  SHARE is the
       (border-color . ,(vertico-buffer-frame--border-color))
       (background-color . ,(vertico-buffer-frame--background-color parent))
       (foreground-color . ,(vertico-buffer-frame--foreground-color parent))
+      (font . ,(frame-parameter parent 'font))
       (menu-bar-lines . 0)
       (tab-bar-lines . 0)
       (tool-bar-lines . 0)
@@ -149,6 +181,11 @@ cell (WIDTH . HEIGHT).  LEFT and TOP are display-unit positions.  SHARE is the
       (keep-ratio . t)
       (minibuffer . ,(vertico-buffer-frame--frame-minibuffer-window))
       (share-child-frame . ,share)))
+   '((fullscreen . nil)
+     (cursor-type . nil)
+     (no-special-glyphs . t)
+     (desktop-dont-save . t)
+     (inhibit-double-buffering . t))
    (vertico-buffer-frame--decoration-frame-parameters parent tty-cursor)))
 
 (defun vertico-buffer-frame--face-remapping (parameters)
@@ -464,11 +501,22 @@ When CANDIDATE-FRAME is live, derive the preview size from it."
 (defun vertico-buffer-frame--apply-frame-parameters (frame parameters)
   "Apply current child-frame PARAMETERS to FRAME when FRAME is live."
   (when (frame-live-p frame)
-    (modify-frame-parameters
-     frame (vertico-buffer-frame--mutable-frame-parameters parameters))
+    (when-let* ((changed
+                 (vertico-buffer-frame--changed-frame-parameters
+                  frame
+                  (vertico-buffer-frame--mutable-frame-parameters parameters))))
+      (modify-frame-parameters frame changed))
     (let ((border-color (vertico-buffer-frame--border-color)))
-      (set-face-background 'child-frame-border border-color frame)
-      (set-face-background 'internal-border border-color frame))))
+      (vertico-buffer-frame--set-face-background-if-changed
+       'child-frame-border border-color frame)
+      (vertico-buffer-frame--set-face-background-if-changed
+       'internal-border border-color frame))))
+
+(defun vertico-buffer-frame--set-face-background-if-changed
+    (face color frame)
+  "Set FACE background to COLOR on FRAME unless it is already current."
+  (unless (equal (face-attribute face :background frame 'default) color)
+    (set-face-background face color frame)))
 
 (defun vertico-buffer-frame--hide-window-chrome (window)
   "Hide mode, header, and tab lines in WINDOW."
@@ -484,11 +532,15 @@ When CANDIDATE-FRAME is live, derive the preview size from it."
     (walk-windows #'vertico-buffer-frame--hide-window-chrome nil frame)))
 
 (defun vertico-buffer-frame--ensure-frame-visible (frame)
-  "Make child FRAME visible and redraw it."
+  "Make child FRAME visible.
+When `vertico-buffer-frame-redraw-after-show' is non-nil, also force a redraw."
   (when (frame-live-p frame)
-    (unless (frame-visible-p frame)
-      (make-frame-visible frame))
-    (redraw-frame frame)))
+    (let ((visible (frame-visible-p frame)))
+      (unless visible
+        (make-frame-visible frame))
+      (when (and vertico-buffer-frame-redraw-after-show
+                 (not visible))
+        (redraw-frame frame)))))
 
 (defun vertico-buffer-frame--set-frame-position (frame left top)
   "Set child FRAME position to LEFT and TOP."
@@ -581,12 +633,13 @@ PARAMETERS are frame parameters for the preview frame."
         (let ((delete-frame-functions nil))
           (delete-frame vertico-buffer-frame--preview-frame t)))
       (setq vertico-buffer-frame--preview-frame nil)
-      (when-let* ((window (display-buffer-in-child-frame
-                           buffer
-                           `((inhibit-switch-frame . t)
-                             (window-parameters
-                              . ,vertico-buffer-frame--window-parameters)
-                             (child-frame-parameters . ,parameters)))))
+      (when-let* ((window
+                   (vertico-buffer-frame--display-buffer-in-child-frame
+                    buffer
+                    `((inhibit-switch-frame . t)
+                      (window-parameters
+                       . ,vertico-buffer-frame--window-parameters)
+                      (child-frame-parameters . ,parameters)))))
         (setq vertico-buffer-frame--preview-frame (window-frame window))
         window))))
 
@@ -597,7 +650,9 @@ repositioned after Emacs knows its actual size."
   (when (vertico-buffer-frame--child-frame-supported-p (selected-frame))
     (let* ((parameters (vertico-buffer-frame--child-frame-parameters))
            (alist (vertico-buffer-frame--display-alist alist parameters)))
-      (when-let* ((window (display-buffer-in-child-frame buffer alist)))
+      (when-let* ((window
+                   (vertico-buffer-frame--display-buffer-in-child-frame
+                    buffer alist)))
         (let ((frame (window-frame window)))
           (vertico-buffer-frame--hide-window-chrome window)
           (vertico-buffer-frame--apply-frame-parameters

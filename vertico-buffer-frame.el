@@ -101,6 +101,16 @@ skipped.  Set this to nil or 0 to disable the check."
   :type '(choice (const :tag "Disabled" nil) natnum)
   :group 'vertico-buffer-frame)
 
+(defcustom vertico-buffer-frame-redraw-after-show
+  (not (memq system-type '(windows-nt cygwin)))
+  "When non-nil, force a redraw after making child frames visible.
+Forcing redraws can help on some graphical builds, but it can also make child
+frame preview display noticeably stall on Windows.  The default therefore skips
+the explicit `redraw-frame' call on Windows and relies on Emacs' normal
+redisplay."
+  :type 'boolean
+  :group 'vertico-buffer-frame)
+
 (defcustom vertico-buffer-frame-golden-ratio-scale 1.00
   "Scale factor for golden-ratio child-frame sizing.
 Overlay layout derives its candidate frame from a golden rectangle.
@@ -137,7 +147,11 @@ nil to hide the preview child frame."
     (function . vertico-buffer-frame-preview-function)
     (variable . vertico-buffer-frame-preview-variable)
     (symbol . vertico-buffer-frame-preview-symbol)
+    (symbol-help . vertico-buffer-frame-preview-symbol)
     (face . vertico-buffer-frame-preview-face)
+    (color . vertico-buffer-frame-preview-color)
+    (environment-variable . vertico-buffer-frame-preview-environment-variable)
+    (unicode-name . vertico-buffer-frame-preview-unicode-name)
     (minor-mode . vertico-buffer-frame-preview-command)
     (theme . vertico-buffer-frame-preview-theme)
     (package . vertico-buffer-frame-preview-package)
@@ -221,11 +235,19 @@ refresh the parent preview after they exit.")
 (defvar-local vertico-buffer-frame--last-preview-candidate nil
   "Last candidate rendered in the preview frame.")
 
+(defvar-local vertico-buffer-frame--last-preview-state nil
+  "State of the last rendered preview candidate.
+The value is `content' when preview content was shown, `empty' when preview
+generation completed without content, and nil when no candidate is cached.")
+
 (defvar-local vertico-buffer-frame--preview-category nil
   "Completion category captured for delayed preview rendering.")
 
 (defvar-local vertico-buffer-frame--preview-command nil
   "Command captured for delayed preview rendering.")
+
+(defvar-local vertico-buffer-frame--preview-completion-input nil
+  "Minibuffer input captured for delayed preview rendering.")
 
 (defvar-local vertico-buffer-frame--preview-completion-table nil
   "Completion table captured for delayed preview rendering.")
@@ -235,6 +257,12 @@ refresh the parent preview after they exit.")
 
 (defvar-local vertico-buffer-frame--preview-completion-extra-properties nil
   "`completion-extra-properties' captured for delayed preview rendering.")
+
+(defvar-local vertico-buffer-frame--preview-completion-metadata nil
+  "Completion metadata captured for delayed preview rendering.")
+
+(defvar-local vertico-buffer-frame--preview-completion-context-valid nil
+  "Non-nil when captured completion context can be reused.")
 
 (defvar-local vertico-buffer-frame--preview-completing-file-name nil
   "File completion state captured for delayed preview rendering.")
@@ -356,11 +384,15 @@ positive, otherwise disable it."
     (setq-local vertico-buffer-frame--exiting nil
                 vertico-buffer-frame--candidate-frame-chrome-hidden nil
                 vertico-buffer-frame--last-preview-candidate nil
+                vertico-buffer-frame--last-preview-state nil
                 vertico-buffer-frame--preview-category nil
                 vertico-buffer-frame--preview-command this-command
+                vertico-buffer-frame--preview-completion-input nil
                 vertico-buffer-frame--preview-completion-table nil
                 vertico-buffer-frame--preview-completion-predicate nil
                 vertico-buffer-frame--preview-completion-extra-properties nil
+                vertico-buffer-frame--preview-completion-metadata nil
+                vertico-buffer-frame--preview-completion-context-valid nil
                 vertico-buffer-frame--preview-completing-file-name nil
                 vertico-buffer-frame--preview-enabled
                 vertico-buffer-frame-preview
