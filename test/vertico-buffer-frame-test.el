@@ -4,6 +4,15 @@
 
 ;;; Code:
 
+(eval-and-compile
+  (add-to-list 'load-path
+               (file-name-directory
+                (directory-file-name
+                 (file-name-directory
+                  (or load-file-name
+                      (bound-and-true-p byte-compile-current-file)
+                      buffer-file-name))))))
+
 (require 'cl-lib)
 (require 'ert)
 (require 'bookmark)
