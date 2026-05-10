@@ -117,6 +117,7 @@ Add this directory to ~load-path~, then:
 - ~vertico-buffer-frame-preview-function~
 - ~vertico-buffer-frame-preview-category-functions~
 - ~vertico-buffer-frame-preview-command-functions~
+- ~vertico-buffer-frame-embark-display-same-window~
 
 Example:
 

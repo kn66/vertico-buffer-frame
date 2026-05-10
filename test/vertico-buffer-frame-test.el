@@ -68,6 +68,84 @@
     (should vertico-buffer-mode)
     (should (equal vertico-buffer-display-action '(old-display-action)))))
 
+(ert-deftest vertico-buffer-frame-embark-command-captures-source-window ()
+  (let ((vertico-buffer-frame-mode t)
+        (vertico-buffer-frame-embark-display-same-window t)
+        (source (selected-window))
+        captured)
+    (cl-letf (((symbol-function 'minibufferp)
+               (lambda () t))
+              ((symbol-function 'minibuffer-selected-window)
+               (lambda () source)))
+      (vertico-buffer-frame--embark-command-advice
+       (lambda ()
+         (setq captured vertico-buffer-frame--embark-display-window)))
+      (should (eq captured source)))))
+
+(ert-deftest vertico-buffer-frame-embark-source-skips-recursive-minibuffer-window ()
+  (let ((source (selected-window))
+        (minibuffer-window 'minibuffer-window))
+    (with-temp-buffer
+      (setq-local vertico-buffer-frame--source-window source)
+      (let ((vertico-buffer-frame--minibuffer-buffers (list (current-buffer)))
+            (orig-window-live-p (symbol-function 'window-live-p))
+            (orig-window-minibuffer-p (symbol-function 'window-minibuffer-p)))
+        (cl-letf (((symbol-function 'minibuffer-selected-window)
+                   (lambda () minibuffer-window))
+                  ((symbol-function 'window-live-p)
+                   (lambda (window)
+                     (or (eq window minibuffer-window)
+                         (funcall orig-window-live-p window))))
+                  ((symbol-function 'window-minibuffer-p)
+                   (lambda (window)
+                     (if (eq window minibuffer-window)
+                         t
+                       (funcall orig-window-minibuffer-p window)))))
+          (should (eq (vertico-buffer-frame--current-source-window)
+                      source)))))))
+
+(ert-deftest vertico-buffer-frame-embark-deferred-display-reuses-source-window ()
+  (let ((vertico-buffer-frame-mode t)
+        (vertico-buffer-frame-embark-display-same-window t)
+        called-in)
+    (let* ((source (selected-window))
+           (other (split-window-right))
+           (vertico-buffer-frame--embark-display-window source))
+      (unwind-protect
+          (progn
+            (select-window other)
+            (vertico-buffer-frame--embark-run-after-command-advice
+             (lambda (fn &rest args)
+               (should-not args)
+               (funcall fn))
+             (lambda ()
+               (setq called-in (selected-window))))
+            (should (eq called-in source)))
+        (delete-other-windows)))))
+
+(ert-deftest vertico-buffer-frame-embark-command-forces-new-buffer-display ()
+  (let ((vertico-buffer-frame-mode t)
+        (vertico-buffer-frame-embark-display-same-window t)
+        buffer shown)
+    (unwind-protect
+        (let ((source (selected-window)))
+          (cl-letf (((symbol-function 'pop-to-buffer)
+                     (lambda (buffer-or-name &rest _)
+                       (setq shown (list buffer-or-name
+                                         (selected-window)))))
+                    ((symbol-function 'run-at-time)
+                     (lambda (_time _repeat function &rest args)
+                       (apply function args))))
+            (catch 'quit
+              (vertico-buffer-frame--embark-command-advice
+               (lambda ()
+                 (setq buffer
+                       (get-buffer-create "*Embark Export: forced*"))
+                 (throw 'quit t)))))
+          (should (equal shown (list buffer source))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest vertico-buffer-frame-supports-tty-child-frames ()
   (let ((noninteractive nil)
         (emacs-basic-display nil))

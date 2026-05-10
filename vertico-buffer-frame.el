@@ -183,6 +183,16 @@ Each preview function is called with the current candidate string."
   :type '(alist :key-type symbol :value-type function)
   :group 'vertico-buffer-frame)
 
+(defcustom vertico-buffer-frame-embark-display-same-window t
+  "When non-nil, run Embark export display from the source window.
+
+This keeps `embark-export' and `embark-collect' close to normal Vertico
+behavior after the Vertico child frame closes.  The final display still uses
+Embark's normal `pop-to-buffer' path, so user entries in `display-buffer-alist'
+continue to take precedence."
+  :type 'boolean
+  :group 'vertico-buffer-frame)
+
 (defface vertico-buffer-frame-preview-line
   '((t :inherit highlight))
   "Face used to highlight the current preview line."
@@ -199,6 +209,11 @@ Each preview function is called with the current candidate string."
   "List containing the previous value of `vertico-buffer-display-action'.")
 (defvar vertico-buffer-frame--saved-buffer-mode nil
   "List containing whether `vertico-buffer-mode' was enabled before setup.")
+(defvar vertico-buffer-frame--embark-buffer-regexp
+  "\\`\\*Embark \\(?:Collect\\|Live\\|Export\\)"
+  "Regexp matching Embark buffers managed by `vertico-buffer-frame'.")
+(defvar vertico-buffer-frame--embark-display-window nil
+  "Window where Embark export and collect buffers should be shown.")
 (defvar vertico-buffer-frame--theme-timer nil
   "Timer used to refresh child frame colors after theme changes.")
 (defvar vertico-buffer-frame--minibuffer-buffers nil
@@ -228,6 +243,9 @@ refresh the parent preview after they exit.")
 
 (defvar-local vertico-buffer-frame--candidate-frame-chrome-hidden nil
   "Non-nil when chrome has been hidden for the current candidate frame.")
+
+(defvar-local vertico-buffer-frame--source-window nil
+  "Original non-minibuffer window for the current minibuffer session.")
 
 (defvar-local vertico-buffer-frame--preview-timer nil
   "Timer used to debounce preview updates for the current minibuffer.")
@@ -315,6 +333,29 @@ generation completed without content, and nil when no candidate is cached.")
       (vertico-buffer-frame--active-minibuffer-buffer)
       (vertico-buffer-frame--top-minibuffer-buffer)))
 
+(defun vertico-buffer-frame--live-source-window-p (window)
+  "Return non-nil when WINDOW is a live non-minibuffer window."
+  (and (window-live-p window)
+       (not (window-minibuffer-p window))))
+
+(defun vertico-buffer-frame--minibuffer-source-window (&optional buffer)
+  "Return the original non-minibuffer window for minibuffer BUFFER."
+  (when (buffer-live-p buffer)
+    (let ((window (buffer-local-value 'vertico-buffer-frame--source-window
+                                      buffer)))
+      (and (vertico-buffer-frame--live-source-window-p window)
+           window))))
+
+(defun vertico-buffer-frame--current-source-window ()
+  "Return the best original non-minibuffer window for the current context."
+  (or (and (vertico-buffer-frame--live-source-window-p
+            (minibuffer-selected-window))
+           (minibuffer-selected-window))
+      (seq-some #'vertico-buffer-frame--minibuffer-source-window
+                vertico-buffer-frame--minibuffer-buffers)
+      (and (vertico-buffer-frame--live-source-window-p (selected-window))
+           (selected-window))))
+
 (defun vertico-buffer-frame--preview-enabled-p (&optional buffer)
   "Return non-nil when preview is enabled for BUFFER.
 When BUFFER has no minibuffer-local preview state, fall back to
@@ -383,6 +424,8 @@ positive, otherwise disable it."
     (vertico-buffer-frame--remember-minibuffer-buffer (current-buffer))
     (setq-local vertico-buffer-frame--exiting nil
                 vertico-buffer-frame--candidate-frame-chrome-hidden nil
+                vertico-buffer-frame--source-window
+                (vertico-buffer-frame--current-source-window)
                 vertico-buffer-frame--last-preview-candidate nil
                 vertico-buffer-frame--last-preview-state nil
                 vertico-buffer-frame--preview-category nil
@@ -406,6 +449,104 @@ positive, otherwise disable it."
               #'vertico-buffer-frame--minibuffer-exit
               nil 'local)))
 
+(defun vertico-buffer-frame--embark-display-enabled-p ()
+  "Return non-nil when Embark buffers should be forced to the source window."
+  (and (bound-and-true-p vertico-buffer-frame-mode)
+       vertico-buffer-frame-embark-display-same-window))
+
+(defun vertico-buffer-frame--embark-selected-window ()
+  "Return the window selected before the active minibuffer, if any."
+  (vertico-buffer-frame--current-source-window))
+
+(defun vertico-buffer-frame--embark-command-advice (orig &rest args)
+  "Run Embark command ORIG with the source window captured."
+  (let ((window (and (vertico-buffer-frame--embark-display-enabled-p)
+                     (vertico-buffer-frame--embark-selected-window)))
+        (before (vertico-buffer-frame--embark-buffers)))
+    (if window
+        (let ((vertico-buffer-frame--embark-display-window window))
+          (unwind-protect
+              (apply orig args)
+            (when-let* ((buffer
+                         (vertico-buffer-frame--embark-new-buffer before)))
+              (vertico-buffer-frame--embark-show-buffer-later
+               buffer window))))
+      (apply orig args))))
+
+(defun vertico-buffer-frame--embark-run-after-command-advice
+    (orig fn &rest args)
+  "Run deferred Embark function FN in the captured source window."
+  (if (and (vertico-buffer-frame--embark-display-enabled-p)
+           (window-live-p vertico-buffer-frame--embark-display-window))
+      (let ((window vertico-buffer-frame--embark-display-window))
+        (funcall orig
+                 (lambda ()
+                   (when (window-live-p window)
+                     (select-window window))
+                   (apply fn args))))
+    (apply orig fn args)))
+
+(defun vertico-buffer-frame--embark-buffer-p (buffer-or-name)
+  "Return non-nil when BUFFER-OR-NAME names an Embark export buffer."
+  (and buffer-or-name
+       (string-match-p vertico-buffer-frame--embark-buffer-regexp
+                       (if (bufferp buffer-or-name)
+                           (buffer-name buffer-or-name)
+                         buffer-or-name))))
+
+(defun vertico-buffer-frame--embark-buffers ()
+  "Return live Embark export and collect buffers."
+  (seq-filter #'vertico-buffer-frame--embark-buffer-p (buffer-list)))
+
+(defun vertico-buffer-frame--embark-new-buffer (before)
+  "Return the newest Embark buffer not present in BEFORE."
+  (seq-find (lambda (buffer)
+              (and (vertico-buffer-frame--embark-buffer-p buffer)
+                   (not (memq buffer before))))
+            (buffer-list)))
+
+(defun vertico-buffer-frame--embark-show-buffer (buffer window)
+  "Show Embark BUFFER in WINDOW when both are still live."
+  (when (and (buffer-live-p buffer)
+             (vertico-buffer-frame--live-source-window-p window))
+    (select-window window)
+    (pop-to-buffer buffer)))
+
+(defun vertico-buffer-frame--embark-show-buffer-later (buffer window)
+  "Show Embark BUFFER in WINDOW after minibuffer cleanup settles."
+  (when (and (buffer-live-p buffer)
+             (vertico-buffer-frame--live-source-window-p window))
+    (run-at-time 0 nil #'vertico-buffer-frame--embark-show-buffer
+                 buffer window)
+    (run-at-time 0.05 nil #'vertico-buffer-frame--embark-show-buffer
+                 buffer window)))
+
+(defun vertico-buffer-frame--advice-add (symbol where function)
+  "Add FUNCTION as advice to SYMBOL at WHERE unless it is already present."
+  (when (and (fboundp symbol)
+             (not (advice-member-p function symbol)))
+    (advice-add symbol where function)))
+
+(defun vertico-buffer-frame--install-embark-advice ()
+  "Install Embark compatibility advice when Embark is loaded."
+  (with-eval-after-load 'embark
+    (when (bound-and-true-p vertico-buffer-frame-mode)
+      (dolist (symbol '(embark-export embark-collect embark-live))
+        (vertico-buffer-frame--advice-add
+         symbol :around #'vertico-buffer-frame--embark-command-advice))
+      (vertico-buffer-frame--advice-add
+       'embark--run-after-command
+       :around #'vertico-buffer-frame--embark-run-after-command-advice))))
+
+(defun vertico-buffer-frame--remove-embark-advice ()
+  "Remove Embark compatibility advice."
+  (dolist (symbol '(embark-export embark-collect embark-live))
+    (when (fboundp symbol)
+      (advice-remove symbol #'vertico-buffer-frame--embark-command-advice)))
+  (when (fboundp 'embark--run-after-command)
+    (advice-remove 'embark--run-after-command
+                   #'vertico-buffer-frame--embark-run-after-command-advice)))
+
 (defun vertico-buffer-frame--enable ()
   "Enable `vertico-buffer-frame-mode' internals."
   (unless vertico-buffer-frame--saved-display-action
@@ -422,6 +563,7 @@ positive, otherwise disable it."
             #'vertico-buffer-frame--theme-change-advice)
   (add-hook 'disable-theme-functions
             #'vertico-buffer-frame--theme-change-advice)
+  (vertico-buffer-frame--install-embark-advice)
   (vertico-buffer-mode 1))
 
 (defun vertico-buffer-frame--cancel-theme-timer ()
@@ -455,6 +597,7 @@ positive, otherwise disable it."
                #'vertico-buffer-frame--theme-change-advice)
   (vertico-buffer-frame--cancel-theme-timer)
   (vertico-buffer-frame--hide-preview)
+  (vertico-buffer-frame--remove-embark-advice)
   (vertico-buffer-frame--restore-display-action)
   (vertico-buffer-frame--restore-buffer-mode))
 
@@ -466,6 +609,9 @@ positive, otherwise disable it."
   (if vertico-buffer-frame-mode
       (vertico-buffer-frame--enable)
     (vertico-buffer-frame--disable)))
+
+(when (bound-and-true-p vertico-buffer-frame-mode)
+  (vertico-buffer-frame--install-embark-advice))
 
 (provide 'vertico-buffer-frame)
 ;;; vertico-buffer-frame.el ends here
