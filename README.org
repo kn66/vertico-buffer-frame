@@ -158,10 +158,15 @@ outside the minibuffer, it changes the global default
 
 Built-in preview functions currently cover files, directories, buffers,
 bookmarks, documentation-like categories such as commands, functions, variables,
-symbols, faces, environment variables, Unicode names and colors, text-like
-categories such as kill-ring and expressions, and location-like candidates from
-common completion categories such as Consult grep, Consult compile errors,
-Consult Flymake diagnostics, Consult Info, imenu, Org headings and xref.
+symbols, faces, Custom groups, environment variables, Unicode names, Info menu
+items, calendar months and colors, text-like categories such as kill-ring,
+dabbrev, ecomplete, email, BibTeX keys and expressions, and location-like
+candidates from common completion categories such as Consult grep, Consult
+compile errors, Consult Flymake diagnostics, Consult Info, imenu, Org headings
+and xref.  Built-in Customize commands such as ~customize-option~,
+~customize-face~, ~customize-group~ and ~customize-mode~ are also mapped to the
+same preview functions even when their completion tables do not expose a
+category.
 
 When a completion table exposes Emacs' standard completion metadata, the
 preview can also use its ~affixation-function~, ~annotation-function~, and

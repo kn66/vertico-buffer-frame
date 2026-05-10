@@ -30,9 +30,15 @@
 (declare-function xref-item-location "xref")
 (declare-function xref-location-group "xref")
 (declare-function xref-location-marker "xref")
+(declare-function calendar-last-day-of-month "calendar")
+(declare-function custom-group-of-mode "cus-edit")
+(declare-function custom-load-symbol "cus-edit")
+(declare-function Info-extract-menu-item "info")
+(declare-function Info-goto-node "info")
 (declare-function vertico-buffer-frame--active-minibuffer-buffer "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--apply-frame-parameters "vertico-buffer-frame-display")
 (declare-function vertico-buffer-frame--candidate-frame "vertico-buffer-frame-display")
+(declare-function vertico-buffer-frame--current-source-window "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--ensure-frame-visible "vertico-buffer-frame-display")
 (declare-function vertico-buffer-frame--face-remapping "vertico-buffer-frame-display")
 (declare-function vertico-buffer-frame--hide-window-chrome "vertico-buffer-frame-display")
@@ -48,6 +54,10 @@
 (declare-function vertico-buffer-frame--top-minibuffer-buffer "vertico-buffer-frame")
 
 (defvar bookmark-alist)
+(defvar calendar-month-name-array)
+(defvar Info-complete-menu-buffer)
+(defvar Info-current-file)
+(defvar Info-current-node)
 (defvar imenu-space-replacement)
 (defvar package-alist)
 (defvar package-archive-contents)
@@ -429,6 +439,58 @@ This uses Emacs' built-in `affixation-function', `annotation-function', and
         (vertico-buffer-frame-preview-variable (symbol-name symbol))
         (format "%s" symbol))))
 
+(defun vertico-buffer-frame--custom-group-p (symbol)
+  "Return non-nil when SYMBOL names or can load a Custom group."
+  (and symbol
+       (or (get symbol 'custom-group)
+           (and (get symbol 'custom-loads)
+                (not (get symbol 'custom-autoload))))))
+
+(defun vertico-buffer-frame--custom-group-summary (symbol type label)
+  "Return a summary line for Custom group SYMBOL entries of TYPE.
+LABEL is the human-readable label used at the start of the summary."
+  (when-let* ((items
+               (seq-keep
+                (lambda (item)
+                  (and (consp item)
+                       (eq (cadr item) type)
+                       (format "%s" (car item))))
+                (get symbol 'custom-group))))
+    (format "%s: %s%s"
+            label
+            (string-join (seq-take items 5) ", ")
+            (if (> (length items) 5) ", ..." ""))))
+
+(defun vertico-buffer-frame-preview-custom-group (candidate)
+  "Return Custom group documentation preview for CANDIDATE."
+  (when (require 'cus-edit nil t)
+    (when-let* ((symbol (vertico-buffer-frame--candidate-symbol candidate))
+                ((vertico-buffer-frame--custom-group-p symbol)))
+      (ignore-errors
+        (custom-load-symbol symbol))
+      (vertico-buffer-frame--documentation
+       (format "%s" symbol)
+       (or (documentation-property symbol 'group-documentation t)
+           "Undocumented customization group.")
+       (delq nil
+             (list
+              "Type: Custom group"
+              (vertico-buffer-frame--custom-group-summary
+               symbol 'custom-group "Groups")
+              (vertico-buffer-frame--custom-group-summary
+               symbol 'custom-variable "Options")
+              (vertico-buffer-frame--custom-group-summary
+               symbol 'custom-face "Faces")))))))
+
+(defun vertico-buffer-frame-preview-custom-mode (candidate)
+  "Return Custom group preview for mode CANDIDATE."
+  (when (require 'cus-edit nil t)
+    (when-let* ((symbol (vertico-buffer-frame--candidate-symbol candidate)))
+      (or (when-let* (((fboundp 'custom-group-of-mode))
+                      (group (custom-group-of-mode symbol)))
+            (vertico-buffer-frame-preview-custom-group (symbol-name group)))
+          (vertico-buffer-frame-preview-command candidate)))))
+
 (defun vertico-buffer-frame-preview-color (candidate)
   "Return color preview for CANDIDATE."
   (let* ((color (vertico-buffer-frame--candidate-string candidate))
@@ -470,6 +532,23 @@ This uses Emacs' built-in `affixation-function', `annotation-function', and
               (when-let* ((old-name (get-char-code-property char 'old-name)))
                 (format "Old name: %s" old-name))))
        "\n"))))
+
+(defun vertico-buffer-frame-preview-calendar-month (candidate)
+  "Return calendar month preview for CANDIDATE."
+  (when (require 'calendar nil t)
+    (let* ((name (vertico-buffer-frame--candidate-string candidate))
+           (months (append calendar-month-name-array nil))
+           (index (seq-position months name #'string-equal)))
+      (when index
+        (let* ((month (1+ index))
+               (common-days (calendar-last-day-of-month month 2025))
+               (leap-days (calendar-last-day-of-month month 2024)))
+          (format "%s\n\nMonth number: %d\nDays: %s"
+                  name
+                  month
+                  (if (= common-days leap-days)
+                      (number-to-string common-days)
+                    (format "%d or %d" common-days leap-days))))))))
 
 (defun vertico-buffer-frame-preview-face (candidate)
   "Return face preview for CANDIDATE."
@@ -818,6 +897,69 @@ Return nil for remote paths so previews do not block on TRAMP I/O."
   (when-let* ((marker (and (stringp candidate)
                            (get-text-property 0 'org-marker candidate))))
     (vertico-buffer-frame--position-preview marker)))
+
+(defun vertico-buffer-frame--info-source-buffer ()
+  "Return the Info buffer that owns the current menu completion."
+  (or (and (boundp 'Info-complete-menu-buffer)
+           (buffer-live-p Info-complete-menu-buffer)
+           Info-complete-menu-buffer)
+      (when-let* ((window (vertico-buffer-frame--current-source-window))
+                  ((window-live-p window))
+                  (buffer (window-buffer window)))
+        (with-current-buffer buffer
+          (and (bound-and-true-p Info-current-node)
+               buffer)))
+      (and (bound-and-true-p Info-current-node)
+           (current-buffer))))
+
+(defun vertico-buffer-frame--info-file-name ()
+  "Return a concise name for the current Info file."
+  (cond
+   ((stringp Info-current-file)
+    (file-name-nondirectory Info-current-file))
+   (Info-current-file
+    (format "%s" Info-current-file))
+   (t
+    "Info")))
+
+(defun vertico-buffer-frame--info-menu-title (source target)
+  "Return a preview title for TARGET reached from Info SOURCE."
+  (with-current-buffer source
+    (format "%s\n%s -> %s\n\n"
+            (vertico-buffer-frame--info-file-name)
+            (or Info-current-node "Menu")
+            target)))
+
+(defun vertico-buffer-frame--info-node-preview (source target title)
+  "Return Info TARGET node preview using SOURCE and TITLE."
+  (vertico-buffer-frame--with-io-timeout
+    (let ((clone (with-current-buffer source
+                   (clone-buffer nil nil))))
+      (unwind-protect
+          (with-current-buffer clone
+            (Info-goto-node target)
+            (concat title
+                    (string-trim-left
+                     (buffer-substring-no-properties
+                      (point-min) (point-max)))))
+        (when (buffer-live-p clone)
+          (kill-buffer clone))))))
+
+(defun vertico-buffer-frame-preview-info-menu (candidate)
+  "Return Info menu target preview for CANDIDATE."
+  (when (require 'info nil t)
+    (when-let* ((source (vertico-buffer-frame--info-source-buffer))
+                ((buffer-live-p source))
+                (target
+                 (with-current-buffer source
+                   (ignore-errors
+                     (Info-extract-menu-item
+                      (vertico-buffer-frame--candidate-string candidate))))))
+      (or (ignore-errors
+            (vertico-buffer-frame--info-node-preview
+             source target
+             (vertico-buffer-frame--info-menu-title source target)))
+          (vertico-buffer-frame--info-menu-title source target)))))
 
 (defun vertico-buffer-frame-preview-info (candidate)
   "Return Info search preview content for CANDIDATE."

@@ -146,6 +146,47 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest vertico-buffer-frame-mode-registers-after-load-hook ()
+  (vertico-buffer-frame-test--with-mode-cleanup
+    (let ((after-load-functions nil))
+      (vertico-buffer-frame-mode 1)
+      (should (memq #'vertico-buffer-frame--maybe-install-embark-advice
+                    after-load-functions))
+      (vertico-buffer-frame-mode -1)
+      (should-not (memq #'vertico-buffer-frame--maybe-install-embark-advice
+                        after-load-functions)))))
+
+(ert-deftest vertico-buffer-frame-embark-advice-installs-after-load ()
+  (let ((vertico-buffer-frame-mode t)
+        added)
+    (cl-letf (((symbol-function 'featurep)
+               (lambda (feature &optional _subfeature)
+                 (eq feature 'embark)))
+              ((symbol-function 'fboundp)
+               (lambda (symbol)
+                 (memq symbol
+                       '(embark-export embark-collect embark-live
+                         embark--run-after-command))))
+              ((symbol-function 'advice-member-p)
+               (lambda (&rest _) nil))
+              ((symbol-function 'advice-add)
+               (lambda (symbol where function &rest _)
+                 (push (list symbol where function) added))))
+      (vertico-buffer-frame--maybe-install-embark-advice)
+      (should (equal (nreverse added)
+                     '((embark-export
+                        :around
+                        vertico-buffer-frame--embark-command-advice)
+                       (embark-collect
+                        :around
+                        vertico-buffer-frame--embark-command-advice)
+                       (embark-live
+                        :around
+                        vertico-buffer-frame--embark-command-advice)
+                       (embark--run-after-command
+                        :around
+                        vertico-buffer-frame--embark-run-after-command-advice)))))))
+
 (ert-deftest vertico-buffer-frame-supports-tty-child-frames ()
   (let ((noninteractive nil)
         (emacs-basic-display nil))
@@ -779,6 +820,33 @@
 (ert-deftest vertico-buffer-frame-location-returns-nil-for-bare-string ()
   (should-not (vertico-buffer-frame-preview-location "no-property")))
 
+(ert-deftest vertico-buffer-frame-info-menu-preview-uses-target-node ()
+  (require 'info)
+  (let ((clone-buffer nil))
+    (unwind-protect
+        (with-temp-buffer
+          (setq-local Info-current-file "emacs"
+                      Info-current-node "Top")
+          (cl-letf (((symbol-function 'Info-extract-menu-item)
+                     (lambda (menu-item)
+                       (should (equal menu-item "Intro"))
+                       "Introduction"))
+                    ((symbol-function 'clone-buffer)
+                     (lambda (&optional _newname _display-flag &rest _)
+                       (setq clone-buffer
+                             (generate-new-buffer " *vbf-info-clone*"))
+                       clone-buffer))
+                    ((symbol-function 'Info-goto-node)
+                     (lambda (target &rest _)
+                       (should (equal target "Introduction"))
+                       (insert "Target node body."))))
+            (let ((preview (vertico-buffer-frame-preview-info-menu "Intro")))
+              (should (string-match-p "Top -> Introduction" preview))
+              (should (string-match-p "Target node body" preview)))
+            (should-not (buffer-live-p clone-buffer))))
+      (when (buffer-live-p clone-buffer)
+        (kill-buffer clone-buffer)))))
+
 (ert-deftest vertico-buffer-frame-completion-category-uses-emacs-metadata ()
   (let ((minibuffer-completion-table
          (lambda (_string _predicate action)
@@ -854,6 +922,45 @@
   (let ((preview (vertico-buffer-frame-preview-color "red")))
     (should (string-match-p "red" preview))
     (should (string-match-p "#FF0000" preview))))
+
+(ert-deftest vertico-buffer-frame-calendar-month-preview-shows-month-details ()
+  (let ((preview (vertico-buffer-frame-preview-calendar-month "February")))
+    (should (string-match-p "Month number: 2" preview))
+    (should (string-match-p "Days: 28 or 29" preview))))
+
+(ert-deftest vertico-buffer-frame-custom-group-preview-shows-documentation ()
+  (let ((symbol 'vertico-buffer-frame-test-group))
+    (unwind-protect
+        (progn
+          (put symbol 'group-documentation "Group documentation.")
+          (put symbol 'custom-group
+               '((vertico-buffer-frame-test-option custom-variable)
+                 (vertico-buffer-frame-test-face custom-face)))
+          (let ((preview
+                 (vertico-buffer-frame-preview-custom-group
+                  "vertico-buffer-frame-test-group")))
+            (should (string-match-p "Group documentation" preview))
+            (should (string-match-p "Options: .*test-option" preview))
+            (should (string-match-p "Faces: .*test-face" preview))))
+      (dolist (property '(group-documentation custom-group custom-loads
+                          custom-autoload))
+        (put symbol property nil)))))
+
+(ert-deftest vertico-buffer-frame-customize-group-command-uses-custom-preview ()
+  (let ((symbol 'vertico-buffer-frame-test-command-group)
+        (this-command 'customize-group))
+    (unwind-protect
+        (progn
+          (put symbol 'group-documentation "Command group documentation.")
+          (put symbol 'custom-group
+               '((vertico-buffer-frame-test-command-option custom-variable)))
+          (let ((preview
+                 (vertico-buffer-frame-preview-default
+                  "vertico-buffer-frame-test-command-group")))
+            (should (string-match-p "Command group documentation" preview))))
+      (dolist (property '(group-documentation custom-group custom-loads
+                          custom-autoload))
+        (put symbol property nil)))))
 
 (ert-deftest vertico-buffer-frame-captures-completion-context ()
   (let ((predicate (lambda (_candidate) t))

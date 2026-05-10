@@ -152,9 +152,17 @@ nil to hide the preview child frame."
     (color . vertico-buffer-frame-preview-color)
     (environment-variable . vertico-buffer-frame-preview-environment-variable)
     (unicode-name . vertico-buffer-frame-preview-unicode-name)
+    (info-menu . vertico-buffer-frame-preview-info-menu)
+    (calendar-month . vertico-buffer-frame-preview-calendar-month)
     (minor-mode . vertico-buffer-frame-preview-command)
+    (custom-group . vertico-buffer-frame-preview-custom-group)
     (theme . vertico-buffer-frame-preview-theme)
     (package . vertico-buffer-frame-preview-package)
+    (dabbrev . vertico-buffer-frame-preview-string)
+    (ecomplete . vertico-buffer-frame-preview-string)
+    (email . vertico-buffer-frame-preview-string)
+    (bibtex-key . vertico-buffer-frame-preview-string)
+    (bibtex-string . vertico-buffer-frame-preview-string)
     (kill-ring . vertico-buffer-frame-preview-string)
     (expression . vertico-buffer-frame-preview-string)
     (consult-location . vertico-buffer-frame-preview-location)
@@ -177,7 +185,15 @@ Each preview function is called with the current candidate string."
   '((switch-to-buffer . vertico-buffer-frame-preview-buffer)
     (switch-to-buffer-other-window . vertico-buffer-frame-preview-buffer)
     (switch-to-buffer-other-frame . vertico-buffer-frame-preview-buffer)
-    (project-switch-to-buffer . vertico-buffer-frame-preview-buffer))
+    (project-switch-to-buffer . vertico-buffer-frame-preview-buffer)
+    (customize-option . vertico-buffer-frame-preview-variable)
+    (customize-variable . vertico-buffer-frame-preview-variable)
+    (customize-option-other-window . vertico-buffer-frame-preview-variable)
+    (customize-face . vertico-buffer-frame-preview-face)
+    (customize-face-other-window . vertico-buffer-frame-preview-face)
+    (customize-group . vertico-buffer-frame-preview-custom-group)
+    (customize-group-other-window . vertico-buffer-frame-preview-custom-group)
+    (customize-mode . vertico-buffer-frame-preview-custom-mode))
   "Alist of commands and preview functions.
 Each preview function is called with the current candidate string."
   :type '(alist :key-type symbol :value-type function)
@@ -459,7 +475,7 @@ positive, otherwise disable it."
   (vertico-buffer-frame--current-source-window))
 
 (defun vertico-buffer-frame--embark-command-advice (orig &rest args)
-  "Run Embark command ORIG with the source window captured."
+  "Run Embark command ORIG with ARGS and the source window captured."
   (let ((window (and (vertico-buffer-frame--embark-display-enabled-p)
                      (vertico-buffer-frame--embark-selected-window)))
         (before (vertico-buffer-frame--embark-buffers)))
@@ -475,7 +491,8 @@ positive, otherwise disable it."
 
 (defun vertico-buffer-frame--embark-run-after-command-advice
     (orig fn &rest args)
-  "Run deferred Embark function FN in the captured source window."
+  "Run ORIG around deferred Embark function FN with ARGS.
+When a source window has been captured, run FN there."
   (if (and (vertico-buffer-frame--embark-display-enabled-p)
            (window-live-p vertico-buffer-frame--embark-display-window))
       (let ((window vertico-buffer-frame--embark-display-window))
@@ -528,15 +545,19 @@ positive, otherwise disable it."
     (advice-add symbol where function)))
 
 (defun vertico-buffer-frame--install-embark-advice ()
-  "Install Embark compatibility advice when Embark is loaded."
-  (with-eval-after-load 'embark
-    (when (bound-and-true-p vertico-buffer-frame-mode)
-      (dolist (symbol '(embark-export embark-collect embark-live))
-        (vertico-buffer-frame--advice-add
-         symbol :around #'vertico-buffer-frame--embark-command-advice))
+  "Install Embark compatibility advice when Embark is available."
+  (when (and (bound-and-true-p vertico-buffer-frame-mode)
+             (featurep 'embark))
+    (dolist (symbol '(embark-export embark-collect embark-live))
       (vertico-buffer-frame--advice-add
-       'embark--run-after-command
-       :around #'vertico-buffer-frame--embark-run-after-command-advice))))
+       symbol :around #'vertico-buffer-frame--embark-command-advice))
+    (vertico-buffer-frame--advice-add
+     'embark--run-after-command
+     :around #'vertico-buffer-frame--embark-run-after-command-advice)))
+
+(defun vertico-buffer-frame--maybe-install-embark-advice (&rest _)
+  "Install Embark advice after load events when Embark is available."
+  (vertico-buffer-frame--install-embark-advice))
 
 (defun vertico-buffer-frame--remove-embark-advice ()
   "Remove Embark compatibility advice."
@@ -563,6 +584,8 @@ positive, otherwise disable it."
             #'vertico-buffer-frame--theme-change-advice)
   (add-hook 'disable-theme-functions
             #'vertico-buffer-frame--theme-change-advice)
+  (add-hook 'after-load-functions
+            #'vertico-buffer-frame--maybe-install-embark-advice)
   (vertico-buffer-frame--install-embark-advice)
   (vertico-buffer-mode 1))
 
@@ -595,6 +618,8 @@ positive, otherwise disable it."
                #'vertico-buffer-frame--theme-change-advice)
   (remove-hook 'disable-theme-functions
                #'vertico-buffer-frame--theme-change-advice)
+  (remove-hook 'after-load-functions
+               #'vertico-buffer-frame--maybe-install-embark-advice)
   (vertico-buffer-frame--cancel-theme-timer)
   (vertico-buffer-frame--hide-preview)
   (vertico-buffer-frame--remove-embark-advice)
@@ -611,6 +636,8 @@ positive, otherwise disable it."
     (vertico-buffer-frame--disable)))
 
 (when (bound-and-true-p vertico-buffer-frame-mode)
+  (add-hook 'after-load-functions
+            #'vertico-buffer-frame--maybe-install-embark-advice)
   (vertico-buffer-frame--install-embark-advice))
 
 (provide 'vertico-buffer-frame)
