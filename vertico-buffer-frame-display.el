@@ -13,6 +13,7 @@
 (require 'subr-x)
 
 (declare-function vertico-buffer-frame--active-minibuffer-buffer "vertico-buffer-frame")
+(declare-function vertico-buffer-frame--ensure-minibuffer-session "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--minibuffer-buffer "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--preview-enabled-p "vertico-buffer-frame")
 
@@ -20,6 +21,8 @@
 (defvar vertico-buffer-display-action)
 (defvar vertico-buffer-frame-background-color)
 (defvar vertico-buffer-frame-foreground-color)
+(defvar vertico-buffer-frame-alpha)
+(defvar vertico-buffer-frame-alpha-background)
 (defvar vertico-buffer-frame-golden-ratio-scale)
 (defvar vertico-buffer-frame-mode)
 (defvar vertico-buffer-frame-preview)
@@ -29,11 +32,11 @@
 (defvar vertico-buffer-frame--border-width)
 (defvar vertico-buffer-frame--candidate-frame)
 (defvar vertico-buffer-frame--candidate-frame-chrome-hidden)
+(defvar vertico-buffer-frame--candidate-share-key)
 (defvar vertico-buffer-frame--golden-ratio)
 (defvar vertico-buffer-frame--internal-border-width)
 (defvar vertico-buffer-frame--preview-frame)
 (defvar vertico-buffer-frame--preview-frame-name)
-(defvar vertico-buffer-frame--preview-fallback-columns)
 (defvar vertico-buffer-frame--preview-side-by-side-gap)
 (defvar vertico-buffer-frame--theme-timer)
 (defvar vertico-buffer-frame--window-parameters)
@@ -96,6 +99,12 @@
         (after-make-frame-functions nil))
     (display-buffer-in-child-frame buffer alist)))
 
+(defun vertico-buffer-frame--delete-frame (frame)
+  "Delete FRAME when it is live."
+  (when (frame-live-p frame)
+    (let ((delete-frame-functions nil))
+      (delete-frame frame t))))
+
 (defun vertico-buffer-frame--tty-child-frames-p (&optional frame)
   "Return non-nil when FRAME is a TTY frame with child-frame support."
   (and (featurep 'tty-child-frames)
@@ -150,6 +159,13 @@ When TTY-CURSOR is non-nil, request a visible cursor in TTY child frames."
       (child-frame-border-width . ,vertico-buffer-frame--border-width)
       (undecorated . t))))
 
+(defun vertico-buffer-frame--opacity-frame-parameters (&optional frame)
+  "Return child-frame opacity parameters for graphical FRAME."
+  (when (display-graphic-p frame)
+    (vertico-buffer-frame--compact-alist
+     `((alpha . ,vertico-buffer-frame-alpha)
+       (alpha-background . ,vertico-buffer-frame-alpha-background)))))
+
 (defun vertico-buffer-frame--frame-parameters
     (parent name size left top share &optional tty-cursor)
   "Return child-frame parameters.
@@ -185,7 +201,8 @@ cell (WIDTH . HEIGHT).  LEFT and TOP are display-unit positions.  SHARE is the
      (cursor-type . nil)
      (no-special-glyphs . t)
      (desktop-dont-save . t)
-     (inhibit-double-buffering . t))
+     (inhibit-double-buffering . nil))
+   (vertico-buffer-frame--opacity-frame-parameters parent)
    (vertico-buffer-frame--decoration-frame-parameters parent tty-cursor)))
 
 (defun vertico-buffer-frame--face-remapping (parameters)
@@ -410,16 +427,8 @@ lines."
               (frame-char-width candidate-frame)))
           (max 1 (- height-lines top-lines)))))
 
-(defun vertico-buffer-frame--preview-size (candidate-frame)
-  "Return preview frame size for CANDIDATE-FRAME and current layout."
-  (if (vertico-buffer-frame--side-by-side-layout-p)
-      (when-let* ((parent (or (frame-parent candidate-frame) candidate-frame)))
-        (plist-get (vertico-buffer-frame--side-by-side-layout parent)
-                   :preview-size))
-    (vertico-buffer-frame--golden-preview-size candidate-frame)))
-
 (defun vertico-buffer-frame--preview-parent (candidate-frame)
-  "Return parent frame for live CANDIDATE-FRAME."
+  "Return preview parent for live CANDIDATE-FRAME."
   (and (frame-live-p candidate-frame)
        (or (frame-parent candidate-frame) candidate-frame)))
 
@@ -436,60 +445,46 @@ lines."
        (or (plist-get side-layout :preview-size)
            (vertico-buffer-frame--golden-preview-size candidate-frame))))
 
-(defun vertico-buffer-frame--preview-candidate-left
-    (parent candidate-frame side-layout)
-  "Return CANDIDATE-FRAME left position in PARENT using SIDE-LAYOUT."
-  (and (frame-live-p candidate-frame)
-       (or (plist-get side-layout :candidate-left)
-           (vertico-buffer-frame--candidate-left parent candidate-frame))))
-
-(defun vertico-buffer-frame--preview-candidate-top
-    (parent candidate-frame side-layout)
-  "Return CANDIDATE-FRAME top position in PARENT using SIDE-LAYOUT."
-  (and (frame-live-p candidate-frame)
-       (or (plist-get side-layout :candidate-top)
-           (vertico-buffer-frame--candidate-top parent candidate-frame))))
+(defun vertico-buffer-frame--preview-top-offset (candidate-frame)
+  "Return preview top offset for CANDIDATE-FRAME in display units."
+  (* (frame-char-height candidate-frame)
+     (vertico-buffer-frame--golden-preview-top-lines candidate-frame)))
 
 (defun vertico-buffer-frame--preview-left
-    (candidate-frame side-layout candidate-left preview-units)
-  "Return preview left position for CANDIDATE-FRAME.
-SIDE-LAYOUT is the active side-by-side layout, or nil.  CANDIDATE-LEFT is the
-candidate frame's left position, and PREVIEW-UNITS is the preview size in
-display units."
-  (or (plist-get side-layout :preview-left)
-      (and candidate-left
-           preview-units
-           (max candidate-left
-                (- (+ candidate-left (frame-pixel-width candidate-frame))
-                   (car preview-units))))))
+    (candidate-frame candidate-left preview-size)
+  "Return overlay preview left position for CANDIDATE-FRAME.
+CANDIDATE-LEFT is the candidate frame's left position in its parent.
+PREVIEW-SIZE is the preview frame size in columns and lines."
+  (max candidate-left
+       (- (+ candidate-left (frame-pixel-width candidate-frame))
+          (* (frame-char-width candidate-frame) (car preview-size)))))
 
-(defun vertico-buffer-frame--preview-top
-    (candidate-frame side-layout candidate-top)
-  "Return preview top position for CANDIDATE-FRAME.
-SIDE-LAYOUT is the active side-by-side layout, or nil.  CANDIDATE-TOP is the
-candidate frame's top position."
-  (or (plist-get side-layout :preview-top)
-      (and candidate-top
-           (+ candidate-top
-              (vertico-buffer-frame--preview-top-offset candidate-frame)))))
+(defun vertico-buffer-frame--preview-top (candidate-frame candidate-top)
+  "Return overlay preview top position for CANDIDATE-FRAME.
+CANDIDATE-TOP is the candidate frame's top position in its parent."
+  (+ candidate-top
+     (vertico-buffer-frame--preview-top-offset candidate-frame)))
 
-(defun vertico-buffer-frame--preview-height-lines ()
-  "Return current preview frame height in lines."
-  (or (and (frame-live-p vertico-buffer-frame--preview-frame)
-           (vertico-buffer-frame--frame-height-lines
-            vertico-buffer-frame--preview-frame))
-      (when-let* ((candidate-frame (vertico-buffer-frame--candidate-frame))
-                  ((frame-live-p candidate-frame)))
-        (cdr (vertico-buffer-frame--preview-size candidate-frame)))))
+(defun vertico-buffer-frame--current-candidate-share-key (&optional buffer)
+  "Return the candidate child-frame sharing key for BUFFER."
+  (let ((buffer (or buffer (vertico-buffer-frame--minibuffer-buffer))))
+    (if (buffer-live-p buffer)
+        (with-current-buffer
+            (or (vertico-buffer-frame--ensure-minibuffer-session buffer)
+                buffer)
+          (or vertico-buffer-frame--candidate-share-key
+              'vertico-buffer-frame))
+      'vertico-buffer-frame)))
 
-(defun vertico-buffer-frame--preview-content-columns ()
-  "Return column count to copy for each line in position previews."
-  (or (and (frame-live-p vertico-buffer-frame--preview-frame)
-           (frame-parameter vertico-buffer-frame--preview-frame 'width))
-      (when-let* ((candidate-frame (vertico-buffer-frame--candidate-frame))
-                  ((frame-live-p candidate-frame)))
-        (car (vertico-buffer-frame--preview-size candidate-frame)))
-      vertico-buffer-frame--preview-fallback-columns))
+(defun vertico-buffer-frame--candidate-share-key-p (share &optional buffer)
+  "Return non-nil when SHARE belongs to a candidate frame.
+When BUFFER is non-nil, require SHARE to match BUFFER's session key."
+  (if buffer
+      (equal share (vertico-buffer-frame--current-candidate-share-key
+                    buffer))
+    (or (eq share 'vertico-buffer-frame)
+        (and (consp share)
+             (eq (car share) 'vertico-buffer-frame)))))
 
 (defun vertico-buffer-frame--child-frame-parameters ()
   "Return frame parameters for the Vertico child frame."
@@ -511,7 +506,7 @@ candidate frame's top position."
                   (cdr position))))
     (vertico-buffer-frame--frame-parameters
      parent "vertico-buffer-frame" candidate-size left top
-     'vertico-buffer-frame t)))
+     (vertico-buffer-frame--current-candidate-share-key) t)))
 
 (defun vertico-buffer-frame--preview-frame-parameters (&optional candidate-frame)
   "Return frame parameters for the preview child frame.
@@ -522,23 +517,27 @@ When CANDIDATE-FRAME is live, derive the preview size from it."
           (vertico-buffer-frame--preview-size-for-frame
            candidate-frame side-layout))
          (candidate-left
-          (vertico-buffer-frame--preview-candidate-left
-           parent candidate-frame side-layout))
+          (and parent
+               (not side-layout)
+               (vertico-buffer-frame--candidate-left parent candidate-frame)))
          (candidate-top
-          (vertico-buffer-frame--preview-candidate-top
-           parent candidate-frame side-layout))
-         (preview-units (and preview-size parent
-                             (vertico-buffer-frame--size-display-units
-                              parent preview-size)))
+          (and parent
+               (not side-layout)
+               (vertico-buffer-frame--candidate-top parent candidate-frame)))
          (preview-left
-          (vertico-buffer-frame--preview-left
-           candidate-frame side-layout candidate-left preview-units))
+          (or (plist-get side-layout :preview-left)
+              (and preview-size candidate-left
+                   (vertico-buffer-frame--preview-left
+                    candidate-frame candidate-left preview-size))))
          (preview-top
-          (vertico-buffer-frame--preview-top
-           candidate-frame side-layout candidate-top)))
+          (or (plist-get side-layout :preview-top)
+              (and candidate-top
+                   (vertico-buffer-frame--preview-top
+                    candidate-frame candidate-top)))))
     (vertico-buffer-frame--frame-parameters
      parent vertico-buffer-frame--preview-frame-name preview-size
-     preview-left preview-top 'vertico-buffer-frame-preview)))
+     preview-left preview-top
+     'vertico-buffer-frame-preview)))
 
 (defun vertico-buffer-frame--apply-frame-parameters (frame parameters)
   "Apply current child-frame PARAMETERS to FRAME when FRAME is live."
@@ -548,6 +547,7 @@ When CANDIDATE-FRAME is live, derive the preview size from it."
                   frame
                   (vertico-buffer-frame--mutable-frame-parameters parameters))))
       (modify-frame-parameters frame changed))
+    (vertico-buffer-frame--resize-frame-to-parameters frame parameters)
     (let ((border-color (vertico-buffer-frame--border-color)))
       (vertico-buffer-frame--set-face-background-if-changed
        'child-frame-border border-color frame)
@@ -618,11 +618,6 @@ When `vertico-buffer-frame-redraw-after-show' is non-nil, also force a redraw."
    (frame-pixel-height parent)
    (frame-pixel-height candidate)))
 
-(defun vertico-buffer-frame--preview-top-offset (candidate-frame)
-  "Return preview top offset in display units for CANDIDATE-FRAME."
-  (* (frame-char-height candidate-frame)
-     (vertico-buffer-frame--golden-preview-top-lines candidate-frame)))
-
 (defun vertico-buffer-frame--position-pair (candidate-frame &optional preview-frame)
   "Position CANDIDATE-FRAME and PREVIEW-FRAME according to layout."
   (let* ((parent (or (frame-parent candidate-frame) (selected-frame)))
@@ -647,8 +642,7 @@ When `vertico-buffer-frame-redraw-after-show' is non-nil, also force a redraw."
                 (vertico-buffer-frame--side-by-side-gap-display-units
                  parent))
            (max left
-                (- (+ left
-                      (frame-pixel-width candidate-frame))
+                (- (+ left (frame-pixel-width candidate-frame))
                    (frame-pixel-width preview-frame))))
          (if side-layout
              top
@@ -656,40 +650,91 @@ When `vertico-buffer-frame-redraw-after-show' is non-nil, also force a redraw."
               (vertico-buffer-frame--preview-top-offset
                candidate-frame))))))))
 
-(defun vertico-buffer-frame--reusable-preview-frame-p (frame parent)
-  "Return non-nil when preview FRAME can be reused under PARENT."
-  (and (frame-live-p frame)
-       (eq (frame-parent frame) parent)
-       (window-live-p (frame-root-window frame))))
-
 (defun vertico-buffer-frame--preview-window (buffer parameters)
   "Return a preview child-frame window displaying BUFFER.
 PARAMETERS are frame parameters for the preview frame."
-  (let ((parent (cdr (assq 'parent-frame parameters))))
-    (if (vertico-buffer-frame--reusable-preview-frame-p
-         vertico-buffer-frame--preview-frame parent)
-        (let ((window (frame-root-window vertico-buffer-frame--preview-frame)))
-          (set-window-buffer window buffer)
-          window)
-      (when (frame-live-p vertico-buffer-frame--preview-frame)
-        (let ((delete-frame-functions nil))
-          (delete-frame vertico-buffer-frame--preview-frame t)))
-      (setq vertico-buffer-frame--preview-frame nil)
-      (when-let* ((window
-                   (vertico-buffer-frame--display-buffer-in-child-frame
-                    buffer
-                    `((inhibit-switch-frame . t)
-                      (window-parameters
-                       . ,vertico-buffer-frame--window-parameters)
-                      (child-frame-parameters . ,parameters)))))
-        (setq vertico-buffer-frame--preview-frame (window-frame window))
-        window))))
+  (when (frame-live-p vertico-buffer-frame--preview-frame)
+    (vertico-buffer-frame--delete-frame
+     vertico-buffer-frame--preview-frame))
+  (setq vertico-buffer-frame--preview-frame nil)
+  (when-let* ((window
+               (vertico-buffer-frame--display-buffer-in-child-frame
+                buffer
+                `((inhibit-switch-frame . t)
+                  (window-parameters
+                   . ,vertico-buffer-frame--window-parameters)
+                  (child-frame-parameters . ,parameters)))))
+    (setq vertico-buffer-frame--preview-frame (window-frame window))
+    window))
+
+(defun vertico-buffer-frame--native-to-text-pixels
+    (frame native-pixels horizontal)
+  "Convert FRAME NATIVE-PIXELS to a text-area pixel size.
+When HORIZONTAL is non-nil, convert width; otherwise convert height."
+  (let* ((native-current (if horizontal
+                             (frame-pixel-width frame)
+                           (frame-pixel-height frame)))
+         (text-current (if horizontal
+                           (frame-text-width frame)
+                         (frame-text-height frame)))
+         (chrome (max 0 (- native-current text-current)))
+         (minimum (if horizontal
+                      (frame-char-width frame)
+                    (frame-char-height frame))))
+    (max minimum (- native-pixels chrome))))
+
+(defun vertico-buffer-frame--size-parameter-text-pixels
+    (frame parameter horizontal)
+  "Return PARAMETER for FRAME as a text-area pixel size.
+When HORIZONTAL is non-nil, interpret PARAMETER as width; otherwise interpret it
+as height."
+  (cond
+   ((integerp parameter)
+    (* parameter
+       (if horizontal
+           (frame-char-width frame)
+         (frame-char-height frame))))
+   ((floatp parameter)
+    (when-let* ((parent (or (frame-parent frame) (selected-frame))))
+      (vertico-buffer-frame--native-to-text-pixels
+       frame
+       (round (* parameter
+                 (if horizontal
+                     (frame-pixel-width parent)
+                   (frame-pixel-height parent))))
+       horizontal)))
+   ((and (consp parameter)
+         (eq (car parameter) 'text-pixels)
+         (natnump (cdr parameter)))
+    (cdr parameter))))
+
+(defun vertico-buffer-frame--resize-frame-to-parameters (frame parameters)
+  "Resize graphical FRAME to match width and height in PARAMETERS.
+This uses `set-frame-size' with its pixelwise argument instead of temporarily
+binding `frame-resize-pixelwise'."
+  (when (and (frame-live-p frame)
+             (display-graphic-p frame))
+    (when-let* ((width-parameter (cdr (assq 'width parameters)))
+                (height-parameter (cdr (assq 'height parameters)))
+                (text-width
+                 (vertico-buffer-frame--size-parameter-text-pixels
+                  frame width-parameter t))
+                (text-height
+                 (vertico-buffer-frame--size-parameter-text-pixels
+                  frame height-parameter nil)))
+      (unless (and (= (frame-text-width frame) text-width)
+                   (= (frame-text-height frame) text-height))
+        (set-frame-size frame text-width text-height t)))))
 
 (defun vertico-buffer-frame--display-buffer (buffer alist)
   "Display BUFFER in a child frame using ALIST.
 This wraps `display-buffer-in-child-frame' so the reused child frame can be
 repositioned after Emacs knows its actual size."
   (when (vertico-buffer-frame--child-frame-supported-p (selected-frame))
+    (when-let* ((minibuffer-window (active-minibuffer-window))
+                ((window-live-p minibuffer-window)))
+      (vertico-buffer-frame--ensure-minibuffer-session
+       (window-buffer minibuffer-window)))
     (let* ((parameters (vertico-buffer-frame--child-frame-parameters))
            (alist (vertico-buffer-frame--display-alist alist parameters)))
       (when-let* ((window
@@ -748,25 +793,30 @@ repositioned after Emacs knows its actual size."
   (setq vertico-buffer-frame--theme-timer
         (run-at-time 0 nil #'vertico-buffer-frame--refresh-frames)))
 
-(defun vertico-buffer-frame--candidate-frame-p (frame)
-  "Return non-nil when FRAME belongs to the candidate child frame."
+(defun vertico-buffer-frame--candidate-frame-p (frame &optional buffer)
+  "Return non-nil when FRAME belongs to a candidate child frame.
+When BUFFER is non-nil, require FRAME to belong to that minibuffer session."
   (and (frame-live-p frame)
        (frame-parent frame)
-       (eq (frame-parameter frame 'share-child-frame)
-           'vertico-buffer-frame)))
+       (vertico-buffer-frame--candidate-share-key-p
+        (frame-parameter frame 'share-child-frame)
+        buffer)))
 
 (defun vertico-buffer-frame--candidate-frame-from-buffer (buffer)
   "Return live candidate child frame tracked by minibuffer BUFFER."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (or (and (frame-live-p vertico-buffer-frame--candidate-frame)
+               (vertico-buffer-frame--candidate-frame-p
+                vertico-buffer-frame--candidate-frame buffer)
                vertico-buffer-frame--candidate-frame)
           (when-let* (((boundp 'vertico--candidates-ov))
                       ((overlayp vertico--candidates-ov))
                       (window (overlay-get vertico--candidates-ov 'window))
                       ((window-live-p window))
                       (frame (window-frame window))
-                      ((vertico-buffer-frame--candidate-frame-p frame)))
+                      ((vertico-buffer-frame--candidate-frame-p
+                        frame buffer)))
             (setq-local vertico-buffer-frame--candidate-frame frame)
             frame)))))
 

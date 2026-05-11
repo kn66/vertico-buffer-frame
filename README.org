@@ -13,7 +13,8 @@ frame using only Emacs' built-in ~display-buffer-in-child-frame~, without
 depending on posframe.  The candidate and preview frames are sized as golden
 rectangles, and the candidate frame is centered in the parent frame.  When
 preview is enabled, preview content is shown in a second child frame overlaid on
-the right side of the candidate frame.
+the lower-right side of the candidate frame.  Minibuffer-session frame cleanup is
+delegated to Emacs' built-in ~minibuffer-exit~ frame parameter.
 
 The preview layout can also be changed to a side-by-side arrangement.  In that
 layout, the available width is split using the golden ratio: the candidate
@@ -104,6 +105,8 @@ Add this directory to ~load-path~, then:
 
 - ~vertico-buffer-frame-background-color~
 - ~vertico-buffer-frame-foreground-color~
+- ~vertico-buffer-frame-alpha~
+- ~vertico-buffer-frame-alpha-background~
 - ~vertico-buffer-frame-preview~
 - ~vertico-buffer-frame-preview-layout~
 - ~vertico-buffer-frame-preview-delay~
@@ -117,7 +120,7 @@ Add this directory to ~load-path~, then:
 - ~vertico-buffer-frame-preview-function~
 - ~vertico-buffer-frame-preview-category-functions~
 - ~vertico-buffer-frame-preview-command-functions~
-- ~vertico-buffer-frame-embark-display-same-window~
+- ~vertico-buffer-frame-embark-select-source-window~
 
 Example:
 
@@ -126,6 +129,8 @@ Example:
         vertico-buffer-frame-preview-layout 'overlay
         vertico-buffer-frame-preview-delay 0.2
         vertico-buffer-frame-preview-io-timeout 0.3
+        vertico-buffer-frame-alpha 100
+        vertico-buffer-frame-alpha-background 100
         vertico-buffer-frame-redraw-after-show nil
         vertico-buffer-frame-golden-ratio-scale 1.00)
 #+end_src
@@ -153,6 +158,28 @@ When called during completion, ~vertico-buffer-frame-toggle-preview~ changes
 preview visibility only for the current minibuffer session.  When called
 outside the minibuffer, it changes the global default
 ~vertico-buffer-frame-preview~.
+
+* Embark buffers
+
+Embark collect, live, and export buffers still use Embark's normal display path,
+so placement is controlled by ~display-buffer-alist~ and related Emacs display
+settings.
+
+When Embark is loaded, this package displays Embark buffers and Embark's
+deferred display commands from the original non-minibuffer window instead of
+the Vertico child frame.  Disable
+~vertico-buffer-frame-embark-select-source-window~ to leave that context
+untouched.
+
+Example:
+
+#+begin_src elisp
+  (add-to-list
+   'display-buffer-alist
+   '("\\`\\*Embark \\(?:Collect\\|Live\\|Export\\)"
+     (display-buffer-reuse-window display-buffer-below-selected)
+     (window-height . 0.35)))
+#+end_src
 
 * Preview
 
