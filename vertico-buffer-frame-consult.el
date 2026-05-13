@@ -20,19 +20,19 @@
 (defvar xref-file-name-display)
 
 (declare-function vertico-buffer-frame--buffer-position-target
-                  "vertico-buffer-frame-preview" (buffer position))
+                  "vertico-buffer-frame-preview")
 (declare-function vertico-buffer-frame--file-target
-                  "vertico-buffer-frame-preview" (candidate &optional directory))
+                  "vertico-buffer-frame-preview")
 (declare-function vertico-buffer-frame--origin-buffer
-                  "vertico-buffer-frame-preview" ())
+                  "vertico-buffer-frame-preview")
 (declare-function vertico-buffer-frame--text-property-value
-                  "vertico-buffer-frame-preview" (property string))
-(declare-function xref-item-location "xref" (xref))
-(declare-function xref-location-group "xref" (location))
-(declare-function xref-location-line "xref" (location))
-(declare-function xref-location-marker "xref" (location))
-(declare-function consult-imenu--deduplicate "consult-imenu" (items))
-(declare-function consult-imenu--items "consult-imenu" ())
+                  "vertico-buffer-frame-preview")
+(declare-function xref-item-location "xref")
+(declare-function xref-location-group "xref")
+(declare-function xref-location-line "xref")
+(declare-function xref-location-marker "xref")
+(declare-function consult-imenu--deduplicate "consult-imenu")
+(declare-function consult-imenu--items "consult-imenu")
 
 (defun vertico-buffer-frame-consult--location-value (raw-candidate)
   "Return Consult location metadata from RAW-CANDIDATE."
@@ -152,7 +152,7 @@ FALLBACK-BUFFER is used for integer positions which do not carry a buffer."
 
 (defun vertico-buffer-frame-consult-preview-target
     (category candidate raw-candidate)
-  "Return a Consult preview target for CATEGORY and CANDIDATE."
+  "Return a Consult preview target for CATEGORY, CANDIDATE and RAW-CANDIDATE."
   (pcase category
     ('consult-location
      (vertico-buffer-frame-consult--location-target raw-candidate))

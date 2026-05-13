@@ -84,7 +84,7 @@ When this is `fixed', use `vertico-buffer-frame-width' and
 When enabled, `vertico-buffer-frame-mode' advises `display-buffer' so that
 completion child frames are deleted before unrelated buffers are displayed from
 inside an active minibuffer.  Set this to nil if the advice conflicts with other
-display-buffer customizations."
+`display-buffer' customizations."
   :type 'boolean)
 
 (defcustom vertico-buffer-frame-golden-ratio-scale 1.0
@@ -103,6 +103,9 @@ ratio use the full fitting golden rectangle."
 (defvar vertico-buffer-frame--minibuffers nil)
 (defvar vertico-buffer-frame--external-display-cleanup nil)
 (defvar vertico-buffer-frame-mode)
+(defvar vertico-buffer-frame-mode-map)
+(defvar vertico-buffer-frame-preview)
+(defvar vertico-buffer-frame--preview-frame)
 
 (defvar-local vertico-buffer-frame--candidate-frame nil)
 (defvar-local vertico-buffer-frame--candidate-window nil)
@@ -152,7 +155,7 @@ ratio use the full fitting golden rectangle."
 
 (defun vertico-buffer-frame--display-buffer-advice
     (original buffer-or-name &rest args)
-  "Clean child frames before externally displaying BUFFER-OR-NAME."
+  "Clean child frames before ORIGINAL displays BUFFER-OR-NAME with ARGS."
   (vertico-buffer-frame--cleanup-before-external-display buffer-or-name)
   (apply original buffer-or-name args))
 
@@ -358,7 +361,7 @@ SIZE may use text-pixel parameters or character counts."
              8))))
 
 (defun vertico-buffer-frame--make-child-frame (parent name width height)
-  "Create a fresh child frame under PARENT."
+  "Create a fresh child frame under PARENT named NAME with WIDTH and HEIGHT."
   (vertico-buffer-frame--apply-border-face
    (make-frame
     (vertico-buffer-frame--base-parameters
@@ -538,6 +541,7 @@ Inside an active minibuffer, the change is buffer-local to that session."
 
 (cl-defmethod vertico--display-candidates
   :after (_lines &context (vertico-buffer-frame-mode (eql t)))
+  "Reveal the child frame after Vertico displays candidates."
   (vertico-buffer-frame--reveal-candidate-frame))
 
 (provide 'vertico-buffer-frame)

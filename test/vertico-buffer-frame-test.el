@@ -14,15 +14,18 @@
            buffer-file-name)))))
   (add-to-list 'load-path vertico-buffer-frame-test--root))
 
-(require 'ert)
-(require 'cl-lib)
-(require 'xref)
-(load (expand-file-name "vertico-buffer-frame.el"
-                        vertico-buffer-frame-test--root)
-      nil t)
-(load (expand-file-name "vertico-buffer-frame-consult.el"
-                        vertico-buffer-frame-test--root)
-      nil t)
+(eval-and-compile
+  (require 'ert)
+  (require 'cl-lib)
+  (require 'xref)
+  (load (expand-file-name "vertico-buffer-frame.el"
+                          vertico-buffer-frame-test--root)
+        nil t)
+  (load (expand-file-name "vertico-buffer-frame-consult.el"
+                          vertico-buffer-frame-test--root)
+        nil t))
+
+(declare-function consult-imenu--items "consult-imenu" ())
 
 (defmacro vertico-buffer-frame-test--with-clean-state (&rest body)
   "Run BODY with global mode state restored afterwards."
@@ -563,7 +566,7 @@
           messages)
       (cl-letf (((symbol-function #'vertico-buffer-frame--preview-target)
                  (lambda ()
-                   (error "boom")))
+                   (error "Boom")))
                 ((symbol-function #'vertico-buffer-frame--hide-preview)
                  (lambda ()
                    (push 'hide hidden)))
@@ -574,7 +577,7 @@
         (vertico-buffer-frame--show-preview-later (current-buffer))
         (should (equal hidden '(hide hide)))
         (should (equal messages
-                       '("vertico-buffer-frame preview error: boom")))))))
+                       '("vertico-buffer-frame preview error: Boom")))))))
 
 (ert-deftest vertico-buffer-frame-preview-window-reuses-live-frame ()
   (with-temp-buffer
@@ -887,7 +890,7 @@
     (unwind-protect
         (let* ((default-directory (file-name-as-directory directory))
                (file (expand-file-name "target.el" directory))
-               (candidate "target.el:2:match"))
+               (candidate (copy-sequence "target.el:2:match")))
           (with-temp-file file
             (insert "line 1\nline 2\n"))
           (add-face-text-property 0 9 'consult-file t candidate)

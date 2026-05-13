@@ -174,7 +174,7 @@ candidate.")
 (declare-function vertico-buffer-frame--place-preview-frame "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--prepare-window "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--resize-frame-to-size
-                  "vertico-buffer-frame" (frame size))
+                  "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--show-frame "vertico-buffer-frame")
 
 (defun vertico-buffer-frame--category ()
@@ -212,7 +212,7 @@ candidate.")
                                    (length string)))))
 
 (defun vertico-buffer-frame--candidate-entry (raw-candidate metadata-category)
-  "Return (CATEGORY . CANDIDATE) for RAW-CANDIDATE.
+  "Return (CATEGORY . CANDIDATE) for RAW-CANDIDATE and METADATA-CATEGORY.
 Consult multi-source candidates report the generic `multi-category'
 completion category.  Their real source category and lookup value are stored in
 the `multi-category' text property."
@@ -391,50 +391,62 @@ the `multi-category' text property."
                         (locate-library candidate))))
     (list 'file file)))
 
+(defun vertico-buffer-frame--package-descriptor (package)
+  "Return PACKAGE descriptor from installed or archive package metadata."
+  (or (cadr (assq package package-alist))
+      (cadr (assq package package-archive-contents))))
+
+(defun vertico-buffer-frame--package-requirements-string (requirements)
+  "Return a display string for package REQUIREMENTS."
+  (mapconcat
+   (lambda (requirement)
+     (format "%s %s"
+             (car requirement)
+             (package-version-join (cadr requirement))))
+   requirements
+   ", "))
+
+(defun vertico-buffer-frame--insert-package-descriptor-preview (descriptor)
+  "Insert package preview details from DESCRIPTOR."
+  (insert "Version: "
+          (package-version-join (package-desc-version descriptor))
+          "\n")
+  (when-let* ((summary (package-desc-summary descriptor)))
+    (insert summary "\n"))
+  (insert "Kind: "
+          (format "%S" (package-desc-kind descriptor))
+          "\n")
+  (when-let* ((requirements (package-desc-reqs descriptor)))
+    (insert "Requires: "
+            (vertico-buffer-frame--package-requirements-string requirements)
+            "\n")))
+
+(defun vertico-buffer-frame--insert-package-status-preview (package)
+  "Insert installation status preview for PACKAGE."
+  (insert "Installed: "
+          (if (assq package package-alist) "yes" "no")
+          "\n"))
+
+(defun vertico-buffer-frame--insert-package-preview (package descriptor)
+  "Insert package preview for PACKAGE using DESCRIPTOR when available."
+  (insert (symbol-name package) "\n\n")
+  (if descriptor
+      (vertico-buffer-frame--insert-package-descriptor-preview descriptor)
+    (vertico-buffer-frame--insert-package-status-preview package))
+  (insert "Built-in: "
+          (if (package-built-in-p package) "yes" "no")
+          "\n"))
+
 (defun vertico-buffer-frame--package-target (candidate)
   "Return a text preview target for package CANDIDATE."
   (when (require 'package nil t)
-    (let* ((package (intern-soft candidate))
-           (descriptor (and package
-                            (or (cadr (assq package package-alist))
-                                (cadr (assq package
-                                            package-archive-contents))))))
-      (when package
+    (when-let* ((package (intern-soft candidate)))
+      (let ((descriptor (vertico-buffer-frame--package-descriptor package)))
         (list 'text
               "Package"
               (lambda ()
-                (insert (symbol-name package) "\n\n")
-                (if descriptor
-                    (progn
-                      (insert "Version: "
-                              (package-version-join
-                               (package-desc-version descriptor))
-                              "\n")
-                      (when-let* ((summary
-                                   (package-desc-summary descriptor)))
-                        (insert summary "\n"))
-                      (insert "Kind: "
-                              (format "%S"
-                                      (package-desc-kind descriptor))
-                              "\n")
-                      (when-let* ((requirements
-                                   (package-desc-reqs descriptor)))
-                        (insert "Requires: "
-                                (mapconcat
-                                 (lambda (requirement)
-                                   (format "%s %s"
-                                           (car requirement)
-                                           (package-version-join
-                                            (cadr requirement))))
-                                 requirements
-                                 ", ")
-                                "\n")))
-                  (insert "Installed: "
-                          (if (assq package package-alist) "yes" "no")
-                          "\n"))
-                (insert "Built-in: "
-                        (if (package-built-in-p package) "yes" "no")
-                        "\n")))))))
+                (vertico-buffer-frame--insert-package-preview
+                 package descriptor)))))))
 
 (defun vertico-buffer-frame--register-target (candidate)
   "Return a text preview target for register CANDIDATE."
@@ -515,8 +527,9 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
       (dolist (buffer buffers)
         (when (and (buffer-live-p buffer)
                    (not (minibufferp buffer))
-                   (or (not limit)
-                       (< searched limit)))
+                   (or (null limit)
+                       (and (numberp limit)
+                            (< searched limit))))
           (cl-incf searched)
           (with-current-buffer buffer
             (save-excursion
@@ -892,8 +905,9 @@ When HORIZONTAL is non-nil, convert columns; otherwise convert lines."
     (dolist (entry (directory-files directory nil nil t))
       (unless (member entry '("." ".."))
         (cl-incf count)
-        (when (or (not limit)
-                  (< shown limit))
+        (when (or (null limit)
+                  (and (numberp limit)
+                       (< shown limit)))
           (cl-incf shown)
           (insert entry
                   (if (file-directory-p (expand-file-name entry directory))
@@ -1226,7 +1240,7 @@ WINDOW."
                (current-buffer))))
 
 (defun vertico-buffer-frame--preview-post-command ()
-  "Schedule a delayed preview update after Vertico updates candidates."
+  "Schedule a delayed preview refresh after Vertico candidate refresh."
   (if (and vertico-buffer-frame-mode
            vertico-buffer-frame-preview
            (bound-and-true-p vertico--input))
