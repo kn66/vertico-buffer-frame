@@ -1,4 +1,4 @@
-;;; vertico-buffer-frame-preview.el --- Candidate previews for vertico-buffer-frame -*- lexical-binding: t; -*-
+;;; vertico-buffer-frame-preview.el --- Preview support for vertico-buffer-frame -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Nobuyuki Kamimoto
 
@@ -6,1114 +6,1028 @@
 
 ;;; Commentary:
 
-;; Internal preview rendering helpers for `vertico-buffer-frame'.
+;; Category-aware preview support for `vertico-buffer-frame'.
 
 ;;; Code:
 
-(require 'subr-x)
-(require 'seq)
 (require 'cl-lib)
-(require 'color)
+(require 'subr-x)
+(require 'vertico)
 
-(declare-function vertico--candidate "vertico")
-(declare-function consult--grep-position "consult")
-(declare-function consult-compile--lookup "consult-compile")
-(declare-function consult-imenu--items-safe "consult-imenu")
-(declare-function imenu--make-index-alist "imenu")
-(declare-function imenu--subalist-p "imenu")
-(declare-function bookmark-get-filename "bookmark")
-(declare-function bookmark-get-position "bookmark")
-(declare-function bookmark-maybe-load-default-file "bookmark")
-(declare-function package-desc-name "package")
-(declare-function package-desc-summary "package")
-(declare-function package-desc-version "package")
-(declare-function package-version-join "package")
-(declare-function xref-item-location "xref")
-(declare-function xref-location-group "xref")
-(declare-function xref-location-marker "xref")
-(declare-function calendar-last-day-of-month "calendar")
-(declare-function custom-group-of-mode "cus-edit")
-(declare-function custom-load-symbol "cus-edit")
-(declare-function Info-extract-menu-item "info")
-(declare-function Info-goto-node "info")
-(declare-function vertico-buffer-frame--active-minibuffer-buffer "vertico-buffer-frame")
-(declare-function vertico-buffer-frame--apply-frame-parameters "vertico-buffer-frame-display")
-(declare-function vertico-buffer-frame--candidate-frame "vertico-buffer-frame-display")
-(declare-function vertico-buffer-frame--current-source-window "vertico-buffer-frame")
-(declare-function vertico-buffer-frame--ensure-frame-visible "vertico-buffer-frame-display")
-(declare-function vertico-buffer-frame--face-remapping "vertico-buffer-frame-display")
-(declare-function vertico-buffer-frame--hide-window-chrome "vertico-buffer-frame-display")
-(declare-function vertico-buffer-frame--live-minibuffer-buffer-p "vertico-buffer-frame")
-(declare-function vertico-buffer-frame--minibuffer-buffer "vertico-buffer-frame")
-(declare-function vertico-buffer-frame--position-pair "vertico-buffer-frame-display")
-(declare-function vertico-buffer-frame--preview-enabled-p "vertico-buffer-frame")
-(declare-function vertico-buffer-frame--preview-frame-parameters "vertico-buffer-frame-display")
-(declare-function vertico-buffer-frame--preview-window "vertico-buffer-frame-display")
-(declare-function vertico-buffer-frame--refresh-frames "vertico-buffer-frame-display")
-(declare-function vertico-buffer-frame--top-minibuffer-buffer "vertico-buffer-frame")
+(defgroup vertico-buffer-frame nil
+  "Display `vertico-buffer-mode' windows in child frames."
+  :group 'vertico
+  :prefix "vertico-buffer-frame-")
 
-(defvar bookmark-alist)
-(defvar calendar-month-name-array)
+(defcustom vertico-buffer-frame-preview t
+  "Non-nil means preview the current candidate."
+  :type 'boolean)
+
+(defcustom vertico-buffer-frame-preview-delay 0.24
+  "Idle delay in seconds before showing the preview frame."
+  :type 'number)
+
+(defcustom vertico-buffer-frame-preview-width nil
+  "Maximum width of the preview child frame in characters.
+When nil, derive the width from the candidate frame."
+  :type '(choice (const :tag "Automatic" nil) natnum))
+
+(defcustom vertico-buffer-frame-preview-height nil
+  "Maximum height of the preview child frame in characters.
+When nil, derive the height from the candidate frame."
+  :type '(choice (const :tag "Automatic" nil) natnum))
+
+(defcustom vertico-buffer-frame-preview-categories
+  '(file
+    project-file
+    buffer
+    xref-location
+    bookmark
+    symbol-help
+    command
+    function
+    variable
+    face
+    symbol
+    unicode-name
+    environment-variable
+    info-menu
+    calendar-month
+    color
+    custom-theme
+    coding-system
+    charset
+    library
+    package
+    minor-mode
+    customization-group
+    custom-variable
+    register
+    imenu
+    dabbrev
+    input-method
+    process
+    email
+    ecomplete
+    bibtex-key
+    bibtex-string
+    kill-ring
+    apropos-symbol
+    theme
+    consult-xref
+    consult-location
+    consult-grep)
+  "Completion categories for which candidate previews are shown."
+  :type '(repeat symbol))
+
+(defvar vertico-buffer-frame-preview-target-functions nil
+  "Hook functions for additional preview targets.
+Each function is called with CATEGORY, CANDIDATE and RAW-CANDIDATE.
+It should return a preview target accepted by
+`vertico-buffer-frame--show-preview', or nil if it cannot handle the
+candidate.")
+
+(require 'vertico-buffer-frame-consult)
+
+(defvar vertico-buffer-frame-mode)
+(defvar vertico-buffer-frame--candidate-frame)
+(defvar vertico--input)
+(defvar vertico--metadata)
 (defvar Info-complete-menu-buffer)
-(defvar Info-current-file)
-(defvar Info-current-node)
-(defvar imenu-space-replacement)
+(defvar calendar-month-name-array)
+(defvar custom-enabled-themes)
+(defvar input-method-alist)
 (defvar package-alist)
 (defvar package-archive-contents)
-(defvar vertico-buffer-frame-mode)
-(defvar vertico-buffer-frame-preview)
-(defvar vertico-buffer-frame-preview-binary-detect-bytes)
-(defvar vertico-buffer-frame-preview-category-functions)
-(defvar vertico-buffer-frame-preview-command-functions)
-(defvar vertico-buffer-frame-preview-delay)
-(defvar vertico-buffer-frame-preview-directory-max-entries)
-(defvar vertico-buffer-frame-preview-function)
-(defvar vertico-buffer-frame-preview-io-timeout)
-(defvar vertico-buffer-frame-preview-max-size)
-(defvar vertico-buffer-frame--completion-command)
-(defvar vertico-buffer-frame--exiting)
-(defvar vertico-buffer-frame--preview-buffer)
-(defvar vertico-buffer-frame--preview-enabled)
-(defvar vertico-buffer-frame--preview-frame)
-(defvar vertico-buffer-frame--preview-timer)
 
-(defvar vertico-buffer-frame--preview-help-buffer
-  " *vertico-buffer-frame-help*"
-  "Private Help buffer used for documentation previews.")
+(defvar-local vertico-buffer-frame--preview-frame nil)
+(defvar-local vertico-buffer-frame--preview-window nil)
+(defvar-local vertico-buffer-frame--preview-buffer nil)
+(defvar-local vertico-buffer-frame--preview-timer nil)
 
-(defvar vertico-buffer-frame--preview-location-buffer nil
-  "Indirect buffer used for marker-based location previews.")
+(defconst vertico-buffer-frame-preview--golden-ratio
+  (/ (+ 1.0 (sqrt 5.0)) 2.0)
+  "Golden ratio used for automatic preview layout.")
 
-(defvar-local vertico-buffer-frame--preview-recenter nil
-  "Non-nil when preview window should be centered around point.")
+(declare-function bookmark-get-bookmark "bookmark")
+(declare-function bookmark-get-filename "bookmark")
+(declare-function bookmark-get-position "bookmark")
+(declare-function calendar-current-date "calendar")
+(declare-function calendar-extract-year "calendar")
+(declare-function calendar-generate-month "calendar")
+(declare-function calendar-make-alist "calendar")
+(declare-function charset-description "mule-cmds")
+(declare-function color-defined-p "faces")
+(declare-function color-values "faces")
+(declare-function custom-available-themes "custom")
+(declare-function custom-theme-p "cus-theme")
+(declare-function get-charset-property "charset")
+(declare-function imenu--make-index-alist "imenu")
+(declare-function imenu--subalist-p "imenu")
+(declare-function locate-library "files")
+(declare-function mail-extract-address-components "mail-extr")
+(declare-function package-desc-kind "package")
+(declare-function package-desc-reqs "package")
+(declare-function package-desc-summary "package")
+(declare-function package-desc-version "package")
+(declare-function package-built-in-p "package")
+(declare-function package-version-join "package")
+(declare-function project-root "project")
+(declare-function vertico-buffer-frame--delete-frame "vertico-buffer-frame")
+(declare-function vertico-buffer-frame--make-child-frame "vertico-buffer-frame")
+(declare-function vertico-buffer-frame--parent-frame "vertico-buffer-frame")
+(declare-function vertico-buffer-frame--place-preview-frame "vertico-buffer-frame")
+(declare-function vertico-buffer-frame--prepare-window "vertico-buffer-frame")
+(declare-function vertico-buffer-frame--resize-frame-to-size
+                  "vertico-buffer-frame" (frame size))
+(declare-function vertico-buffer-frame--show-frame "vertico-buffer-frame")
 
-(defmacro vertico-buffer-frame--with-io-timeout (&rest body)
-  "Run BODY under `vertico-buffer-frame-preview-io-timeout'.
-Return nil when the timeout fires.  When the option is nil, run BODY without a
-timeout."
-  (declare (indent 0) (debug t))
-  `(if vertico-buffer-frame-preview-io-timeout
-       (with-timeout (vertico-buffer-frame-preview-io-timeout nil)
-         ,@body)
-     (progn ,@body)))
+(defun vertico-buffer-frame--category ()
+  "Return the current Vertico completion category."
+  (when (and (boundp 'vertico--metadata) vertico--metadata)
+    (completion-metadata-get vertico--metadata 'category)))
 
-(defun vertico-buffer-frame--local-file-p (file)
-  "Return non-nil when FILE can be previewed without remote I/O."
-  (and file
-       (not (file-remote-p file))
-       (not (file-remote-p default-directory))))
-
-(defun vertico-buffer-frame--binary-file-p (file)
-  "Return non-nil if FILE appears binary based on a leading-byte scan."
-  (when-let* ((bytes vertico-buffer-frame-preview-binary-detect-bytes)
-              ((natnump bytes))
-              ((> bytes 0)))
-    (with-temp-buffer
-      (set-buffer-multibyte nil)
-      (let ((coding-system-for-read 'binary))
-        (insert-file-contents-literally file nil 0 bytes))
-      (goto-char (point-min))
-      (search-forward "\0" nil t))))
-
-(defun vertico-buffer-frame--directory-entries (directory)
-  "Return a bounded list of preview entries for DIRECTORY."
-  (let* ((limit vertico-buffer-frame-preview-directory-max-entries)
-         (entries (directory-files directory
-                                   nil
-                                   directory-files-no-dot-files-regexp
-                                   nil
-                                   (and limit (1+ limit)))))
-    (if (and limit (> (length entries) limit))
-        (append (butlast entries) '("..."))
-      entries)))
-
-(defun vertico-buffer-frame--directory-content (directory)
-  "Return preview content for DIRECTORY."
-  (mapconcat #'identity
-             (vertico-buffer-frame--directory-entries directory)
-             "\n"))
-
-(defun vertico-buffer-frame--file-content (file)
-  "Return preview content for regular FILE."
-  (with-temp-buffer
-    (insert-file-contents file nil 0 vertico-buffer-frame-preview-max-size)
-    (buffer-string)))
-
-(defun vertico-buffer-frame--current-candidate ()
-  "Return the current Vertico candidate string, or nil."
-  (when (and (boundp 'vertico--index)
-             (boundp 'vertico--total)
-             (> vertico--total 0)
-             (>= vertico--index 0))
-    (ignore-errors
-      (vertico--candidate))))
-
-(defun vertico-buffer-frame--completion-category ()
-  "Return the current completion category, or nil."
-  (vertico-buffer-frame--completion-metadata-category))
-
-(defun vertico-buffer-frame--target (candidate)
-  "Return preview category and target for CANDIDATE."
-  (let ((category (vertico-buffer-frame--completion-category)))
-    (if (eq category 'multi-category)
-        (if-let* ((multi (get-text-property 0 'multi-category candidate)))
-            (cons (car multi) (cdr multi))
-          (cons category candidate))
-      (cons category candidate))))
+(defun vertico-buffer-frame--candidate ()
+  "Return the current raw Vertico candidate."
+  (when (and (boundp 'vertico--input) vertico--input
+             (fboundp 'vertico--candidate))
+    (ignore-errors (vertico--candidate))))
 
 (defun vertico-buffer-frame--candidate-string (candidate)
-  "Return CANDIDATE as a plain string."
-  (substring-no-properties (format "%s" candidate)))
+  "Return CANDIDATE as a string without text properties."
+  (and (stringp candidate)
+       (substring-no-properties candidate)))
 
-(defun vertico-buffer-frame--completion-input ()
-  "Return the current minibuffer input for completion metadata."
-  (if (minibufferp)
-      (minibuffer-contents)
-    ""))
+(defun vertico-buffer-frame--text-property-value (property string)
+  "Return the first non-nil PROPERTY value found in STRING."
+  (when (and (stringp string)
+             (> (length string) 0))
+    (let ((position (text-property-not-all 0 (length string)
+                                           property nil string)))
+      (and position
+           (get-text-property position property string)))))
 
-(defun vertico-buffer-frame--completion-metadata
-    (&optional input table predicate extra-properties)
-  "Return Emacs completion metadata for the current completion state.
-INPUT, TABLE, PREDICATE, and EXTRA-PROPERTIES default to the current
-minibuffer completion state."
-  (let ((table (or table minibuffer-completion-table))
-        (predicate (or predicate minibuffer-completion-predicate))
-        (completion-extra-properties
-         (or extra-properties completion-extra-properties)))
-    (when table
-      (ignore-errors
-        (completion-metadata (or input
-                                 (vertico-buffer-frame--completion-input))
-                             table
-                             predicate)))))
+(defun vertico-buffer-frame--text-property-end (property string)
+  "Return the end of the first non-nil PROPERTY range in STRING."
+  (when (and (stringp string)
+             (> (length string) 0))
+    (when-let* ((position (text-property-not-all 0 (length string)
+                                                 property nil string)))
+      (next-single-property-change position property string
+                                   (length string)))))
 
-(defun vertico-buffer-frame--completion-metadata-category
-    (&optional input table predicate extra-properties)
-  "Return completion category using Emacs completion metadata.
-INPUT, TABLE, PREDICATE, and EXTRA-PROPERTIES default to the current
-minibuffer completion state."
-  (when-let* ((metadata (vertico-buffer-frame--completion-metadata
-                         input table predicate extra-properties)))
-    (completion-metadata-get metadata 'category)))
+(defun vertico-buffer-frame--candidate-entry (raw-candidate metadata-category)
+  "Return (CATEGORY . CANDIDATE) for RAW-CANDIDATE.
+Consult multi-source candidates report the generic `multi-category'
+completion category.  Their real source category and lookup value are stored in
+the `multi-category' text property."
+  (when-let* ((candidate
+               (vertico-buffer-frame--candidate-string raw-candidate)))
+    (let ((multi (vertico-buffer-frame--text-property-value
+                  'multi-category raw-candidate)))
+      (if (and (consp multi)
+               (symbolp (car multi)))
+          (cons (car multi)
+                (if (stringp (cdr multi))
+                    (substring-no-properties (cdr multi))
+                  (cdr multi)))
+        (cons metadata-category candidate)))))
 
-(defun vertico-buffer-frame--file-candidate-string (candidate)
-  "Return CANDIDATE's file name string, using unquoted text when available."
-  (vertico-buffer-frame--candidate-string
-   (or (and (stringp candidate)
-            (get-text-property 0 'completion--unquoted candidate))
-       candidate)))
+(defun vertico-buffer-frame--readable-file (file)
+  "Return expanded FILE when it is readable."
+  (when (stringp file)
+    (let ((expanded (expand-file-name (substitute-in-file-name file))))
+      (and (file-readable-p expanded)
+           expanded))))
 
-(defun vertico-buffer-frame--file-completion-directory ()
-  "Return the active directory of the current minibuffer file completion."
-  (when (and minibuffer-completing-file-name
-             (minibufferp))
-    (let* ((input (substitute-in-file-name (minibuffer-contents)))
-           (directory (file-name-directory input)))
-      (and directory (expand-file-name directory)))))
+(defun vertico-buffer-frame--file-target (candidate &optional directory)
+  "Return a file preview target for CANDIDATE under DIRECTORY."
+  (when (stringp candidate)
+    (when-let* ((file (vertico-buffer-frame--readable-file
+                       (expand-file-name candidate
+                                         (or directory default-directory)))))
+      (list 'file file))))
 
-(defun vertico-buffer-frame--file-candidate-name (candidate)
-  "Return the absolute file name represented by file CANDIDATE."
-  (let ((name (substitute-in-file-name
-               (vertico-buffer-frame--file-candidate-string candidate))))
-    (expand-file-name
-     name
-     (or (vertico-buffer-frame--file-completion-directory)
-         default-directory))))
+(defun vertico-buffer-frame--project-root ()
+  "Return the current project root, if any."
+  (when (require 'project nil t)
+    (when-let* ((project (ignore-errors (project-current nil))))
+      (project-root project))))
 
-(defun vertico-buffer-frame--candidate-symbol (candidate)
-  "Return CANDIDATE as an interned symbol."
-  (intern-soft (vertico-buffer-frame--candidate-string candidate)))
+(defun vertico-buffer-frame--project-file-target (candidate)
+  "Return a file preview target for project-file CANDIDATE."
+  (or (vertico-buffer-frame--file-target candidate)
+      (when-let* ((root (vertico-buffer-frame--project-root)))
+        (vertico-buffer-frame--file-target candidate root))))
 
-(defun vertico-buffer-frame--documentation (title body &optional details)
-  "Return preview text from TITLE, BODY, and optional DETAILS."
-  (when body
-    (string-join
-     (append (list title)
-             (delq nil details)
-             (list "" (string-trim (substitute-command-keys body))))
-     "\n")))
+(defun vertico-buffer-frame--buffer-target (candidate)
+  "Return a buffer preview target for CANDIDATE."
+  (cond
+   ((buffer-live-p candidate)
+    (list 'buffer (buffer-name candidate)))
+   ((and (stringp candidate)
+         (get-buffer candidate))
+    (list 'buffer candidate))))
 
-(defun vertico-buffer-frame--help-preview-buffer (function symbol)
-  "Return a private Help buffer generated by calling FUNCTION with SYMBOL."
-  (when (and (symbolp symbol)
-             (require 'help-fns nil t))
-    (let ((buffer (get-buffer-create
-                   vertico-buffer-frame--preview-help-buffer))
-          (display-buffer-overriding-action
-           '(display-buffer-no-window (allow-no-window . t)))
-          (help-window-select nil))
+(defun vertico-buffer-frame--origin-buffer ()
+  "Return the buffer from which the minibuffer was entered, if any."
+  (when-let* ((window (minibuffer-selected-window)))
+    (and (window-live-p window)
+         (window-buffer window))))
+
+(defun vertico-buffer-frame--buffer-position-target (buffer position)
+  "Return a buffer-position target for BUFFER at POSITION."
+  (when (and (buffer-live-p buffer) position)
+    (list 'buffer-position buffer position)))
+
+(defun vertico-buffer-frame--symbol-preview-target (candidate)
+  "Return a text preview target for symbol CANDIDATE."
+  (when-let* ((symbol (intern-soft candidate)))
+    (list 'text
+          "Symbol"
+          (lambda ()
+            (vertico-buffer-frame--insert-symbol-preview symbol)))))
+
+(defun vertico-buffer-frame--color-target (candidate)
+  "Return a text preview target for color CANDIDATE."
+  (when (and (color-defined-p candidate)
+             (color-values candidate))
+    (list 'text
+          "Color"
+          (lambda ()
+            (let ((rgb (color-values candidate)))
+              (insert candidate "\n\n")
+              (insert (propertize "        "
+                                  'face
+                                  `(:background ,candidate
+                                                :foreground ,candidate))
+                      "\n\n")
+              (insert (format "#%04X%04X%04X\n"
+                              (nth 0 rgb)
+                              (nth 1 rgb)
+                              (nth 2 rgb))))))))
+
+(defun vertico-buffer-frame--custom-theme-target (candidate)
+  "Return a preview target for custom theme CANDIDATE."
+  (when (require 'cus-theme nil t)
+    (let ((theme (intern-soft candidate)))
+      (when (and theme
+                 (memq theme (custom-available-themes)))
+        (or (when-let* ((file (locate-library
+                               (format "%s-theme.el" candidate))))
+              (list 'file file))
+            (list 'text
+                  "Custom Theme"
+                  (lambda ()
+                    (insert candidate "\n\n")
+                    (insert "Available: yes\n")
+                    (insert "Loaded: "
+                            (if (custom-theme-p theme) "yes" "no")
+                            "\n")
+                    (insert "Enabled: "
+                            (if (memq theme custom-enabled-themes)
+                                "yes"
+                              "no")
+                            "\n"))))))))
+
+(defun vertico-buffer-frame--input-method-target (candidate)
+  "Return a text preview target for input method CANDIDATE."
+  (when (require 'mule-cmds nil t)
+    (when-let* ((entry (assoc candidate input-method-alist)))
+      (let ((language (nth 1 entry))
+            (title (nth 3 entry))
+            (description (nth 4 entry)))
+        (list 'text
+              "Input Method"
+              (lambda ()
+                (insert candidate "\n\n")
+                (when language
+                  (insert "Language: " language "\n"))
+                (when title
+                  (insert "Title: " title "\n"))
+                (when description
+                  (insert "\n" description "\n"))))))))
+
+(defun vertico-buffer-frame--coding-system-target (candidate)
+  "Return a text preview target for coding system CANDIDATE."
+  (let ((coding-system (intern-soft candidate)))
+    (when (and coding-system
+               (coding-system-p coding-system))
+      (list 'text
+            "Coding System"
+            (lambda ()
+              (insert (symbol-name coding-system) "\n\n")
+              (when-let* ((doc (coding-system-doc-string coding-system)))
+                (insert doc "\n\n"))
+              (when-let* ((base (ignore-errors
+                                  (coding-system-base coding-system))))
+                (insert "Base: " (symbol-name base) "\n"))
+              (when-let* ((mnemonic (ignore-errors
+                                      (coding-system-mnemonic coding-system))))
+                (insert "Mnemonic: " (char-to-string mnemonic) "\n"))
+              (let ((eol (ignore-errors
+                           (coding-system-eol-type coding-system))))
+                (insert "EOL: " (format "%S" eol) "\n")))))))
+
+(defun vertico-buffer-frame--charset-target (candidate)
+  "Return a text preview target for character set CANDIDATE."
+  (let ((charset (intern-soft candidate)))
+    (when (and charset
+               (charsetp charset))
+      (list 'text
+            "Character Set"
+            (lambda ()
+              (insert (symbol-name charset) "\n\n")
+              (when-let* ((description (charset-description charset)))
+                (insert description "\n\n"))
+              (dolist (property '(short-name long-name iso-final-char
+                                             dimension chars))
+                (when-let* ((value (get-charset-property charset property)))
+                  (insert (capitalize (symbol-name property))
+                          ": "
+                          (format "%S" value)
+                          "\n"))))))))
+
+(defun vertico-buffer-frame--library-target (candidate)
+  "Return a file preview target for Emacs Lisp library CANDIDATE."
+  (when-let* ((file (or (locate-library (concat candidate ".el"))
+                        (locate-library candidate))))
+    (list 'file file)))
+
+(defun vertico-buffer-frame--package-target (candidate)
+  "Return a text preview target for package CANDIDATE."
+  (when (require 'package nil t)
+    (let* ((package (intern-soft candidate))
+           (descriptor (and package
+                            (or (cadr (assq package package-alist))
+                                (cadr (assq package
+                                            package-archive-contents))))))
+      (when package
+        (list 'text
+              "Package"
+              (lambda ()
+                (insert (symbol-name package) "\n\n")
+                (if descriptor
+                    (progn
+                      (insert "Version: "
+                              (package-version-join
+                               (package-desc-version descriptor))
+                              "\n")
+                      (when-let* ((summary
+                                   (package-desc-summary descriptor)))
+                        (insert summary "\n"))
+                      (insert "Kind: "
+                              (format "%S"
+                                      (package-desc-kind descriptor))
+                              "\n")
+                      (when-let* ((requirements
+                                   (package-desc-reqs descriptor)))
+                        (insert "Requires: "
+                                (mapconcat
+                                 (lambda (requirement)
+                                   (format "%s %s"
+                                           (car requirement)
+                                           (package-version-join
+                                            (cadr requirement))))
+                                 requirements
+                                 ", ")
+                                "\n")))
+                  (insert "Installed: "
+                          (if (assq package package-alist) "yes" "no")
+                          "\n"))
+                (insert "Built-in: "
+                        (if (package-built-in-p package) "yes" "no")
+                        "\n")))))))
+
+(defun vertico-buffer-frame--register-target (candidate)
+  "Return a text preview target for register CANDIDATE."
+  (when (= (length candidate) 1)
+    (let* ((register (aref candidate 0))
+           (value (get-register register)))
+      (when value
+        (list 'text
+              "Register"
+              (lambda ()
+                (insert (single-key-description register)
+                        "\n\n")
+                (pcase value
+                  ((pred markerp)
+                   (insert "Marker: "
+                           (or (buffer-name (marker-buffer value))
+                               "no buffer")
+                           ":"
+                           (number-to-string (marker-position value))
+                           "\n"))
+                  ((pred window-configuration-p)
+                   (insert "Window configuration\n"))
+                  ((pred frame-configuration-p)
+                   (insert "Frame configuration\n"))
+                  (_
+                   (insert (format "%S\n" value))))))))))
+
+(defun vertico-buffer-frame--process-target (candidate)
+  "Return a text preview target for process CANDIDATE."
+  (when-let* ((process (get-process candidate)))
+    (list 'text
+          "Process"
+          (lambda ()
+            (insert (process-name process) "\n\n")
+            (insert "Status: " (format "%S" (process-status process)) "\n")
+            (when-let* ((pid (process-id process)))
+              (insert "PID: " (number-to-string pid) "\n"))
+            (when-let* ((buffer (process-buffer process)))
+              (insert "Buffer: " (buffer-name buffer) "\n"))
+            (when-let* ((tty (process-tty-name process)))
+              (insert "TTY: " tty "\n"))
+            (when-let* ((command (process-command process)))
+              (insert "Command: " (mapconcat #'identity command " ") "\n"))
+            (when-let* ((contact (ignore-errors
+                                   (process-contact process t t))))
+              (insert "Contact: " (format "%S" contact) "\n"))))))
+
+(defun vertico-buffer-frame--email-target (candidate)
+  "Return a text preview target for email CANDIDATE."
+  (list 'text
+        "Email"
+        (lambda ()
+          (insert candidate "\n")
+          (when (require 'mail-extr nil t)
+            (pcase-let ((`(,name ,address)
+                         (mail-extract-address-components candidate)))
+              (when name
+                (insert "\nName: " name "\n"))
+              (when address
+                (insert "Address: " address "\n")))))))
+
+(defun vertico-buffer-frame--find-buffer-position (candidate &optional buffers)
+  "Return a buffer-position target for the first occurrence of CANDIDATE.
+Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
+  (let ((buffers (or buffers
+                     (delq nil
+                           (delete-dups
+                            (cons (vertico-buffer-frame--origin-buffer)
+                                  (buffer-list)))))))
+    (catch 'found
+      (dolist (buffer buffers)
+        (when (and (buffer-live-p buffer)
+                   (not (minibufferp buffer)))
+          (with-current-buffer buffer
+            (save-excursion
+              (save-restriction
+                (widen)
+                (goto-char (point-min))
+                (when (search-forward candidate nil t)
+                  (throw 'found
+                         (vertico-buffer-frame--buffer-position-target
+                          buffer
+                          (match-beginning 0))))))))))))
+
+(defun vertico-buffer-frame--dabbrev-target (candidate)
+  "Return a preview target for dabbrev CANDIDATE."
+  (or (vertico-buffer-frame--find-buffer-position candidate)
+      (list 'text
+            "Dabbrev"
+            (lambda ()
+              (insert candidate "\n")))))
+
+(defun vertico-buffer-frame--environment-variable-target (candidate)
+  "Return a text preview target for environment variable CANDIDATE."
+  (when-let* ((value (getenv candidate)))
+    (list 'text
+          "Environment Variable"
+          (lambda ()
+            (insert candidate "\n\n" value "\n")))))
+
+(defun vertico-buffer-frame--unicode-name-target (candidate)
+  "Return a text preview target for Unicode name CANDIDATE."
+  (when-let* ((char (or (char-from-name candidate t)
+                        (and (string-match-p "\\`[[:xdigit:]]+\\'" candidate)
+                             (ignore-errors
+                               (decode-char 'ucs
+                                            (string-to-number candidate 16)))))))
+    (list 'text
+          "Unicode Character"
+          (lambda ()
+            (insert (format "%c\n\nU+%04X\n%s\n"
+                            char
+                            char
+                            (or (get-char-code-property char 'name)
+                                candidate)))))))
+
+(defun vertico-buffer-frame--bookmark-target (candidate)
+  "Return a preview target for bookmark CANDIDATE."
+  (when (require 'bookmark nil t)
+    (when-let* ((bookmark (bookmark-get-bookmark candidate 'noerror)))
+      (let ((file (bookmark-get-filename bookmark))
+            (position (bookmark-get-position bookmark)))
+        (cond
+         ((and file (vertico-buffer-frame--readable-file file))
+          (list 'file-position
+                (vertico-buffer-frame--readable-file file)
+                position))
+         (t
+          (list 'text
+                "Bookmark"
+                (lambda ()
+                  (insert candidate "\n\n")
+                  (when file
+                    (insert "File: " (abbreviate-file-name file) "\n"))
+                  (when position
+                    (insert "Position: " (number-to-string position) "\n"))))))))))
+
+(defun vertico-buffer-frame--xref-location-target (candidate raw-candidate)
+  "Return a preview target for xref CANDIDATE and RAW-CANDIDATE."
+  (let* ((group (or (vertico-buffer-frame--text-property-value
+                     'xref--group raw-candidate)
+                    (and (string-match "\\`\\(.+\\):[0-9]+:" candidate)
+                         (match-string 1 candidate))))
+         (group-end (vertico-buffer-frame--text-property-end
+                     'xref--group raw-candidate))
+         (line (cond
+                ((and group-end
+                      (< group-end (length raw-candidate))
+                      (eq (aref raw-candidate group-end) ?:)
+                      (string-match "\\`\\([0-9]+\\):"
+                                    raw-candidate
+                                    (1+ group-end)))
+                 (string-to-number (match-string 1 raw-candidate)))
+                ((string-match "\\`.+:\\([0-9]+\\):" candidate)
+                 (string-to-number (match-string 1 candidate))))))
+    (when (and group (> (or line 0) 0))
+      (when-let* ((file (or (vertico-buffer-frame--readable-file group)
+                            (when-let* ((root (vertico-buffer-frame--project-root)))
+                              (vertico-buffer-frame--readable-file
+                               (expand-file-name group root))))))
+        (list 'file-line file line)))))
+
+(defun vertico-buffer-frame--imenu-entry-position (entry)
+  "Return the buffer position described by imenu ENTRY."
+  (let ((position (cdr entry)))
+    (cond
+     ((markerp position)
+      position)
+     ((integer-or-marker-p position)
+      position)
+     ((overlayp position)
+      (overlay-start position)))))
+
+(defun vertico-buffer-frame--imenu-find-entry (candidate entries)
+  "Return the imenu entry for CANDIDATE in ENTRIES."
+  (catch 'found
+    (dolist (entry entries)
+      (cond
+       ((and (consp entry)
+             (string= candidate (substring-no-properties (car entry)))
+             (not (imenu--subalist-p entry)))
+        (throw 'found entry))
+       ((and (consp entry)
+             (imenu--subalist-p entry))
+        (when-let* ((match (vertico-buffer-frame--imenu-find-entry
+                            candidate
+                            (cdr entry))))
+          (throw 'found match)))))))
+
+(defun vertico-buffer-frame--imenu-target (candidate raw-candidate)
+  "Return a preview target for imenu CANDIDATE and RAW-CANDIDATE."
+  (when (require 'imenu nil t)
+    (when-let* ((buffer (vertico-buffer-frame--origin-buffer)))
       (with-current-buffer buffer
-        (let ((inhibit-read-only t))
-          (erase-buffer))
-        (setq vertico-buffer-frame--preview-recenter nil))
-      (cl-letf (((symbol-function 'help-buffer)
-                 (lambda () (buffer-name buffer))))
-        (ignore-errors
-          (save-window-excursion
-            (funcall function symbol))
-          (and (buffer-live-p buffer)
-               (with-current-buffer buffer
-                 (> (buffer-size) 0))
-               buffer))))))
+        (let* ((choice (or (and (stringp raw-candidate)
+                                (get-text-property 0 'imenu-choice
+                                                   raw-candidate))
+                           (ignore-errors
+                             (vertico-buffer-frame--imenu-find-entry
+                              candidate
+                              (imenu--make-index-alist)))))
+               (position (and choice
+                              (vertico-buffer-frame--imenu-entry-position
+                               choice))))
+          (cond
+           ((markerp position)
+            (vertico-buffer-frame--buffer-position-target
+             (or (marker-buffer position) buffer)
+             position))
+           (position
+            (vertico-buffer-frame--buffer-position-target
+             buffer
+             position))))))))
 
-(defun vertico-buffer-frame-preview-default (candidate)
-  "Return preview content for CANDIDATE using built-in preview rules."
-  (let* ((preview (vertico-buffer-frame--target candidate))
-         (category (car preview))
-         (target (cdr preview)))
-    (or (when-let* ((function (cdr (assoc category
-                                          vertico-buffer-frame-preview-category-functions))))
-          (funcall function target))
-        (when-let* ((function (cdr (assq (or (bound-and-true-p
-                                              vertico-buffer-frame--completion-command)
-                                             this-command)
-                                         vertico-buffer-frame-preview-command-functions))))
-          (funcall function target))
-        (when minibuffer-completing-file-name
-          (vertico-buffer-frame-preview-file candidate))
-        (vertico-buffer-frame-preview-metadata candidate))))
+(defun vertico-buffer-frame--bibtex-target (candidate stringp)
+  "Return a preview target for BibTeX CANDIDATE.
+When STRINGP is non-nil, look for a @String definition."
+  (when-let* ((buffer (vertico-buffer-frame--origin-buffer)))
+    (with-current-buffer buffer
+      (save-excursion
+        (save-restriction
+          (widen)
+          (goto-char (point-min))
+          (let ((case-fold-search t)
+                (key (regexp-quote candidate)))
+            (when (re-search-forward
+                   (if stringp
+                       (concat "@[[:space:]\n]*string"
+                               "[[:space:]\n]*[({][[:space:]\n]*"
+                               key
+                               "[[:space:]\n]*=")
+                     (concat "@[[:alpha:]]+"
+                             "[[:space:]\n]*[({][[:space:]\n]*"
+                             key
+                             "[[:space:]\n]*,"))
+                   nil t)
+              (vertico-buffer-frame--buffer-position-target
+               buffer
+               (match-beginning 0)))))))))
 
-(defun vertico-buffer-frame-preview-file (candidate)
-  "Return file preview content for CANDIDATE."
-  (when-let* ((file (ignore-errors
-                      (vertico-buffer-frame--file-candidate-name candidate))))
-    (vertico-buffer-frame--file-preview file)))
+(defun vertico-buffer-frame--info-menu-target (candidate)
+  "Return a text preview target for Info menu CANDIDATE."
+  (when (and (boundp 'Info-complete-menu-buffer)
+             (buffer-live-p Info-complete-menu-buffer))
+    (list 'text
+          "Info Menu"
+          (lambda ()
+            (insert
+             (with-current-buffer Info-complete-menu-buffer
+               (save-excursion
+                 (goto-char (point-min))
+                 (let ((case-fold-search t)
+                       (pattern (concat "\n\\* +"
+                                        (regexp-quote candidate)
+                                        ":")))
+                   (if (re-search-forward pattern nil t)
+                       (let ((start (line-beginning-position))
+                             (end (save-excursion
+                                    (forward-line 1)
+                                    (while (and (not (eobp))
+                                                (not (looking-at-p "\\* +")))
+                                      (forward-line 1))
+                                    (point))))
+                         (buffer-substring-no-properties start end))
+                     (concat candidate "\n"))))))))))
 
-(defun vertico-buffer-frame-preview-buffer (candidate)
-  "Return buffer preview content for CANDIDATE."
-  (when-let* ((buffer (if (bufferp candidate)
-                          candidate
-                        (get-buffer (substring-no-properties candidate)))))
+(defun vertico-buffer-frame--calendar-month-target (candidate)
+  "Return a text preview target for calendar month CANDIDATE."
+  (when (require 'calendar nil t)
+    (let* ((month-array calendar-month-name-array)
+           (month (cdr (assoc-string candidate
+                                     (calendar-make-alist month-array 1)
+                                     t)))
+           (year (calendar-extract-year (calendar-current-date))))
+      (when month
+        (list 'text
+              "Calendar Month"
+              (lambda ()
+                (calendar-generate-month month year 0)))))))
+
+(defun vertico-buffer-frame--preview-target ()
+  "Return the current preview target."
+  (when-let* ((raw-candidate (vertico-buffer-frame--candidate))
+              (entry (vertico-buffer-frame--candidate-entry
+                      raw-candidate
+                      (vertico-buffer-frame--category)))
+              (category (car entry))
+              (candidate (cdr entry)))
+    (when (memq category vertico-buffer-frame-preview-categories)
+      (or (run-hook-with-args-until-success
+           'vertico-buffer-frame-preview-target-functions
+           category candidate raw-candidate)
+          (pcase category
+            ('file
+             (vertico-buffer-frame--file-target candidate))
+            ('project-file
+             (vertico-buffer-frame--project-file-target candidate))
+            ('buffer
+             (vertico-buffer-frame--buffer-target candidate))
+            ('xref-location
+             (vertico-buffer-frame--xref-location-target candidate raw-candidate))
+            ('bookmark
+             (vertico-buffer-frame--bookmark-target candidate))
+            ((or 'symbol-help 'command 'function 'variable 'face 'symbol
+                 'minor-mode 'customization-group 'custom-variable
+                 'apropos-symbol)
+             (vertico-buffer-frame--symbol-preview-target candidate))
+            ('unicode-name
+             (vertico-buffer-frame--unicode-name-target candidate))
+            ('environment-variable
+             (vertico-buffer-frame--environment-variable-target candidate))
+            ('info-menu
+             (vertico-buffer-frame--info-menu-target candidate))
+            ('calendar-month
+             (vertico-buffer-frame--calendar-month-target candidate))
+            ('color
+             (vertico-buffer-frame--color-target candidate))
+            ('custom-theme
+             (vertico-buffer-frame--custom-theme-target candidate))
+            ('theme
+             (vertico-buffer-frame--custom-theme-target candidate))
+            ('input-method
+             (vertico-buffer-frame--input-method-target candidate))
+            ('coding-system
+             (vertico-buffer-frame--coding-system-target candidate))
+            ('charset
+             (vertico-buffer-frame--charset-target candidate))
+            ('library
+             (vertico-buffer-frame--library-target candidate))
+            ('package
+             (vertico-buffer-frame--package-target candidate))
+            ('register
+             (vertico-buffer-frame--register-target candidate))
+            ('process
+             (vertico-buffer-frame--process-target candidate))
+            ((or 'email 'ecomplete)
+             (vertico-buffer-frame--email-target candidate))
+            ('dabbrev
+             (vertico-buffer-frame--dabbrev-target candidate))
+            ('imenu
+             (vertico-buffer-frame--imenu-target candidate raw-candidate))
+            ('bibtex-key
+             (vertico-buffer-frame--bibtex-target candidate nil))
+            ('bibtex-string
+             (vertico-buffer-frame--bibtex-target candidate t))
+            ('kill-ring
+             (list 'text
+                   "Kill Ring"
+                   (lambda ()
+                     (insert candidate "\n")))))))))
+
+(defun vertico-buffer-frame--preview-parent-frame ()
+  "Return the parent frame for the preview child frame."
+  (if (frame-live-p vertico-buffer-frame--candidate-frame)
+      vertico-buffer-frame--candidate-frame
+    (vertico-buffer-frame--parent-frame)))
+
+(defun vertico-buffer-frame--preview-auto-pixel-size (parent)
+  "Return automatic preview size in pixels for PARENT."
+  (let* ((ratio vertico-buffer-frame-preview--golden-ratio)
+         (parent-width (max 1 (frame-pixel-width parent)))
+         (parent-height (max 1 (frame-pixel-height parent)))
+         (top-offset (max 1 (round (/ parent-height (* ratio ratio)))))
+         (width (max 1 (round (/ parent-width ratio))))
+         (height (max 1 (- parent-height top-offset))))
+    (cons width height)))
+
+(defun vertico-buffer-frame--preview-size-cap (parent value horizontal)
+  "Return VALUE converted from characters to pixels on PARENT.
+When HORIZONTAL is non-nil, convert columns; otherwise convert lines."
+  (and (integerp value)
+       (> value 0)
+       (* value
+          (if horizontal
+              (frame-char-width parent)
+            (frame-char-height parent)))))
+
+(defun vertico-buffer-frame--preview-frame-size (parent)
+  "Return preview frame size parameters for PARENT."
+  (let* ((auto (vertico-buffer-frame--preview-auto-pixel-size parent))
+         (width-cap
+          (vertico-buffer-frame--preview-size-cap
+           parent vertico-buffer-frame-preview-width t))
+         (height-cap
+          (vertico-buffer-frame--preview-size-cap
+           parent vertico-buffer-frame-preview-height nil))
+         (width (min (car auto)
+                     (max 1 (- (frame-pixel-width parent) 8))
+                     (or width-cap most-positive-fixnum)))
+         (height (min (cdr auto)
+                      (max 1 (- (frame-pixel-height parent) 8))
+                      (or height-cap most-positive-fixnum))))
+    (cons (cons 'text-pixels width)
+          (cons 'text-pixels height))))
+
+(defun vertico-buffer-frame--refresh-preview-frame ()
+  "Resize and reposition the current preview frame, if it is live."
+  (when (frame-live-p vertico-buffer-frame--preview-frame)
+    (let* ((parent (vertico-buffer-frame--preview-parent-frame))
+           (size (vertico-buffer-frame--preview-frame-size parent)))
+      (vertico-buffer-frame--resize-frame-to-size
+       vertico-buffer-frame--preview-frame size)
+      (vertico-buffer-frame--place-preview-frame
+       vertico-buffer-frame--preview-frame parent)
+      (when (window-live-p vertico-buffer-frame--preview-window)
+        (force-window-update
+         (window-buffer vertico-buffer-frame--preview-window))))))
+
+(defun vertico-buffer-frame--kill-preview-buffer ()
+  "Kill the temporary preview buffer owned by this minibuffer."
+  (when (buffer-live-p vertico-buffer-frame--preview-buffer)
+    (kill-buffer vertico-buffer-frame--preview-buffer))
+  (setq-local vertico-buffer-frame--preview-buffer nil))
+
+(defun vertico-buffer-frame--text-preview-buffer (name inserter)
+  "Return a temporary preview buffer named NAME populated by INSERTER."
+  (let ((buffer (generate-new-buffer
+                 (format " *vertico-buffer-frame-%s-preview*" name))))
+    (setq-local vertico-buffer-frame--preview-buffer buffer)
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (fundamental-mode)
+        (setq-local truncate-lines t)
+        (funcall inserter))
+      (goto-char (point-min))
+      (setq buffer-read-only t))
     buffer))
 
-(defun vertico-buffer-frame-preview-string (candidate)
-  "Return CANDIDATE as preview content."
-  (vertico-buffer-frame--candidate-string candidate))
+(defun vertico-buffer-frame--insert-directory-preview (directory)
+  "Insert a simple preview of DIRECTORY."
+  (insert (abbreviate-file-name (file-name-as-directory directory)) "\n\n")
+  (let ((count 0))
+    (dolist (entry (directory-files directory nil nil t))
+      (unless (member entry '("." ".."))
+        (cl-incf count)
+        (insert entry
+                (if (file-directory-p (expand-file-name entry directory))
+                    "/"
+                  "")
+                "\n")))
+    (when (= count 0)
+      (insert "Empty directory\n"))))
 
-(defun vertico-buffer-frame--completion-affix (candidate metadata)
-  "Return completion affix display text for CANDIDATE using METADATA."
-  (let ((candidate (vertico-buffer-frame--candidate-string candidate)))
-    (or (when-let* ((function (completion-metadata-get
-                               metadata 'affixation-function)))
-          (pcase (car-safe (ignore-errors
-                             (funcall function (list candidate))))
-            (`(,_ ,prefix ,suffix)
-             (let ((text (string-trim
-                          (concat (and (stringp prefix) prefix)
-                                  candidate
-                                  (and (stringp suffix) suffix)))))
-               (unless (string-empty-p text)
-                 text)))))
-        (when-let* ((function (completion-metadata-get
-                               metadata 'annotation-function))
-                    (annotation (ignore-errors
-                                  (funcall function candidate)))
-                    ((stringp annotation))
-                    ((not (string-empty-p annotation))))
-          (string-trim (concat candidate annotation))))))
+(defun vertico-buffer-frame--file-preview-buffer (file)
+  "Return a new temporary preview buffer for FILE."
+  (vertico-buffer-frame--text-preview-buffer
+   "file"
+   (lambda ()
+     (cond
+      ((file-directory-p file)
+       (vertico-buffer-frame--insert-directory-preview file))
+      ((file-regular-p file)
+       (insert-file-contents file))
+      (t
+       (insert (abbreviate-file-name file) "\n"))))))
 
-(defun vertico-buffer-frame--completion-group (candidate metadata)
-  "Return completion group for CANDIDATE using METADATA."
-  (when-let* ((function (completion-metadata-get metadata 'group-function))
-              (group (ignore-errors
-                       (funcall function
-                                (vertico-buffer-frame--candidate-string
-                                 candidate)
-                                nil)))
-              ((stringp group))
-              ((not (string-empty-p group))))
-    group))
+(defun vertico-buffer-frame--insert-symbol-preview (symbol)
+  "Insert a preview for SYMBOL."
+  (insert (symbol-name symbol) "\n\n")
+  (let ((content-start (point)))
+    (when (commandp symbol)
+      (insert "Command")
+      (when-let* ((keys (where-is-internal symbol nil t)))
+        (insert ": " (key-description keys)))
+      (insert "\n\n"))
+    (when (fboundp symbol)
+      (when-let* ((doc (ignore-errors (documentation symbol t))))
+        (insert doc "\n\n")))
+    (when (boundp symbol)
+      (when-let* ((doc (documentation-property symbol 'variable-documentation t)))
+        (insert doc "\n\n")))
+    (when (facep symbol)
+      (when-let* ((doc (documentation-property symbol 'face-documentation t)))
+        (insert doc "\n\n")))
+    (when (= (point) content-start)
+      (insert "No documentation available.\n"))))
 
-(defun vertico-buffer-frame-preview-metadata (candidate)
-  "Return generic preview text for CANDIDATE from completion metadata.
-This uses Emacs' built-in `affixation-function', `annotation-function', and
-`group-function' metadata when a completion table provides them."
-  (when-let* ((metadata (vertico-buffer-frame--completion-metadata)))
-    (let* ((candidate-string (vertico-buffer-frame--candidate-string candidate))
-           (group (vertico-buffer-frame--completion-group candidate metadata))
-           (affix (vertico-buffer-frame--completion-affix
-                   candidate metadata)))
-      (when (or group affix)
-        (string-join
-         (delq nil
-               (list candidate-string
-                     ""
-                     (and group (format "Group: %s" group))
-                     (and affix (format "Display: %s" affix))))
-         "\n")))))
+(defun vertico-buffer-frame--preview-window ()
+  "Return a freshly created preview window."
+  (vertico-buffer-frame--delete-frame vertico-buffer-frame--preview-frame)
+  (vertico-buffer-frame--kill-preview-buffer)
+  (setq-local vertico-buffer-frame--preview-frame nil
+              vertico-buffer-frame--preview-window nil)
+  (let* ((parent (vertico-buffer-frame--preview-parent-frame))
+         (size (vertico-buffer-frame--preview-frame-size parent))
+         (frame (vertico-buffer-frame--make-child-frame
+                 parent
+                 (format "Vertico Preview %s" (minibuffer-depth))
+                 (car size)
+                 (cdr size)))
+         (window (frame-root-window frame)))
+    (set-window-parameter window 'no-other-window t)
+    (set-window-parameter window 'no-delete-other-windows t)
+    (vertico-buffer-frame--prepare-window window)
+    (setq-local vertico-buffer-frame--preview-frame frame
+                vertico-buffer-frame--preview-window window)
+    (vertico-buffer-frame--place-preview-frame frame parent)
+    window))
 
-(defun vertico-buffer-frame-preview-command (candidate)
-  "Return command documentation preview for CANDIDATE."
-  (when-let* ((symbol (vertico-buffer-frame--candidate-symbol candidate))
-              ((commandp symbol)))
-    (vertico-buffer-frame--help-preview-buffer #'describe-function symbol)))
+(defun vertico-buffer-frame--set-preview-window-buffer (window buffer)
+  "Display BUFFER in preview WINDOW and dedicate it afterwards."
+  (set-window-dedicated-p window nil)
+  (set-window-buffer window buffer)
+  (set-window-dedicated-p window t))
 
-(defun vertico-buffer-frame-preview-function (candidate)
-  "Return function documentation preview for CANDIDATE."
-  (when-let* ((symbol (vertico-buffer-frame--candidate-symbol candidate))
-              ((fboundp symbol)))
-    (vertico-buffer-frame--help-preview-buffer #'describe-function symbol)))
+(defun vertico-buffer-frame--center-window-point (window)
+  "Set WINDOW point to point and center it vertically when possible."
+  (let ((point (point)))
+    (set-window-point window point)
+    (save-excursion
+      (forward-line (- (/ (max 1 (window-body-height window)) 2)))
+      (set-window-start window (line-beginning-position)))))
 
-(defun vertico-buffer-frame-preview-variable (candidate)
-  "Return variable documentation preview for CANDIDATE."
-  (when-let* ((symbol (vertico-buffer-frame--candidate-symbol candidate))
-              ((boundp symbol)))
-    (vertico-buffer-frame--help-preview-buffer #'describe-variable symbol)))
-
-(defun vertico-buffer-frame-preview-symbol (candidate)
-  "Return documentation preview for symbol CANDIDATE."
-  (when-let* ((symbol (vertico-buffer-frame--candidate-symbol candidate)))
-    (or (vertico-buffer-frame--help-preview-buffer #'describe-symbol symbol)
-        (format "%s" symbol))))
-
-(defun vertico-buffer-frame--custom-group-p (symbol)
-  "Return non-nil when SYMBOL names or can load a Custom group."
-  (and symbol
-       (or (get symbol 'custom-group)
-           (and (get symbol 'custom-loads)
-                (not (get symbol 'custom-autoload))))))
-
-(defun vertico-buffer-frame--custom-group-summary (symbol type label)
-  "Return a summary line for Custom group SYMBOL entries of TYPE.
-LABEL is the human-readable label used at the start of the summary."
-  (when-let* ((items
-               (seq-keep
-                (lambda (item)
-                  (and (consp item)
-                       (eq (cadr item) type)
-                       (format "%s" (car item))))
-                (get symbol 'custom-group))))
-    (format "%s: %s%s"
-            label
-            (string-join (seq-take items 5) ", ")
-            (if (> (length items) 5) ", ..." ""))))
-
-(defun vertico-buffer-frame-preview-custom-group (candidate)
-  "Return Custom group documentation preview for CANDIDATE."
-  (when (require 'cus-edit nil t)
-    (when-let* ((symbol (vertico-buffer-frame--candidate-symbol candidate))
-                ((vertico-buffer-frame--custom-group-p symbol)))
-      (ignore-errors
-        (custom-load-symbol symbol))
-      (vertico-buffer-frame--documentation
-       (format "%s" symbol)
-       (or (documentation-property symbol 'group-documentation t)
-           "Undocumented customization group.")
-       (delq nil
-             (list
-              "Type: Custom group"
-              (vertico-buffer-frame--custom-group-summary
-               symbol 'custom-group "Groups")
-              (vertico-buffer-frame--custom-group-summary
-               symbol 'custom-variable "Options")
-              (vertico-buffer-frame--custom-group-summary
-               symbol 'custom-face "Faces")))))))
-
-(defun vertico-buffer-frame-preview-custom-mode (candidate)
-  "Return Custom group preview for mode CANDIDATE."
-  (when (require 'cus-edit nil t)
-    (when-let* ((symbol (vertico-buffer-frame--candidate-symbol candidate)))
-      (or (when-let* (((fboundp 'custom-group-of-mode))
-                      (group (custom-group-of-mode symbol)))
-            (vertico-buffer-frame-preview-custom-group (symbol-name group)))
-          (vertico-buffer-frame-preview-command candidate)))))
-
-(defun vertico-buffer-frame-preview-color (candidate)
-  "Return color preview for CANDIDATE."
-  (let* ((color (vertico-buffer-frame--candidate-string candidate))
-         (rgb (ignore-errors (color-name-to-rgb color))))
-    (when rgb
-      (let* ((hex (upcase (apply #'color-rgb-to-hex (append rgb '(2)))))
-             (values (color-values color))
-             (swatch (propertize "        " 'face `(:background ,color))))
-        (format "%s %s\n\nRGB: %s\n16-bit: %S"
-                swatch color hex values)))))
-
-(defun vertico-buffer-frame-preview-environment-variable (candidate)
-  "Return environment variable preview for CANDIDATE."
-  (let* ((name (vertico-buffer-frame--candidate-string candidate))
-         (value (getenv name)))
-    (format "%s\n\n%s"
-            name
-            (if value
-                (format "Value:\n%s" value)
-              "Unset."))))
-
-(defun vertico-buffer-frame-preview-unicode-name (candidate)
-  "Return Unicode character preview for CANDIDATE."
-  (let* ((name (vertico-buffer-frame--candidate-string candidate))
-         (char (char-from-name name t)))
-    (when char
-      (string-join
-       (delq nil
-             (list
-              (or (char-to-name char) name)
-              ""
-              (format "Character: %s" (single-key-description char))
-              (format "Code point: U+%04X" char)
-              (when-let* ((category
-                           (get-char-code-property char 'general-category)))
-                (format "General category: %s" category))
-              (when-let* ((old-name (get-char-code-property char 'old-name)))
-                (format "Old name: %s" old-name))))
-       "\n"))))
-
-(defun vertico-buffer-frame-preview-calendar-month (candidate)
-  "Return calendar month preview for CANDIDATE."
-  (when (require 'calendar nil t)
-    (let* ((name (vertico-buffer-frame--candidate-string candidate))
-           (months (append calendar-month-name-array nil))
-           (index (seq-position months name #'string-equal)))
-      (when index
-        (let* ((month (1+ index))
-               (common-days (calendar-last-day-of-month month 2025))
-               (leap-days (calendar-last-day-of-month month 2024)))
-          (format "%s\n\nMonth number: %d\nDays: %s"
-                  name
-                  month
-                  (if (= common-days leap-days)
-                      (number-to-string common-days)
-                    (format "%d or %d" common-days leap-days))))))))
-
-(defun vertico-buffer-frame-preview-face (candidate)
-  "Return face preview for CANDIDATE."
-  (when-let* ((symbol (vertico-buffer-frame--candidate-symbol candidate))
-              ((facep symbol)))
-    (vertico-buffer-frame--help-preview-buffer #'describe-face symbol)))
-
-(defun vertico-buffer-frame-preview-theme (candidate)
-  "Return theme preview text for CANDIDATE."
-  (let* ((name (vertico-buffer-frame--candidate-string candidate))
-         (symbol (intern-soft name)))
-    (when symbol
-      (format "%s\n\n%s"
-              symbol
-              (if (memq symbol custom-enabled-themes)
-                  "This theme is currently enabled."
-                "Theme candidate.")))))
-
-(defun vertico-buffer-frame-preview-package (candidate)
-  "Return package preview text for CANDIDATE."
-  (when (require 'package nil t)
-    (let* ((name (vertico-buffer-frame--candidate-symbol candidate))
-           (desc (or (cadr (assq name package-alist))
-                     (cadr (assq name package-archive-contents)))))
-      (when desc
-        (format "%s %s\n\n%s"
-                (package-desc-name desc)
-                (package-version-join (package-desc-version desc))
-                (or (package-desc-summary desc) ""))))))
-
-(defun vertico-buffer-frame-preview-bookmark (candidate)
-  "Return bookmark preview content for CANDIDATE."
-  (when (require 'bookmark nil t)
-    (bookmark-maybe-load-default-file)
-    (when-let* ((bookmark (assoc (vertico-buffer-frame--candidate-string candidate)
-                                 bookmark-alist)))
-      (or (when-let* ((file (ignore-errors
-                              (bookmark-get-filename bookmark))))
-            (let ((position (ignore-errors (bookmark-get-position bookmark))))
-              (vertico-buffer-frame--file-preview
-               file
-               position
-               (format "%s\n%s%s\n\n"
-                       (car bookmark)
-                       (abbreviate-file-name file)
-                       (if position (format ":%s" position) "")))))
-          (format "%s\n\n%S" (car bookmark) (cdr bookmark))))))
-
-(defun vertico-buffer-frame--position-source-buffer (&optional buffer)
-  "Return source BUFFER for an integer preview position."
-  (or (and (buffer-live-p buffer) buffer)
-      (when (minibufferp)
-        (with-minibuffer-selected-window
-          (current-buffer)))
-      (current-buffer)))
-
-(defun vertico-buffer-frame--position-marker (position &optional buffer)
-  "Return a marker for POSITION.
-When POSITION is an integer, resolve it in BUFFER or the selected minibuffer
-source buffer."
-  (cond
-   ((markerp position) position)
-   ((integerp position)
-    (when-let* ((buffer (vertico-buffer-frame--position-source-buffer buffer))
-                ((buffer-live-p buffer)))
-      (with-current-buffer buffer
-        (copy-marker (max (point-min)
-                          (min (point-max) position))))))
-   ((and (consp position) (bufferp (car position)))
-    (set-marker (make-marker) (cdr position) (car position)))))
-
-(defun vertico-buffer-frame--marker-preview (marker &optional title)
-  "Return a marker-based preview object for MARKER.
-TITLE is retained as metadata for callers that want to inspect it."
-  (when (and (markerp marker)
-             (buffer-live-p (marker-buffer marker)))
-    (list :marker (copy-marker marker) :title title)))
-
-(defun vertico-buffer-frame--marker-preview-p (content)
-  "Return non-nil when CONTENT is a marker-based preview object."
-  (and (consp content)
-       (eq (car content) :marker)
-       (markerp (plist-get content :marker))))
-
-(defun vertico-buffer-frame--marker-preview-marker (content)
-  "Return CONTENT's marker when CONTENT is a marker preview."
-  (and (vertico-buffer-frame--marker-preview-p content)
-       (plist-get content :marker)))
-
-(defun vertico-buffer-frame--position-preview
-    (position &optional title _matches source-buffer)
-  "Return marker preview content for POSITION.
-TITLE is retained as preview metadata when non-nil.
-When POSITION is an integer, resolve it in SOURCE-BUFFER."
-  (vertico-buffer-frame--marker-preview
-   (vertico-buffer-frame--position-marker position source-buffer)
-   title))
-
-(defun vertico-buffer-frame--file-preview (file &optional position title)
-  "Return preview content for local FILE.
-When POSITION is an integer or marker and FILE is regular, return a marker
-preview object.  TITLE is retained as marker preview metadata."
-  (when (vertico-buffer-frame--local-file-p file)
-    (vertico-buffer-frame--with-io-timeout
-      (cond
-       ((file-directory-p file)
-        (vertico-buffer-frame--directory-content file))
-       ((file-regular-p file)
-        (unless (vertico-buffer-frame--binary-file-p file)
-          (if (or (integerp position) (markerp position))
-              (when-let* ((buffer (find-file-noselect file)))
-                (vertico-buffer-frame--position-preview
-                 position title nil buffer))
-            (vertico-buffer-frame--file-content file))))))))
-
-(defun vertico-buffer-frame-preview-location (candidate)
-  "Return location preview content for CANDIDATE."
-  (if-let* ((location (and (stringp candidate)
-                           (get-text-property 0 'consult-location candidate))))
-      (vertico-buffer-frame--position-preview (car location))
-    (vertico-buffer-frame--position-preview (or (car-safe candidate) candidate))))
-
-(defun vertico-buffer-frame--consult-imenu-item (candidate)
-  "Return Consult imenu item matching CANDIDATE."
-  (when (and (stringp candidate)
-             (fboundp 'consult-imenu--items-safe))
-    (let ((name (vertico-buffer-frame--candidate-string candidate)))
-      (with-minibuffer-selected-window
-        (catch 'item
-          (dolist (item (consult-imenu--items-safe))
-            (when (and (consp item)
-                       (stringp (car item))
-                       (equal name
-                              (substring-no-properties (car item))))
-              (throw 'item item))))))))
-
-(defun vertico-buffer-frame--imenu-minibuffer-item (candidate)
-  "Return imenu item for CANDIDATE from the current completion table."
-  (let ((table minibuffer-completion-table))
-    (when (and (stringp candidate)
-               (listp table))
-      (let ((name (vertico-buffer-frame--candidate-string candidate)))
-        (catch 'item
-          (dolist (item table)
-            (when (and (consp item)
-                       (stringp (car item))
-                       (equal name
-                              (substring-no-properties (car item))))
-              (throw 'item
-                     (or (get-text-property 0 'imenu-choice (car item))
-                         item)))))))))
-
-(defun vertico-buffer-frame--imenu-display-name (name prefix)
-  "Return possible display names for imenu NAME under PREFIX."
-  (let* ((name (format "%s" name))
-         (flat (if prefix
-                   (concat prefix " " name)
-                 name))
-         (space (and imenu-space-replacement
-                     (aref imenu-space-replacement 0))))
-    (delete-dups
-     (delq nil
-           (list name
-                 flat
-                 (and space (subst-char-in-string ?\s space name))
-                 (and space (subst-char-in-string ?\s space flat)))))))
-
-(defun vertico-buffer-frame--imenu-find-item (name items &optional prefix)
-  "Return imenu item in ITEMS whose display name matches NAME.
-PREFIX is the flattened submenu prefix."
-  (catch 'item
-    (dolist (item items)
-      (when (consp item)
-        (let ((item-name (car item)))
-          (if (and (fboundp 'imenu--subalist-p)
-                   (imenu--subalist-p item))
-              (when-let* ((found
-                           (vertico-buffer-frame--imenu-find-item
-                            name
-                            (cdr item)
-                            (if prefix
-                                (concat prefix " " (format "%s" item-name))
-                              (format "%s" item-name)))))
-                (throw 'item found))
-            (when (member name
-                          (vertico-buffer-frame--imenu-display-name
-                           item-name prefix))
-              (throw 'item item))))))))
-
-(defun vertico-buffer-frame--imenu-index (buffer)
-  "Return imenu index for BUFFER."
-  (with-current-buffer buffer
-    (imenu--make-index-alist 'noerror)))
-
-(defun vertico-buffer-frame--imenu-item (candidate)
-  "Return standard imenu item matching CANDIDATE."
-  (when (and (stringp candidate)
-             (require 'imenu nil t)
-             (fboundp 'imenu--make-index-alist))
-    (let ((name (vertico-buffer-frame--candidate-string candidate)))
-      (with-minibuffer-selected-window
-        (vertico-buffer-frame--imenu-find-item
-         name
-         (vertico-buffer-frame--imenu-index (current-buffer)))))))
-
-(defun vertico-buffer-frame-preview-consult-candidate (candidate)
-  "Return preview content from CANDIDATE's `consult--candidate' property."
-  (when-let* ((position (and (stringp candidate)
-                             (get-text-property 0 'consult--candidate candidate))))
-    (cond
-     ((and (markerp position)
-           (fboundp 'consult-compile--lookup))
-      (vertico-buffer-frame--position-preview
-       (or (ignore-errors (consult-compile--lookup position)) position)))
-     ((and (consp position) (markerp (car position)))
-      (vertico-buffer-frame--position-preview (car position) nil (cdr position)))
-     (t
-      (vertico-buffer-frame--position-preview position)))))
-
-(defun vertico-buffer-frame--find-file-noselect-local (file)
-  "Open local FILE with `find-file-noselect'.
-Return nil for remote paths so previews do not block on TRAMP I/O."
-  (when (vertico-buffer-frame--local-file-p file)
-    (find-file-noselect file)))
-
-(defun vertico-buffer-frame-preview-grep (candidate)
-  "Return grep location preview content for CANDIDATE."
-  (when (and (stringp candidate)
-             (fboundp 'consult--grep-position)
-             (not (file-remote-p default-directory)))
-    (when-let* ((position
-                 (vertico-buffer-frame--with-io-timeout
-                   (ignore-errors
-                     (consult--grep-position
-                      candidate
-                      #'vertico-buffer-frame--find-file-noselect-local))))
-                (marker (car-safe position)))
-      (vertico-buffer-frame--position-preview marker nil (cdr position)))))
-
-(defun vertico-buffer-frame-preview-imenu (candidate)
-  "Return imenu preview content for CANDIDATE."
-  (let* ((item (cond
-                ((or (markerp candidate) (integerp candidate))
-                 candidate)
-                ((consp candidate)
-                 candidate)
-                ((stringp candidate)
-                 (or (get-text-property 0 'imenu-choice candidate)
-                     (vertico-buffer-frame--imenu-minibuffer-item candidate)
-                     (vertico-buffer-frame--consult-imenu-item candidate)
-                     (vertico-buffer-frame--imenu-item candidate)))))
-         (position (cond
-                    ((or (markerp item) (integerp item)) item)
-                    ((or (markerp (cdr-safe item))
-                         (integerp (cdr-safe item)))
-                     (cdr item))
-                    ((and (consp (cdr-safe item))
-                          (or (markerp (cadr item))
-                              (integerp (cadr item))))
-                     (cadr item)))))
-    (vertico-buffer-frame--position-preview position)))
-
-(defun vertico-buffer-frame-preview-org-heading (candidate)
-  "Return Org heading preview content for CANDIDATE."
-  (when-let* ((marker (and (stringp candidate)
-                           (get-text-property 0 'org-marker candidate))))
-    (vertico-buffer-frame--position-preview marker)))
-
-(defun vertico-buffer-frame--info-source-buffer ()
-  "Return the Info buffer that owns the current menu completion."
-  (or (and (boundp 'Info-complete-menu-buffer)
-           (buffer-live-p Info-complete-menu-buffer)
-           Info-complete-menu-buffer)
-      (when-let* ((window (vertico-buffer-frame--current-source-window))
-                  ((window-live-p window))
-                  (buffer (window-buffer window)))
-        (with-current-buffer buffer
-          (and (bound-and-true-p Info-current-node)
-               buffer)))
-      (and (bound-and-true-p Info-current-node)
-           (current-buffer))))
-
-(defun vertico-buffer-frame--info-file-name ()
-  "Return a concise name for the current Info file."
-  (cond
-   ((stringp Info-current-file)
-    (file-name-nondirectory Info-current-file))
-   (Info-current-file
-    (format "%s" Info-current-file))
-   (t
-    "Info")))
-
-(defun vertico-buffer-frame--info-menu-title (source target)
-  "Return a preview title for TARGET reached from Info SOURCE."
-  (with-current-buffer source
-    (format "%s\n%s -> %s\n\n"
-            (vertico-buffer-frame--info-file-name)
-            (or Info-current-node "Menu")
-            target)))
-
-(defun vertico-buffer-frame--info-node-preview (source target title)
-  "Return Info TARGET node preview using SOURCE and TITLE."
-  (vertico-buffer-frame--with-io-timeout
-    (let ((clone (with-current-buffer source
-                   (clone-buffer nil nil))))
-      (unwind-protect
-          (with-current-buffer clone
-            (Info-goto-node target)
-            (concat title
-                    (string-trim-left
-                     (buffer-substring-no-properties
-                      (point-min) (point-max)))))
-        (when (buffer-live-p clone)
-          (kill-buffer clone))))))
-
-(defun vertico-buffer-frame-preview-info-menu (candidate)
-  "Return Info menu target preview for CANDIDATE."
-  (when (require 'info nil t)
-    (when-let* ((source (vertico-buffer-frame--info-source-buffer))
-                ((buffer-live-p source))
-                (target
-                 (with-current-buffer source
-                   (ignore-errors
-                     (Info-extract-menu-item
-                      (vertico-buffer-frame--candidate-string candidate))))))
-      (or (ignore-errors
-            (vertico-buffer-frame--info-node-preview
-             source target
-             (vertico-buffer-frame--info-menu-title source target)))
-          (vertico-buffer-frame--info-menu-title source target)))))
-
-(defun vertico-buffer-frame-preview-info (candidate)
-  "Return Info search preview content for CANDIDATE."
-  (pcase (and (stringp candidate)
-              (get-text-property 0 'consult--info candidate))
-    (`(,node ,position ,buffer)
-     (when (buffer-live-p buffer)
-       (vertico-buffer-frame--position-preview
-        (set-marker (make-marker) position buffer)
-        (format "%s\n\n" node))))))
-
-(defun vertico-buffer-frame-preview-man (candidate)
-  "Return man page preview text for CANDIDATE."
-  (let ((page (or (and (stringp candidate)
-                       (get-text-property 0 'consult-man candidate))
-                  (vertico-buffer-frame--candidate-string candidate))))
-    (format "%s\n\n%s" page (vertico-buffer-frame--candidate-string candidate))))
-
-(defun vertico-buffer-frame--xref-location-remote-p (location)
-  "Return non-nil when xref LOCATION points to a remote file."
-  (when (and location (fboundp 'xref-location-group))
-    (let ((group (ignore-errors (xref-location-group location))))
-      (and (stringp group) (file-remote-p group)))))
-
-(defun vertico-buffer-frame-preview-xref (candidate)
-  "Return xref preview content for CANDIDATE."
-  (when (and (fboundp 'xref-item-location)
-             (fboundp 'xref-location-marker))
-    (let* ((xref (or (and (stringp candidate)
-                          (get-text-property 0 'consult-xref candidate))
-                     (if (consp candidate) (cdr candidate) candidate)))
-           (location (ignore-errors (xref-item-location xref)))
-           (marker (and location
-                        (not (vertico-buffer-frame--xref-location-remote-p
-                              location))
-                        (vertico-buffer-frame--with-io-timeout
-                          (ignore-errors
-                            (xref-location-marker location))))))
-      (vertico-buffer-frame--position-preview marker))))
-
-(defun vertico-buffer-frame--insert-preview-content (content)
-  "Insert preview CONTENT into the current preview buffer."
-  (erase-buffer)
-  (cond
-   ((stringp content)
-    (insert (substring content
-                       0
-                       (min (length content)
-                            vertico-buffer-frame-preview-max-size))))
-   ((bufferp content)
-    (insert-buffer-substring content
-                             (with-current-buffer content (point-min))
-                             (with-current-buffer content
-                               (min (point-max)
-                                    (+ (point-min)
-                                       vertico-buffer-frame-preview-max-size))))))
-  (goto-char (point-min)))
-
-(defun vertico-buffer-frame--preview-content ()
-  "Return preview content for the current candidate."
-  (when-let* (((not vertico-buffer-frame--exiting))
-              (function vertico-buffer-frame-preview-function)
-              (candidate (vertico-buffer-frame--current-candidate)))
-    (condition-case err
-        (funcall function candidate)
-      (error
-       (message "vertico-buffer-frame preview: %s" (error-message-string err))
-       nil))))
-
-(defun vertico-buffer-frame--preview-content-while-no-input ()
-  "Return a cons cell (FINISHED . CONTENT) for the current preview.
-FINISHED is nil when Emacs receives input while the preview is being generated."
-  (let ((sentinel (make-symbol "vertico-buffer-frame-preview-done"))
-        content)
-    (if (eq (while-no-input
-              (setq content (vertico-buffer-frame--preview-content))
-              sentinel)
-            sentinel)
-        (cons t content)
-      (cons nil nil))))
-
-(defun vertico-buffer-frame--cancel-preview-timer (&optional buffer)
-  "Cancel the pending preview update timer for BUFFER.
-BUFFER defaults to the current or active minibuffer buffer."
-  (when-let* ((buffer (or buffer
-                          (vertico-buffer-frame--minibuffer-buffer)))
-              ((buffer-live-p buffer)))
-    (with-current-buffer buffer
-      (when (timerp vertico-buffer-frame--preview-timer)
-        (cancel-timer vertico-buffer-frame--preview-timer))
-      (setq-local vertico-buffer-frame--preview-timer nil))))
-
-(defun vertico-buffer-frame--preview-frame-p (frame)
-  "Return non-nil when FRAME belongs to the preview child frame."
-  (and (frame-live-p frame)
-       (frame-parent frame)
-       (eq (frame-parameter frame 'share-child-frame)
-           'vertico-buffer-frame-preview)))
-
-(defun vertico-buffer-frame--preview-frames ()
-  "Return live preview child frames."
-  (seq-filter #'vertico-buffer-frame--preview-frame-p (frame-list)))
-
-(defun vertico-buffer-frame--hide-preview (&optional buffer)
-  "Hide the preview child frame for BUFFER."
-  (when-let* ((buffer (or buffer
-                          (vertico-buffer-frame--minibuffer-buffer)))
-              ((buffer-live-p buffer)))
-    (with-current-buffer buffer
-      (vertico-buffer-frame--cancel-preview-timer buffer)))
-  (let (deleted)
-    (dolist (frame (vertico-buffer-frame--preview-frames))
-      (when (frame-live-p frame)
-        (setq deleted t)
-        (let ((delete-frame-functions nil))
-          (delete-frame frame t))))
-    (setq vertico-buffer-frame--preview-frame nil)
-    (vertico-buffer-frame--kill-preview-location-buffer)
-    (when deleted
-      (redisplay t))))
-
-(defun vertico-buffer-frame--kill-preview-location-buffer ()
-  "Kill the indirect buffer used for marker location previews."
-  (when (buffer-live-p vertico-buffer-frame--preview-location-buffer)
-    (kill-buffer vertico-buffer-frame--preview-location-buffer))
-  (setq vertico-buffer-frame--preview-location-buffer nil))
-
-(defun vertico-buffer-frame--reset-preview-window (window)
-  "Reset WINDOW viewport to the current preview point."
-  (when (window-live-p window)
+(defun vertico-buffer-frame--set-window-position (window position)
+  "Set WINDOW point to POSITION."
+  (when position
     (with-current-buffer (window-buffer window)
-      (let ((point (point)))
-        (set-window-point window point)
-        (set-window-start
-         window
-         (if vertico-buffer-frame--preview-recenter
-             (save-excursion
-               (goto-char point)
-               (forward-line (- (/ (max 1 (window-body-height window)) 2)))
-               (line-beginning-position))
-           point)
-         t)))
-    (set-window-hscroll window 0)))
+      (goto-char (point-min))
+      (cond
+       ((markerp position)
+        (goto-char position))
+       ((integerp position)
+        (goto-char (max (point-min) (min (point-max) position)))))
+      (vertico-buffer-frame--center-window-point window))))
 
-(defun vertico-buffer-frame--preview-buffer-with-marker
-    (content parameters)
-  "Return an indirect preview buffer for marker CONTENT styled by PARAMETERS."
-  (when-let* ((marker (vertico-buffer-frame--marker-preview-marker content))
-              (source (marker-buffer marker))
-              ((buffer-live-p source)))
-    (vertico-buffer-frame--kill-preview-location-buffer)
-    (setq vertico-buffer-frame--preview-location-buffer
-          (with-current-buffer source
-            (clone-indirect-buffer
-             " *vertico-buffer-frame-location-preview*" nil)))
-    (with-current-buffer vertico-buffer-frame--preview-location-buffer
-      (setq-local cursor-type nil
-                  truncate-lines t
-                  mode-line-format nil
-                  header-line-format nil
-                  tab-line-format nil
-                  vertico-buffer-frame--preview-recenter t
-                  face-remapping-alist
-                  (vertico-buffer-frame--face-remapping parameters))
-      (widen)
-      (goto-char (min (point-max) (max (point-min)
-                                       (marker-position marker)))))
-    vertico-buffer-frame--preview-location-buffer))
+(defun vertico-buffer-frame--set-window-line (window line)
+  "Set WINDOW point to LINE."
+  (when (and (integerp line) (> line 0))
+    (with-current-buffer (window-buffer window)
+      (goto-char (point-min))
+      (forward-line (1- line))
+      (vertico-buffer-frame--center-window-point window))))
 
-(defun vertico-buffer-frame--preview-buffer-with-content
-    (content parameters)
-  "Return preview buffer containing CONTENT styled by PARAMETERS."
-  (if (vertico-buffer-frame--marker-preview-p content)
-      (vertico-buffer-frame--preview-buffer-with-marker content parameters)
-    (vertico-buffer-frame--kill-preview-location-buffer)
-    (let ((preview-buffer (get-buffer-create
-                           vertico-buffer-frame--preview-buffer)))
-      (with-current-buffer preview-buffer
-        (let ((inhibit-read-only t)
-              (inhibit-modification-hooks t)
-              (buffer-undo-list t))
-          (setq-local cursor-type nil
-                      truncate-lines t
-                      mode-line-format nil
-                      vertico-buffer-frame--preview-recenter nil
-                      face-remapping-alist
-                      (vertico-buffer-frame--face-remapping parameters))
-          (vertico-buffer-frame--insert-preview-content content)))
-      preview-buffer)))
+(defun vertico-buffer-frame--show-preview (target)
+  "Show preview TARGET."
+  (pcase target
+    (`(file ,file)
+     (let ((window (vertico-buffer-frame--preview-window)))
+       (vertico-buffer-frame--set-preview-window-buffer
+        window
+        (vertico-buffer-frame--file-preview-buffer file))
+       (vertico-buffer-frame--show-frame
+        vertico-buffer-frame--preview-frame)))
+    (`(file-line ,file ,line)
+     (let ((window (vertico-buffer-frame--preview-window)))
+       (vertico-buffer-frame--set-preview-window-buffer
+        window
+        (vertico-buffer-frame--file-preview-buffer file))
+       (vertico-buffer-frame--set-window-line window line)
+       (vertico-buffer-frame--show-frame
+        vertico-buffer-frame--preview-frame)))
+    (`(file-position ,file ,position)
+     (let ((window (vertico-buffer-frame--preview-window)))
+       (vertico-buffer-frame--set-preview-window-buffer
+        window
+        (vertico-buffer-frame--file-preview-buffer file))
+       (vertico-buffer-frame--set-window-position window position)
+       (vertico-buffer-frame--show-frame
+        vertico-buffer-frame--preview-frame)))
+    (`(buffer ,name)
+     (let ((window (vertico-buffer-frame--preview-window)))
+       (vertico-buffer-frame--set-preview-window-buffer
+        window
+        (get-buffer name))
+       (vertico-buffer-frame--show-frame
+        vertico-buffer-frame--preview-frame)))
+    (`(buffer-position ,buffer ,position)
+     (let ((window (vertico-buffer-frame--preview-window)))
+       (vertico-buffer-frame--set-preview-window-buffer
+        window
+        buffer)
+       (vertico-buffer-frame--set-window-position window position)
+       (vertico-buffer-frame--show-frame
+        vertico-buffer-frame--preview-frame)))
+    (`(text ,name ,inserter)
+     (let ((window (vertico-buffer-frame--preview-window)))
+       (vertico-buffer-frame--set-preview-window-buffer
+        window
+        (vertico-buffer-frame--text-preview-buffer name inserter))
+       (vertico-buffer-frame--show-frame
+        vertico-buffer-frame--preview-frame)))))
 
-(defun vertico-buffer-frame--show-preview-window
-    (preview-buffer parameters candidate-frame)
-  "Show PREVIEW-BUFFER with PARAMETERS next to CANDIDATE-FRAME."
-  (when-let* ((window (vertico-buffer-frame--preview-window
-                       preview-buffer parameters)))
-    (vertico-buffer-frame--reset-preview-window window)
-    (setq vertico-buffer-frame--preview-frame (window-frame window))
-    (vertico-buffer-frame--hide-window-chrome window)
-    (vertico-buffer-frame--apply-frame-parameters
-     vertico-buffer-frame--preview-frame parameters)
-    (vertico-buffer-frame--position-pair
-     candidate-frame vertico-buffer-frame--preview-frame)
-    (vertico-buffer-frame--ensure-frame-visible
-     vertico-buffer-frame--preview-frame)))
+(defun vertico-buffer-frame--cancel-preview-timer ()
+  "Cancel the pending preview timer for the current minibuffer buffer."
+  (when (timerp vertico-buffer-frame--preview-timer)
+    (cancel-timer vertico-buffer-frame--preview-timer))
+  (setq-local vertico-buffer-frame--preview-timer nil))
 
-(defun vertico-buffer-frame--show-nonempty-preview
-    (content candidate-frame)
-  "Show nonempty preview CONTENT for CANDIDATE-FRAME."
-  (let* ((parameters (vertico-buffer-frame--preview-frame-parameters
-                      candidate-frame))
-         (preview-buffer
-          (vertico-buffer-frame--preview-buffer-with-content
-           content parameters)))
-    (vertico-buffer-frame--show-preview-window
-     preview-buffer parameters candidate-frame)))
-
-(defun vertico-buffer-frame--show-preview-content (content)
-  "Show preview CONTENT in the preview child frame."
-  (let* ((minibuffer-buffer (vertico-buffer-frame--minibuffer-buffer))
-         (enabled (and (bound-and-true-p vertico-buffer-frame-mode)
-                       (vertico-buffer-frame--preview-enabled-p
-                        minibuffer-buffer)))
-         (candidate-frame (and enabled
-                               (vertico-buffer-frame--candidate-frame))))
-    (cond
-     ((and enabled (frame-live-p candidate-frame) content)
-      (vertico-buffer-frame--show-nonempty-preview content candidate-frame))
-     ((and enabled (frame-live-p candidate-frame))
-      (vertico-buffer-frame--hide-preview minibuffer-buffer))
-     (t
-      (vertico-buffer-frame--hide-preview minibuffer-buffer)))))
-
-(defun vertico-buffer-frame--show-preview ()
-  "Show preview for the current Vertico candidate.
-The preview is generated from the current minibuffer state."
-  (if (vertico-buffer-frame--preview-enabled-p (current-buffer))
-      (if (vertico-buffer-frame--current-candidate)
-          (let ((result (vertico-buffer-frame--preview-content-while-no-input)))
-            (when (car result)
-              (vertico-buffer-frame--show-preview-content (cdr result))))
-        (vertico-buffer-frame--hide-preview (current-buffer)))
-    (vertico-buffer-frame--hide-preview (current-buffer))))
+(defun vertico-buffer-frame--hide-preview ()
+  "Hide the preview child frame."
+  (vertico-buffer-frame--cancel-preview-timer)
+  (vertico-buffer-frame--delete-frame vertico-buffer-frame--preview-frame)
+  (vertico-buffer-frame--kill-preview-buffer)
+  (setq-local vertico-buffer-frame--preview-frame nil
+              vertico-buffer-frame--preview-window nil))
 
 (defun vertico-buffer-frame--show-preview-later (buffer)
-  "Show preview in minibuffer BUFFER from an idle timer."
+  "Show preview for minibuffer BUFFER after the configured delay."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (setq-local vertico-buffer-frame--preview-timer nil)
-      (when (and (not vertico-buffer-frame--exiting)
-                 (vertico-buffer-frame--preview-enabled-p buffer))
-        (vertico-buffer-frame--show-preview)))))
+      (condition-case nil
+          (if (and vertico-buffer-frame-mode
+                   vertico-buffer-frame-preview
+                   (bound-and-true-p vertico--input))
+              (if-let* ((target (vertico-buffer-frame--preview-target)))
+                  (vertico-buffer-frame--show-preview target)
+                (vertico-buffer-frame--hide-preview))
+            (vertico-buffer-frame--hide-preview))
+        (error
+         (vertico-buffer-frame--hide-preview))))))
 
 (defun vertico-buffer-frame--schedule-preview ()
-  "Schedule a preview update for the current Vertico candidate."
+  "Schedule preview display for the current minibuffer buffer."
   (vertico-buffer-frame--cancel-preview-timer)
-  (if (and (vertico-buffer-frame--preview-enabled-p (current-buffer))
-           (not vertico-buffer-frame--exiting)
-           (vertico-buffer-frame--current-candidate))
-      (let ((delay (max 0 (float vertico-buffer-frame-preview-delay)))
-            (buffer (current-buffer)))
-        (if (zerop delay)
-            (vertico-buffer-frame--show-preview)
-          (setq-local
-           vertico-buffer-frame--preview-timer
-           (run-with-idle-timer
-            delay nil
-            #'vertico-buffer-frame--show-preview-later
-            buffer))))
+  (setq-local vertico-buffer-frame--preview-timer
+              (run-with-idle-timer
+               (max 0 (float vertico-buffer-frame-preview-delay))
+               nil
+               #'vertico-buffer-frame--show-preview-later
+               (current-buffer))))
+
+(defun vertico-buffer-frame--preview-post-command ()
+  "Schedule a delayed preview update after Vertico updates candidates."
+  (if (and vertico-buffer-frame-mode
+           vertico-buffer-frame-preview
+           (bound-and-true-p vertico--input))
+      (vertico-buffer-frame--schedule-preview)
     (vertico-buffer-frame--hide-preview)))
-
-(defun vertico-buffer-frame--refresh-active-preview ()
-  "Refresh preview for the active minibuffer, when any."
-  (if-let* ((window (active-minibuffer-window))
-            ((window-live-p window))
-            (buffer (window-buffer window)))
-      (with-current-buffer buffer
-        (if (vertico-buffer-frame--preview-enabled-p buffer)
-            (vertico-buffer-frame--show-preview)
-          (vertico-buffer-frame--hide-preview buffer)))
-    (vertico-buffer-frame--hide-preview)))
-
-(defun vertico-buffer-frame--refresh-minibuffer-preview (&optional buffer)
-  "Refresh preview for minibuffer BUFFER.
-BUFFER defaults to the most recent live minibuffer tracked by
-`vertico-buffer-frame-mode'."
-  (if-let* ((buffer (or buffer
-                        (vertico-buffer-frame--active-minibuffer-buffer)
-                        (vertico-buffer-frame--top-minibuffer-buffer)))
-            ((vertico-buffer-frame--live-minibuffer-buffer-p buffer)))
-      (with-current-buffer buffer
-        (if (and (not vertico-buffer-frame--exiting)
-                 (vertico-buffer-frame--preview-enabled-p buffer))
-            (vertico-buffer-frame--show-preview)
-          (vertico-buffer-frame--hide-preview buffer)))
-    (vertico-buffer-frame--hide-preview)))
-
-(defun vertico-buffer-frame--set-preview-enabled (buffer enabled)
-  "Set preview ENABLED state for BUFFER or globally.
-When BUFFER is a live minibuffer buffer, only the current completion session is
-changed.  Otherwise update the global default."
-  (if (vertico-buffer-frame--live-minibuffer-buffer-p buffer)
-      (with-current-buffer buffer
-        (setq-local vertico-buffer-frame--preview-enabled enabled))
-    (setq vertico-buffer-frame-preview enabled)))
-
-(defun vertico-buffer-frame--preview-scope (buffer)
-  "Return the display scope name for preview state in BUFFER."
-  (if (vertico-buffer-frame--live-minibuffer-buffer-p buffer)
-      "session"
-    "default"))
 
 (provide 'vertico-buffer-frame-preview)
 ;;; vertico-buffer-frame-preview.el ends here

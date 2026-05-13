@@ -1,26 +1,18 @@
 #+title: vertico-buffer-frame
 
-Experimental child frame display for Vertico's ~vertico-buffer-mode~, with an
-optional preview child frame.
+Experimental child-frame display for Vertico's ~vertico-buffer-mode~, with an
+optional candidate preview child frame.
 
-Child frames are supported on graphical displays, and on terminal displays when
-Emacs provides the ~tty-child-frames~ feature (Emacs 31 or newer).  On older
-terminal Emacs versions, this package leaves display fallback handling to Emacs
-instead of trying to create unsupported child frames.
+The package enables ~vertico-buffer-mode~ and replaces
+~vertico-buffer-display-action~ with a display action which creates fresh child
+frames for each minibuffer session.  The candidate frame is centered in the
+parent frame and sized from a golden-ratio rectangle.  When preview is enabled,
+preview content is shown in a second child frame overlaid on the lower-right
+side of the candidate frame.
 
-The goal is to test whether ~vertico-buffer~ can be shown in a larger child
-frame using only Emacs' built-in ~display-buffer-in-child-frame~, without
-depending on posframe.  The candidate and preview frames are sized as golden
-rectangles, and the candidate frame is centered in the parent frame.  When
-preview is enabled, preview content is shown in a second child frame overlaid on
-the lower-right side of the candidate frame.  Minibuffer-session frame cleanup is
-delegated to Emacs' built-in ~minibuffer-exit~ frame parameter.
-
-The preview layout can also be changed to a side-by-side arrangement.  In that
-layout, the available width is split using the golden ratio: the candidate
-frame uses the smaller segment and the preview frame uses the larger segment.
-This makes larger previews easier to read, at the cost of narrowing the
-candidate frame and minibuffer prompt.
+Child frames require a display where Emacs can create child frames.  This is
+normally a graphical display, or a terminal display with Emacs'
+~tty-child-frames~ support.
 
 This package was split out from the same line of experiments as
 ~vertico-posframe-preview~, but it has a different constraint: keep the
@@ -56,7 +48,7 @@ candidate frame instead of being placed side by side with the input area.
 #+DOWNLOADED: screenshot @ 2026-05-05 21:27:35
 [[file:Screenshots/2026-05-05_21-27-35_screenshot.png]]
 
-** vertico-buffer-frame-preview-layout = side-by-side
+** preview frame
 :PROPERTIES:
 :ID:       375aad3e-79d8-43fe-b65f-2b6d00723fc6
 :END:
@@ -103,42 +95,37 @@ Add this directory to ~load-path~, then:
 
 * Options
 
-- ~vertico-buffer-frame-background-color~
-- ~vertico-buffer-frame-foreground-color~
-- ~vertico-buffer-frame-alpha~
-- ~vertico-buffer-frame-alpha-background~
-- ~vertico-buffer-frame-preview~
-- ~vertico-buffer-frame-preview-layout~
-- ~vertico-buffer-frame-preview-delay~
-- ~vertico-buffer-frame-preview-max-size~
-- ~vertico-buffer-frame-preview-directory-max-entries~
-- ~vertico-buffer-frame-preview-io-timeout~
-- ~vertico-buffer-frame-preview-binary-detect-bytes~
-- ~vertico-buffer-frame-redraw-after-show~
+- ~vertico-buffer-frame-border-width~
 - ~vertico-buffer-frame-golden-ratio-scale~
-- ~vertico-buffer-frame-tty-cell-height-ratio~
-- ~vertico-buffer-frame-preview-function~
-- ~vertico-buffer-frame-preview-category-functions~
-- ~vertico-buffer-frame-preview-command-functions~
-- ~vertico-buffer-frame-embark-select-source-window~
+- ~vertico-buffer-frame-preview~
+- ~vertico-buffer-frame-preview-delay~
+- ~vertico-buffer-frame-preview-width~
+- ~vertico-buffer-frame-preview-height~
+- ~vertico-buffer-frame-preview-categories~
+
+Additional preview target adapters can be added with the hook variable
+~vertico-buffer-frame-preview-target-functions~.  Hook functions receive
+~CATEGORY~, ~CANDIDATE~ and ~RAW-CANDIDATE~, and should return a target accepted
+by the internal preview renderer, or nil.
+
+The candidate frame is currently sized from the parent frame using the golden
+ratio.  ~vertico-buffer-frame-width~ and ~vertico-buffer-frame-height~ are
+defined, but the current display path does not use them.
+
+The preview frame is sized automatically from the candidate frame so it follows
+parent frame resizing.  ~vertico-buffer-frame-preview-width~ and
+~vertico-buffer-frame-preview-height~ can be set to character counts to cap the
+automatic preview size.
 
 Example:
 
 #+begin_src elisp
   (setq vertico-buffer-frame-preview t
-        vertico-buffer-frame-preview-layout 'overlay
         vertico-buffer-frame-preview-delay 0.2
-        vertico-buffer-frame-preview-io-timeout 0.3
-        vertico-buffer-frame-alpha 100
-        vertico-buffer-frame-alpha-background 100
-        vertico-buffer-frame-redraw-after-show nil
-        vertico-buffer-frame-golden-ratio-scale 1.00)
-#+end_src
-
-To place the preview beside the candidates instead of overlaying it:
-
-#+begin_src elisp
-  (setq vertico-buffer-frame-preview-layout 'side-by-side)
+        vertico-buffer-frame-preview-width nil
+        vertico-buffer-frame-preview-height nil
+        vertico-buffer-frame-border-width 1
+        vertico-buffer-frame-golden-ratio-scale 1.0)
 #+end_src
 
 To toggle the preview while completing, bind the toggle command in
@@ -152,6 +139,7 @@ To toggle the preview while completing, bind the toggle command in
 
 * Commands
 
+- ~vertico-buffer-frame-cleanup~
 - ~vertico-buffer-frame-toggle-preview~
 
 When called during completion, ~vertico-buffer-frame-toggle-preview~ changes
@@ -159,58 +147,50 @@ preview visibility only for the current minibuffer session.  When called
 outside the minibuffer, it changes the global default
 ~vertico-buffer-frame-preview~.
 
-* Embark buffers
+~vertico-buffer-frame-cleanup~ deletes child frames currently owned by active
+minibuffer sessions.
 
-Embark collect, live, and export buffers still use Embark's normal display path,
-so placement is controlled by ~display-buffer-alist~ and related Emacs display
-settings.
+* Stability notes
 
-When Embark is loaded, this package displays Embark buffers and Embark's
-deferred display commands from the original non-minibuffer window instead of
-the Vertico child frame.  Disable
-~vertico-buffer-frame-embark-select-source-window~ to leave that context
-untouched.
-
-Example:
-
-#+begin_src elisp
-  (add-to-list
-   'display-buffer-alist
-   '("\\`\\*Embark \\(?:Collect\\|Live\\|Export\\)"
-     (display-buffer-reuse-window display-buffer-below-selected)
-     (window-height . 0.35)))
-#+end_src
+This package intentionally builds on ~vertico-buffer-mode~ and Emacs child
+frames, but it still depends on some Vertico internals.  Candidate lookup uses
+~vertico--candidate~ and ~vertico--metadata~, and frame reveal is hooked with an
+~:after~ method on ~vertico--display-candidates~.  Consult support is isolated
+in ~vertico-buffer-frame-consult.el~ and uses Consult text properties plus a
+small amount of Consult imenu internals.  These hooks may need adjustment when
+Vertico or Consult changes their internal APIs.
 
 * Preview
 
-Built-in preview functions currently cover files, directories, buffers,
-bookmarks, documentation-like categories such as commands, functions, variables,
-symbols, faces, Custom groups, environment variables, Unicode names, Info menu
-items, calendar months and colors, text-like categories such as kill-ring,
-dabbrev, ecomplete, email, BibTeX keys and expressions, and location-like
-candidates from common completion categories such as Consult grep, Consult
-compile errors, Consult Flymake diagnostics, Consult Info, imenu, Org headings
-and xref.  Built-in Customize commands such as ~customize-option~,
-~customize-face~, ~customize-group~ and ~customize-mode~ are also mapped to the
-same preview functions even when their completion tables do not expose a
-category.
+Built-in preview targets currently cover files, project files, directories,
+buffers, bookmarks, xref locations, imenu entries, symbols and documentation-like
+categories such as commands, functions, variables, faces, minor modes, Custom
+groups and Custom variables.  They also cover Unicode names, environment
+variables, Info menu items, calendar months, colors, themes, input methods,
+coding systems, charsets, libraries, packages, registers, processes, email,
+ecomplete, dabbrev, BibTeX keys and strings, and kill-ring entries.
 
-When a completion table exposes Emacs' standard completion metadata, the
-preview can also use its ~affixation-function~, ~annotation-function~, and
-~group-function~ as a generic fallback.  This gives useful previews to more
-built-in and third-party completion tables without adding package-specific
-advice.
+Consult-specific targets live in ~vertico-buffer-frame-consult.el~ and are
+loaded by the preview module.  They add support for ~consult-location~,
+~consult-grep~, ~consult-xref~ and Consult imenu candidates.
 
-This is intentionally a small experiment scaffold.  Focus handling, placement,
-recursive minibuffers, and frame reuse still need real-world testing.
+Preview display is category-gated by
+~vertico-buffer-frame-preview-categories~.  Remove categories from that list to
+disable their preview, or add a function to
+~vertico-buffer-frame-preview-target-functions~ for extra preview target
+resolution.
+
+The current prototype creates a fresh preview frame and a fresh temporary
+preview buffer for each preview update.  File previews read the selected file
+directly, directory previews list the directory directly, and there is currently
+no built-in file-size limit, binary-file detector, or remote-file guard.
 
 * Difference from vertico-posframe-preview
 
 [[https://github.com/kn66/vertico-posframe-preview][vertico-posframe-preview]] is a related package which adds a second posframe for
 preview content beside the candidate posframe shown by ~vertico-posframe~.  This
 package does not depend on ~posframe~ or ~vertico-posframe~; it uses
-~vertico-buffer-mode~ and Emacs' built-in ~display-buffer-in-child-frame~
-instead.
+~vertico-buffer-mode~ and plain Emacs child frames instead.
 
 The main differences are:
 
@@ -218,20 +198,14 @@ The main differences are:
   ~vertico-posframe-preview~ depends on ~posframe~ and ~vertico-posframe~.
 - ~vertico-buffer-frame~ keeps the minibuffer prompt width intact and overlays
   the preview on the lower-right side of the candidate frame.  This favors long
-  input workflows, such as file rename and path editing.  It can optionally use
-  ~vertico-buffer-frame-preview-layout~ set to ~side-by-side~ for a non-overlap
-  layout with a golden-ratio width split.
+  input workflows, such as file rename and path editing.
 - ~vertico-posframe-preview~ places candidate and preview frames side by side
   by default and follows the ~vertico-posframe~ configuration model.  This can
   make large previews easier to read, but it is a different layout tradeoff.
 - ~vertico-buffer-frame~ avoids advising ~vertico-posframe~ and Consult preview
-  internals.  It previews candidates from completion metadata, text properties,
-  and category-specific functions.  Completion categories are read through
-  Emacs' built-in ~completion-metadata~ API.  ~vertico-posframe-preview~
-  mirrors Consult preview state more directly, but it intentionally advises
-  private APIs.
-- Both packages guard preview file I/O by skipping remote paths, bounding local
-  I/O, skipping binary files, and limiting directory previews.
+  state.  It previews candidates from Vertico metadata, text properties, and
+  category-specific target functions.  Consult support is handled by a small
+  target adapter instead of mirroring Consult preview state directly.
 
 The reason for this package is therefore not to replace
 ~vertico-posframe-preview~ feature-for-feature.  It is to explore a lighter
@@ -245,6 +219,8 @@ Run the non-graphical unit tests with:
 #+begin_src sh
   emacs --batch -Q \
         --eval "(setq load-prefer-newer t)" \
+        --eval "(setq native-comp-jit-compilation nil)" \
+        --eval "(setq native-comp-enable-subr-trampolines nil)" \
         --eval "(progn (require 'package) (package-initialize))" \
         -L . \
         -l test/vertico-buffer-frame-test.el \
