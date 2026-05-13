@@ -37,6 +37,20 @@ When nil, derive the width from the candidate frame."
 When nil, derive the height from the candidate frame."
   :type '(choice (const :tag "Automatic" nil) natnum))
 
+(defcustom vertico-buffer-frame-preview-max-file-size 1048576
+  "Maximum bytes to read from a regular file for previews.
+When nil, read the whole file."
+  :type '(choice (const :tag "Unlimited" nil) natnum))
+
+(defcustom vertico-buffer-frame-preview-remote-files nil
+  "Non-nil means preview remote files."
+  :type 'boolean)
+
+(defcustom vertico-buffer-frame-preview-binary-files nil
+  "Non-nil means preview binary file contents.
+When nil, binary-looking files are shown as metadata only."
+  :type 'boolean)
+
 (defcustom vertico-buffer-frame-preview-categories
   '(file
     project-file
@@ -197,7 +211,9 @@ the `multi-category' text property."
   "Return expanded FILE when it is readable."
   (when (stringp file)
     (let ((expanded (expand-file-name (substitute-in-file-name file))))
-      (and (file-readable-p expanded)
+      (and (or vertico-buffer-frame-preview-remote-files
+               (not (file-remote-p expanded)))
+           (file-readable-p expanded)
            expanded))))
 
 (defun vertico-buffer-frame--file-target (candidate &optional directory)
@@ -842,6 +858,59 @@ When HORIZONTAL is non-nil, convert columns; otherwise convert lines."
     (when (= count 0)
       (insert "Empty directory\n"))))
 
+(defun vertico-buffer-frame--file-size (file)
+  "Return FILE size in bytes, or nil if it cannot be determined."
+  (ignore-errors
+    (file-attribute-size (file-attributes file 'integer))))
+
+(defun vertico-buffer-frame--file-preview-limit (size)
+  "Return the byte limit for a file preview of SIZE bytes."
+  (when (integerp vertico-buffer-frame-preview-max-file-size)
+    (let ((limit (max 0 vertico-buffer-frame-preview-max-file-size)))
+      (if (integerp size)
+          (min limit size)
+        limit))))
+
+(defun vertico-buffer-frame--binary-file-p (file size)
+  "Return non-nil when FILE appears to be binary.
+SIZE is the file size in bytes, or nil if it is unknown."
+  (let ((limit (min 4096 (or size 4096))))
+    (and (> limit 0)
+         (with-temp-buffer
+           (set-buffer-multibyte nil)
+           (insert-file-contents-literally file nil 0 limit)
+           (goto-char (point-min))
+           (search-forward (string 0) nil t)))))
+
+(defun vertico-buffer-frame--insert-regular-file-preview (file)
+  "Insert a guarded preview of regular FILE."
+  (let* ((size (vertico-buffer-frame--file-size file))
+         (limit (vertico-buffer-frame--file-preview-limit size)))
+    (cond
+     ((and limit
+           (= limit 0))
+      (insert (abbreviate-file-name file) "\n\n")
+      (insert "File preview is limited to 0 bytes.\n")
+      (when size
+        (insert "Size: " (number-to-string size) " bytes\n")))
+     ((and (not vertico-buffer-frame-preview-binary-files)
+           (vertico-buffer-frame--binary-file-p file size))
+      (insert (abbreviate-file-name file) "\n\n")
+      (insert "Binary file preview skipped.\n")
+      (when size
+        (insert "Size: " (number-to-string size) " bytes\n")))
+     (t
+      (insert-file-contents file nil 0 limit)
+      (when (and size
+                 limit
+                 (< limit size))
+        (goto-char (point-max))
+        (insert "\n\nPreview truncated at "
+                (number-to-string limit)
+                " of "
+                (number-to-string size)
+                " bytes.\n"))))))
+
 (defun vertico-buffer-frame--file-preview-buffer (file)
   "Return a new temporary preview buffer for FILE."
   (vertico-buffer-frame--text-preview-buffer
@@ -851,7 +920,7 @@ When HORIZONTAL is non-nil, convert columns; otherwise convert lines."
       ((file-directory-p file)
        (vertico-buffer-frame--insert-directory-preview file))
       ((file-regular-p file)
-       (insert-file-contents file))
+       (vertico-buffer-frame--insert-regular-file-preview file))
       (t
        (insert (abbreviate-file-name file) "\n"))))))
 

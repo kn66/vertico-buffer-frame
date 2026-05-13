@@ -96,11 +96,17 @@ Add this directory to ~load-path~, then:
 * Options
 
 - ~vertico-buffer-frame-border-width~
+- ~vertico-buffer-frame-size-method~
+- ~vertico-buffer-frame-width~
+- ~vertico-buffer-frame-height~
 - ~vertico-buffer-frame-golden-ratio-scale~
 - ~vertico-buffer-frame-preview~
 - ~vertico-buffer-frame-preview-delay~
 - ~vertico-buffer-frame-preview-width~
 - ~vertico-buffer-frame-preview-height~
+- ~vertico-buffer-frame-preview-max-file-size~
+- ~vertico-buffer-frame-preview-remote-files~
+- ~vertico-buffer-frame-preview-binary-files~
 - ~vertico-buffer-frame-preview-categories~
 
 Additional preview target adapters can be added with the hook variable
@@ -108,22 +114,32 @@ Additional preview target adapters can be added with the hook variable
 ~CATEGORY~, ~CANDIDATE~ and ~RAW-CANDIDATE~, and should return a target accepted
 by the internal preview renderer, or nil.
 
-The candidate frame is currently sized from the parent frame using the golden
-ratio.  ~vertico-buffer-frame-width~ and ~vertico-buffer-frame-height~ are
-defined, but the current display path does not use them.
+The candidate frame is sized from the parent frame using the golden ratio by
+default.  Set ~vertico-buffer-frame-size-method~ to ~fixed~ to use
+~vertico-buffer-frame-width~ and ~vertico-buffer-frame-height~ as character
+counts.
 
 The preview frame is sized automatically from the candidate frame so it follows
 parent frame resizing.  ~vertico-buffer-frame-preview-width~ and
 ~vertico-buffer-frame-preview-height~ can be set to character counts to cap the
 automatic preview size.
 
+File previews read at most ~vertico-buffer-frame-preview-max-file-size~ bytes
+from regular files by default.  Remote files and binary-looking files are not
+previewed unless ~vertico-buffer-frame-preview-remote-files~ or
+~vertico-buffer-frame-preview-binary-files~ is non-nil.
+
 Example:
 
 #+begin_src elisp
-  (setq vertico-buffer-frame-preview t
+  (setq vertico-buffer-frame-size-method 'golden-ratio
+        vertico-buffer-frame-preview t
         vertico-buffer-frame-preview-delay 0.2
         vertico-buffer-frame-preview-width nil
         vertico-buffer-frame-preview-height nil
+        vertico-buffer-frame-preview-max-file-size 1048576
+        vertico-buffer-frame-preview-remote-files nil
+        vertico-buffer-frame-preview-binary-files nil
         vertico-buffer-frame-border-width 1
         vertico-buffer-frame-golden-ratio-scale 1.0)
 #+end_src
@@ -181,9 +197,9 @@ disable their preview, or add a function to
 resolution.
 
 The current prototype creates a fresh preview frame and a fresh temporary
-preview buffer for each preview update.  File previews read the selected file
-directly, directory previews list the directory directly, and there is currently
-no built-in file-size limit, binary-file detector, or remote-file guard.
+preview buffer for each preview update.  Directory previews list the directory
+directly.  Regular file previews are guarded by a byte limit, a simple binary
+detector, and a remote-file opt-in.
 
 * Difference from vertico-posframe-preview
 

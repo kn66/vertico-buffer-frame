@@ -67,6 +67,14 @@
   "Height of the Vertico child frame in characters."
   :type 'natnum)
 
+(defcustom vertico-buffer-frame-size-method 'golden-ratio
+  "How to size the Vertico child frame.
+When this is `golden-ratio', derive the size from the selected frame.
+When this is `fixed', use `vertico-buffer-frame-width' and
+`vertico-buffer-frame-height'."
+  :type '(choice (const :tag "Golden ratio" golden-ratio)
+                 (const :tag "Fixed character size" fixed)))
+
 (defcustom vertico-buffer-frame-border-width 1
   "Width of the child frame border in pixels."
   :type 'natnum)
@@ -206,6 +214,13 @@ A value of 1.0 uses the golden-section size derived from the parent frame."
   "Return VALUE rounded to a positive pixel count."
   (max 1 (round value)))
 
+(defun vertico-buffer-frame--positive-chars (value)
+  "Return VALUE as a positive character count."
+  (if (and (integerp value)
+           (> value 0))
+      value
+    1))
+
 (defun vertico-buffer-frame--parent-pixel-size (parent)
   "Return PARENT frame size in pixels."
   (cons (max 1 (frame-pixel-width parent))
@@ -244,18 +259,40 @@ A value of 1.0 uses the golden-section size derived from the parent frame."
     (cons (cons 'text-pixels (car size))
           (cons 'text-pixels (cdr size)))))
 
+(defun vertico-buffer-frame--fixed-frame-size ()
+  "Return fixed child frame size parameters in characters."
+  (cons (vertico-buffer-frame--positive-chars
+         vertico-buffer-frame-width)
+        (vertico-buffer-frame--positive-chars
+         vertico-buffer-frame-height)))
+
+(defun vertico-buffer-frame--candidate-frame-size (parent)
+  "Return child frame size parameters for PARENT."
+  (pcase vertico-buffer-frame-size-method
+    ('fixed
+     (vertico-buffer-frame--fixed-frame-size))
+    (_
+     (vertico-buffer-frame--golden-frame-size parent))))
+
 (defun vertico-buffer-frame--resize-frame-to-size (frame size)
-  "Resize FRAME to SIZE when SIZE uses text-pixel parameters."
+  "Resize FRAME to SIZE.
+SIZE may use text-pixel parameters or character counts."
   (when (frame-live-p frame)
     (let ((width (car size))
           (height (cdr size)))
-      (when (and (consp width)
-                 (eq (car width) 'text-pixels)
-                 (natnump (cdr width))
-                 (consp height)
-                 (eq (car height) 'text-pixels)
-                 (natnump (cdr height)))
-        (set-frame-size frame (cdr width) (cdr height) t)))))
+      (cond
+       ((and (consp width)
+             (eq (car width) 'text-pixels)
+             (natnump (cdr width))
+             (consp height)
+             (eq (car height) 'text-pixels)
+             (natnump (cdr height)))
+        (set-frame-size frame (cdr width) (cdr height) t))
+       ((and (natnump width)
+             (natnump height))
+        (set-frame-size frame
+                        (vertico-buffer-frame--positive-chars width)
+                        (vertico-buffer-frame--positive-chars height)))))))
 
 (defun vertico-buffer-frame--prepare-window (window)
   "Remove chrome and spacing from child frame WINDOW."
@@ -326,7 +363,7 @@ This function is intended for `vertico-buffer-display-action'."
                     (current-buffer))))
     (with-current-buffer owner
       (let* ((parent (vertico-buffer-frame--parent-frame))
-             (size (vertico-buffer-frame--golden-frame-size parent)))
+             (size (vertico-buffer-frame--candidate-frame-size parent)))
         (vertico-buffer-frame--delete-frame
          vertico-buffer-frame--candidate-frame)
         (setq-local vertico-buffer-frame--candidate-frame nil
@@ -353,7 +390,7 @@ This function is intended for `vertico-buffer-display-action'."
   "Reveal and refresh the current minibuffer's candidate frame."
   (when (vertico-buffer-frame--candidate-window-live-p)
     (let* ((parent (vertico-buffer-frame--parent-frame))
-           (size (vertico-buffer-frame--golden-frame-size parent)))
+           (size (vertico-buffer-frame--candidate-frame-size parent)))
       (vertico-buffer-frame--resize-frame-to-size
        vertico-buffer-frame--candidate-frame size)
       (vertico-buffer-frame--place-candidate-frame

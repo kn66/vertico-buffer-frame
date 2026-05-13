@@ -134,6 +134,13 @@
       (should (equal (vertico-buffer-frame--golden-pixel-size 'parent)
                      '(1080 . 667))))))
 
+(ert-deftest vertico-buffer-frame-candidate-size-can-use-fixed-options ()
+  (let ((vertico-buffer-frame-size-method 'fixed)
+        (vertico-buffer-frame-width 42)
+        (vertico-buffer-frame-height 7))
+    (should (equal (vertico-buffer-frame--candidate-frame-size 'parent)
+                   '(42 . 7)))))
+
 (ert-deftest vertico-buffer-frame-preview-size-follows-candidate-frame ()
   (let ((vertico-buffer-frame-preview-width nil)
         (vertico-buffer-frame-preview-height nil))
@@ -221,7 +228,7 @@
                                                 (1+ (length created))))))
                      (push frame created)
                      frame)))
-                ((symbol-function #'vertico-buffer-frame--golden-frame-size)
+                ((symbol-function #'vertico-buffer-frame--candidate-frame-size)
                  (lambda (_parent)
                    '(80 . 10)))
                 ((symbol-function #'frame-root-window)
@@ -279,7 +286,7 @@
                 ((symbol-function #'vertico-buffer-frame--parent-frame)
                  (lambda ()
                    'parent))
-                ((symbol-function #'vertico-buffer-frame--golden-frame-size)
+                ((symbol-function #'vertico-buffer-frame--candidate-frame-size)
                  (lambda (parent)
                    (should (eq parent 'parent))
                    'size))
@@ -382,6 +389,40 @@
           (let ((preview (vertico-buffer-frame--file-preview-buffer file)))
             (with-current-buffer preview
               (should (equal (buffer-string) "abcdef"))))
+          (when (buffer-live-p vertico-buffer-frame--preview-buffer)
+            (kill-buffer vertico-buffer-frame--preview-buffer)))
+      (delete-file file))))
+
+(ert-deftest vertico-buffer-frame-file-preview-buffer-truncates-large-file ()
+  (let ((file (make-temp-file "vbf-preview")))
+    (unwind-protect
+        (with-temp-buffer
+          (setq-local vertico-buffer-frame--preview-buffer nil)
+          (with-temp-file file
+            (insert "abcdef"))
+          (let ((vertico-buffer-frame-preview-max-file-size 3))
+            (let ((preview (vertico-buffer-frame--file-preview-buffer file)))
+              (with-current-buffer preview
+                (should (string-prefix-p "abc" (buffer-string)))
+                (should (string-match-p
+                         "Preview truncated at 3 of 6 bytes"
+                         (buffer-string))))))
+          (when (buffer-live-p vertico-buffer-frame--preview-buffer)
+            (kill-buffer vertico-buffer-frame--preview-buffer)))
+      (delete-file file))))
+
+(ert-deftest vertico-buffer-frame-file-preview-buffer-skips-binary-file ()
+  (let ((file (make-temp-file "vbf-preview")))
+    (unwind-protect
+        (with-temp-buffer
+          (setq-local vertico-buffer-frame--preview-buffer nil)
+          (with-temp-file file
+            (insert "a" (string 0) "b"))
+          (let ((preview (vertico-buffer-frame--file-preview-buffer file)))
+            (with-current-buffer preview
+              (should (string-match-p
+                       "Binary file preview skipped"
+                       (buffer-string)))))
           (when (buffer-live-p vertico-buffer-frame--preview-buffer)
             (kill-buffer vertico-buffer-frame--preview-buffer)))
       (delete-file file))))
@@ -554,18 +595,34 @@
                 (kill-buffer buffer)))
             (list candidate-buffer minibuffer)))))
 
-(ert-deftest vertico-buffer-frame-file-target-does-not-skip-remote-files ()
+(ert-deftest vertico-buffer-frame-file-target-skips-remote-files-by-default ()
   (with-temp-buffer
     (setq-local vertico--input t
                 vertico--metadata '(metadata (category . file)))
-    (cl-letf (((symbol-function #'vertico--candidate)
-               (lambda (&optional _hl)
-                 "/ssh:example:/tmp/file"))
-              ((symbol-function #'file-readable-p)
-               (lambda (_file)
-                 t)))
-      (should (equal (vertico-buffer-frame--preview-target)
-                     '(file "/ssh:example:/tmp/file"))))))
+    (let (readable-called)
+      (cl-letf (((symbol-function #'vertico--candidate)
+                 (lambda (&optional _hl)
+                   "/ssh:example:/tmp/file"))
+                ((symbol-function #'file-readable-p)
+                 (lambda (_file)
+                   (setq readable-called t)
+                   t)))
+        (should-not (vertico-buffer-frame--preview-target))
+        (should-not readable-called)))))
+
+(ert-deftest vertico-buffer-frame-file-target-allows-remote-files-when-enabled ()
+  (with-temp-buffer
+    (setq-local vertico--input t
+                vertico--metadata '(metadata (category . file)))
+    (let ((vertico-buffer-frame-preview-remote-files t))
+      (cl-letf (((symbol-function #'vertico--candidate)
+                 (lambda (&optional _hl)
+                   "/ssh:example:/tmp/file"))
+                ((symbol-function #'file-readable-p)
+                 (lambda (_file)
+                   t)))
+        (should (equal (vertico-buffer-frame--preview-target)
+                       '(file "/ssh:example:/tmp/file")))))))
 
 (ert-deftest vertico-buffer-frame-preview-categories-include-builtins ()
   (dolist (category '(file
