@@ -100,6 +100,7 @@ Add this directory to ~load-path~, then:
 - ~vertico-buffer-frame-width~
 - ~vertico-buffer-frame-height~
 - ~vertico-buffer-frame-golden-ratio-scale~
+- ~vertico-buffer-frame-cleanup-on-external-display~
 - ~vertico-buffer-frame-preview~
 - ~vertico-buffer-frame-preview-delay~
 - ~vertico-buffer-frame-preview-width~
@@ -107,6 +108,9 @@ Add this directory to ~load-path~, then:
 - ~vertico-buffer-frame-preview-max-file-size~
 - ~vertico-buffer-frame-preview-remote-files~
 - ~vertico-buffer-frame-preview-binary-files~
+- ~vertico-buffer-frame-preview-directory-entry-limit~
+- ~vertico-buffer-frame-preview-search-buffer-limit~
+- ~vertico-buffer-frame-preview-report-errors~
 - ~vertico-buffer-frame-preview-categories~
 
 Additional preview target adapters can be added with the hook variable
@@ -117,7 +121,9 @@ by the internal preview renderer, or nil.
 The candidate frame is sized from the parent frame using the golden ratio by
 default.  Set ~vertico-buffer-frame-size-method~ to ~fixed~ to use
 ~vertico-buffer-frame-width~ and ~vertico-buffer-frame-height~ as character
-counts.
+counts.  With the default scale of 1.0, the candidate frame is one
+golden-ratio step smaller than the largest golden rectangle fitting in the
+parent frame.  Values near 1.618 use the full fitting rectangle.
 
 The preview frame is sized automatically from the candidate frame so it follows
 parent frame resizing.  ~vertico-buffer-frame-preview-width~ and
@@ -128,6 +134,12 @@ File previews read at most ~vertico-buffer-frame-preview-max-file-size~ bytes
 from regular files by default.  Remote files and binary-looking files are not
 previewed unless ~vertico-buffer-frame-preview-remote-files~ or
 ~vertico-buffer-frame-preview-binary-files~ is non-nil.
+
+Directory previews show at most
+~vertico-buffer-frame-preview-directory-entry-limit~ entries by default.  Some
+text-like preview targets, such as ~dabbrev~, search live buffers; this fallback
+search is capped by ~vertico-buffer-frame-preview-search-buffer-limit~ with the
+minibuffer origin buffer searched first.
 
 Example:
 
@@ -140,6 +152,10 @@ Example:
         vertico-buffer-frame-preview-max-file-size 1048576
         vertico-buffer-frame-preview-remote-files nil
         vertico-buffer-frame-preview-binary-files nil
+        vertico-buffer-frame-preview-directory-entry-limit 200
+        vertico-buffer-frame-preview-search-buffer-limit 20
+        vertico-buffer-frame-preview-report-errors t
+        vertico-buffer-frame-cleanup-on-external-display t
         vertico-buffer-frame-border-width 1
         vertico-buffer-frame-golden-ratio-scale 1.0)
 #+end_src
@@ -186,9 +202,9 @@ variables, Info menu items, calendar months, colors, themes, input methods,
 coding systems, charsets, libraries, packages, registers, processes, email,
 ecomplete, dabbrev, BibTeX keys and strings, and kill-ring entries.
 
-Consult-specific targets live in ~vertico-buffer-frame-consult.el~ and are
-loaded by the preview module.  They add support for ~consult-location~,
-~consult-grep~, ~consult-xref~ and Consult imenu candidates.
+Consult-specific targets live in ~vertico-buffer-frame-consult.el~.  They are
+loaded automatically after Consult is loaded, and add support for
+~consult-location~, ~consult-grep~, ~consult-xref~ and Consult imenu candidates.
 
 Preview display is category-gated by
 ~vertico-buffer-frame-preview-categories~.  Remove categories from that list to
@@ -196,10 +212,11 @@ disable their preview, or add a function to
 ~vertico-buffer-frame-preview-target-functions~ for extra preview target
 resolution.
 
-The current prototype creates a fresh preview frame and a fresh temporary
-preview buffer for each preview update.  Directory previews list the directory
-directly.  Regular file previews are guarded by a byte limit, a simple binary
-detector, and a remote-file opt-in.
+The current prototype reuses the preview frame while the minibuffer is active
+and skips repeated updates for unchanged file, buffer, and location targets.
+Temporary buffers are still created for file and text previews as needed.
+Regular file previews are guarded by a byte limit, a simple binary detector,
+and a remote-file opt-in.
 
 * Difference from vertico-posframe-preview
 

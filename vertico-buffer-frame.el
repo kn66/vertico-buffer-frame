@@ -79,9 +79,19 @@ When this is `fixed', use `vertico-buffer-frame-width' and
   "Width of the child frame border in pixels."
   :type 'natnum)
 
+(defcustom vertico-buffer-frame-cleanup-on-external-display t
+  "Non-nil means clean child frames before external buffer display.
+When enabled, `vertico-buffer-frame-mode' advises `display-buffer' so that
+completion child frames are deleted before unrelated buffers are displayed from
+inside an active minibuffer.  Set this to nil if the advice conflicts with other
+display-buffer customizations."
+  :type 'boolean)
+
 (defcustom vertico-buffer-frame-golden-ratio-scale 1.0
   "Scale factor applied to the golden-ratio child frame size.
-A value of 1.0 uses the golden-section size derived from the parent frame."
+A value of 1.0 uses a frame one golden-ratio step smaller than the largest
+golden rectangle fitting in the parent frame.  Values at or above the golden
+ratio use the full fitting golden rectangle."
   :type 'number)
 
 (defconst vertico-buffer-frame--golden-ratio (/ (+ 1.0 (sqrt 5.0)) 2.0)
@@ -130,7 +140,8 @@ A value of 1.0 uses the golden-section size derived from the parent frame."
 (defun vertico-buffer-frame--cleanup-before-external-display
     (buffer-or-name)
   "Delete completion child frames before displaying BUFFER-OR-NAME."
-  (unless (or vertico-buffer-frame--external-display-cleanup
+  (unless (or (not vertico-buffer-frame-cleanup-on-external-display)
+              vertico-buffer-frame--external-display-cleanup
               (vertico-buffer-frame--completion-display-buffer-p
                buffer-or-name))
     (when-let* ((buffer (vertico-buffer-frame--active-minibuffer-owner))
@@ -172,29 +183,42 @@ A value of 1.0 uses the golden-section size derived from the parent frame."
 
 (defun vertico-buffer-frame--base-parameters (parent name width height)
   "Return child frame parameters for PARENT, NAME, WIDTH and HEIGHT."
-  `((parent-frame . ,parent)
-    (name . ,name)
-    (minibuffer . nil)
-    (width . ,width)
-    (height . ,height)
-    (visibility . nil)
-    (undecorated . t)
-    (no-accept-focus . t)
-    (no-focus-on-map . t)
-    (skip-taskbar . t)
-    (unsplittable . t)
-    (border-width . 0)
-    (child-frame-border-width . ,vertico-buffer-frame-border-width)
-    (internal-border-width . 0)
-    (left-fringe . 0)
-    (right-fringe . 0)
-    (right-divider-width . 0)
-    (bottom-divider-width . 0)
-    (vertical-scroll-bars . nil)
-    (horizontal-scroll-bars . nil)
-    (menu-bar-lines . 0)
-    (tool-bar-lines . 0)
-    (tab-bar-lines . 0)))
+  (append
+   `((parent-frame . ,parent)
+     (name . ,name)
+     (minibuffer . nil)
+     (width . ,width)
+     (height . ,height)
+     (visibility . nil)
+     (undecorated . t)
+     (no-accept-focus . t)
+     (no-focus-on-map . t)
+     (skip-taskbar . t)
+     (unsplittable . t)
+     (border-width . 0)
+     (child-frame-border-width . ,vertico-buffer-frame-border-width)
+     (internal-border-width . 0)
+     (left-fringe . 0)
+     (right-fringe . 0)
+     (right-divider-width . 0)
+     (bottom-divider-width . 0)
+     (vertical-scroll-bars . nil)
+     (horizontal-scroll-bars . nil)
+     (menu-bar-lines . 0)
+     (tool-bar-lines . 0)
+     (tab-bar-lines . 0)
+     (alpha . 100)
+     (alpha-background . 100))
+   (when-let* ((background
+                (vertico-buffer-frame--default-background parent)))
+     `((background-color . ,background)))
+   (when-let* ((foreground
+                (vertico-buffer-frame--default-foreground parent)))
+     `((foreground-color . ,foreground)))))
+
+(defun vertico-buffer-frame--default-background (frame)
+  "Return the default background color for FRAME."
+  (face-background 'default frame 'default))
 
 (defun vertico-buffer-frame--default-foreground (frame)
   "Return the default foreground color for FRAME."
@@ -441,6 +465,8 @@ This function is intended for `vertico-buffer-display-action'."
                     vertico-buffer-frame--preview-window nil
                     vertico-buffer-frame--preview-buffer nil
                     vertico-buffer-frame--preview-timer nil
+                    vertico-buffer-frame--preview-target-key nil
+                    vertico-buffer-frame--preview-last-error-message nil
                     vertico-buffer-frame--cleanup-function nil))))
   (setq vertico-buffer-frame--minibuffers
         (delq buffer vertico-buffer-frame--minibuffers)))

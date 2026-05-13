@@ -5,18 +5,24 @@
 ;;; Code:
 
 (eval-and-compile
-  (add-to-list 'load-path
-               (file-name-directory
-                (directory-file-name
-                 (file-name-directory
-                  (or load-file-name
-                      (bound-and-true-p byte-compile-current-file)
-                      buffer-file-name))))))
+  (defconst vertico-buffer-frame-test--root
+    (file-name-directory
+     (directory-file-name
+      (file-name-directory
+       (or load-file-name
+           (bound-and-true-p byte-compile-current-file)
+           buffer-file-name)))))
+  (add-to-list 'load-path vertico-buffer-frame-test--root))
 
 (require 'ert)
 (require 'cl-lib)
 (require 'xref)
-(require 'vertico-buffer-frame)
+(load (expand-file-name "vertico-buffer-frame.el"
+                        vertico-buffer-frame-test--root)
+      nil t)
+(load (expand-file-name "vertico-buffer-frame-consult.el"
+                        vertico-buffer-frame-test--root)
+      nil t)
 
 (defmacro vertico-buffer-frame-test--with-clean-state (&rest body)
   "Run BODY with global mode state restored afterwards."
@@ -66,29 +72,41 @@
                  '(vertico-buffer-frame--display-buffer))))
 
 (ert-deftest vertico-buffer-frame-base-parameters-strip-frame-chrome ()
-  (let ((vertico-buffer-frame-border-width 1)
-        (parameters (vertico-buffer-frame--base-parameters
-                     'parent "name" 80 10)))
-    (should (equal (alist-get 'tab-bar-lines parameters) 0))
-    (should (equal (alist-get 'menu-bar-lines parameters) 0))
-    (should (equal (alist-get 'tool-bar-lines parameters) 0))
-    (should (equal (alist-get 'internal-border-width parameters) 0))
-    (should (equal (alist-get 'child-frame-border-width parameters) 1))
-    (should (equal (alist-get 'border-width parameters) 0))
-    (should (equal (alist-get 'left-fringe parameters) 0))
-    (should (equal (alist-get 'right-fringe parameters) 0))
-    (should (equal (alist-get 'right-divider-width parameters) 0))
-    (should (equal (alist-get 'bottom-divider-width parameters) 0))))
+  (let ((vertico-buffer-frame-border-width 1))
+    (cl-letf (((symbol-function #'vertico-buffer-frame--default-background)
+               (lambda (_frame)
+                 nil))
+              ((symbol-function #'vertico-buffer-frame--default-foreground)
+               (lambda (_frame)
+                 nil)))
+      (let ((parameters (vertico-buffer-frame--base-parameters
+                         'parent "name" 80 10)))
+        (should (equal (alist-get 'tab-bar-lines parameters) 0))
+        (should (equal (alist-get 'menu-bar-lines parameters) 0))
+        (should (equal (alist-get 'tool-bar-lines parameters) 0))
+        (should (equal (alist-get 'internal-border-width parameters) 0))
+        (should (equal (alist-get 'child-frame-border-width parameters) 1))
+        (should (equal (alist-get 'border-width parameters) 0))
+        (should (equal (alist-get 'left-fringe parameters) 0))
+        (should (equal (alist-get 'right-fringe parameters) 0))
+        (should (equal (alist-get 'right-divider-width parameters) 0))
+        (should (equal (alist-get 'bottom-divider-width parameters) 0))
+        (should (equal (alist-get 'alpha parameters) 100))
+        (should (equal (alist-get 'alpha-background parameters) 100))))))
 
-(ert-deftest vertico-buffer-frame-make-child-frame-colors-border-with-default-foreground ()
+(ert-deftest vertico-buffer-frame-make-child-frame-uses-opaque-default-colors ()
   (let (created-parameters face-background)
     (cl-letf (((symbol-function #'make-frame)
                (lambda (parameters)
                  (setq created-parameters parameters)
                  'frame))
+              ((symbol-function #'vertico-buffer-frame--default-background)
+               (lambda (frame)
+                 (should (eq frame 'parent))
+                 "background"))
               ((symbol-function #'vertico-buffer-frame--default-foreground)
                (lambda (frame)
-                 (should (eq frame 'frame))
+                 (should (memq frame '(parent frame)))
                  "foreground"))
               ((symbol-function #'set-face-background)
                (lambda (face color frame)
@@ -97,6 +115,12 @@
                   'frame))
       (should (equal (alist-get 'child-frame-border-width created-parameters)
                      vertico-buffer-frame-border-width))
+      (should (equal (alist-get 'background-color created-parameters)
+                     "background"))
+      (should (equal (alist-get 'foreground-color created-parameters)
+                     "foreground"))
+      (should (equal (alist-get 'alpha created-parameters) 100))
+      (should (equal (alist-get 'alpha-background created-parameters) 100))
       (should (equal face-background
                      '(child-frame-border "foreground" frame))))))
 
@@ -490,6 +514,154 @@
                        '((buffer "vbf-target")
                          (buffer "vbf-target"))))))))
 
+(ert-deftest vertico-buffer-frame-preview-later-skips-unchanged-target ()
+  (with-temp-buffer
+    (setq-local vertico--input "x"
+                vertico-buffer-frame--preview-frame 'frame
+                vertico-buffer-frame--preview-window 'window)
+    (let ((vertico-buffer-frame-mode t)
+          (vertico-buffer-frame-preview t)
+          (target-name (buffer-name (current-buffer)))
+          (refreshed 0)
+          shown
+          visible)
+      (cl-letf (((symbol-function #'vertico-buffer-frame--preview-target)
+                 (lambda ()
+                   (list 'buffer target-name)))
+                ((symbol-function #'vertico-buffer-frame--show-preview)
+                 (lambda (target)
+                   (push target shown)))
+                ((symbol-function #'frame-live-p)
+                 (lambda (frame)
+                   (eq frame 'frame)))
+                ((symbol-function #'window-live-p)
+                 (lambda (window)
+                   (eq window 'window)))
+                ((symbol-function #'window-buffer)
+                 (lambda (_window)
+                   (current-buffer)))
+                ((symbol-function #'vertico-buffer-frame--refresh-preview-frame)
+                 (lambda ()
+                   (cl-incf refreshed)))
+                ((symbol-function #'vertico-buffer-frame--show-frame)
+                 (lambda (frame)
+                   (push frame visible))))
+        (vertico-buffer-frame--show-preview-later (current-buffer))
+        (vertico-buffer-frame--show-preview-later (current-buffer))
+        (should (equal shown (list (list 'buffer target-name))))
+        (should (= refreshed 1))
+        (should (equal visible '(frame)))))))
+
+(ert-deftest vertico-buffer-frame-preview-later-reports-error-once ()
+  (with-temp-buffer
+    (setq-local vertico--input "x")
+    (let ((vertico-buffer-frame-mode t)
+          (vertico-buffer-frame-preview t)
+          (vertico-buffer-frame-preview-report-errors t)
+          (debug-on-error nil)
+          hidden
+          messages)
+      (cl-letf (((symbol-function #'vertico-buffer-frame--preview-target)
+                 (lambda ()
+                   (error "boom")))
+                ((symbol-function #'vertico-buffer-frame--hide-preview)
+                 (lambda ()
+                   (push 'hide hidden)))
+                ((symbol-function #'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) messages))))
+        (vertico-buffer-frame--show-preview-later (current-buffer))
+        (vertico-buffer-frame--show-preview-later (current-buffer))
+        (should (equal hidden '(hide hide)))
+        (should (equal messages
+                       '("vertico-buffer-frame preview error: boom")))))))
+
+(ert-deftest vertico-buffer-frame-preview-window-reuses-live-frame ()
+  (with-temp-buffer
+    (setq-local vertico-buffer-frame--preview-frame 'frame
+                vertico-buffer-frame--preview-window 'window)
+    (let (created
+          (refreshed 0))
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame)
+                   (eq frame 'frame)))
+                ((symbol-function #'window-live-p)
+                 (lambda (window)
+                   (eq window 'window)))
+                ((symbol-function #'vertico-buffer-frame--make-child-frame)
+                 (lambda (&rest _args)
+                   (setq created t)
+                   'new-frame))
+                ((symbol-function #'vertico-buffer-frame--refresh-preview-frame)
+                 (lambda ()
+                   (cl-incf refreshed))))
+        (should (eq (vertico-buffer-frame--preview-window) 'window))
+        (should-not created)
+        (should (= refreshed 1))))))
+
+(ert-deftest vertico-buffer-frame-find-buffer-position-respects-buffer-limit ()
+  (let ((first (generate-new-buffer " *vbf-search-first*"))
+        (second (generate-new-buffer " *vbf-search-second*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer second
+            (insert "needle"))
+          (cl-letf (((symbol-function #'vertico-buffer-frame--origin-buffer)
+                     (lambda ()
+                       nil))
+                    ((symbol-function #'buffer-list)
+                     (lambda ()
+                       (list first second))))
+            (let ((vertico-buffer-frame-preview-search-buffer-limit 1))
+              (should-not
+               (vertico-buffer-frame--find-buffer-position "needle")))
+            (let ((vertico-buffer-frame-preview-search-buffer-limit 2))
+              (should (equal
+                       (vertico-buffer-frame--find-buffer-position "needle")
+                       (list 'buffer-position second 1))))))
+      (mapc (lambda (buffer)
+              (when (buffer-live-p buffer)
+                (kill-buffer buffer)))
+            (list first second)))))
+
+(ert-deftest vertico-buffer-frame-directory-preview-limits-entry-output ()
+  (let ((directory (make-temp-file "vbf-directory" t)))
+    (unwind-protect
+        (progn
+          (dotimes (index 5)
+            (with-temp-file (expand-file-name
+                             (format "entry-%d" index)
+                             directory)
+              (insert "")))
+          (let ((vertico-buffer-frame-preview-directory-entry-limit 2))
+            (with-temp-buffer
+              (vertico-buffer-frame--insert-directory-preview directory)
+              (should (string-match-p "3 more entries not shown"
+                                      (buffer-string))))))
+      (delete-directory directory t))))
+
+(ert-deftest vertico-buffer-frame-external-display-cleanup-can-be-disabled ()
+  (with-temp-buffer
+    (let ((owner (current-buffer))
+          cleaned)
+      (cl-letf (((symbol-function
+                  #'vertico-buffer-frame--active-minibuffer-owner)
+                 (lambda ()
+                   owner))
+                ((symbol-function
+                  #'vertico-buffer-frame--minibuffer-owns-live-frame-p)
+                 (lambda (_buffer)
+                   t))
+                ((symbol-function #'vertico-buffer-frame--cleanup-minibuffer)
+                 (lambda (buffer)
+                   (push buffer cleaned))))
+        (let ((vertico-buffer-frame-cleanup-on-external-display nil))
+          (vertico-buffer-frame--cleanup-before-external-display "other")
+          (should-not cleaned))
+        (let ((vertico-buffer-frame-cleanup-on-external-display t))
+          (vertico-buffer-frame--cleanup-before-external-display "other")
+          (should (equal cleaned (list owner))))))))
+
 (ert-deftest vertico-buffer-frame-buffer-target-detects-existing-buffer ()
   (let ((candidate-buffer (generate-new-buffer "vbf-target"))
         (minibuffer (generate-new-buffer " *vbf-minibuffer*")))
@@ -822,6 +994,45 @@
                        (buffer window buffer)
                        (dedicated window t)))))))
 
+(ert-deftest vertico-buffer-frame-preview-replaces-buffer-before-kill ()
+  (let ((old-buffer (generate-new-buffer " *vbf-old-preview*"))
+        new-buffer
+        events)
+    (unwind-protect
+        (with-temp-buffer
+          (setq-local vertico-buffer-frame--preview-buffer old-buffer
+                      vertico-buffer-frame--preview-frame 'frame)
+          (cl-letf (((symbol-function #'vertico-buffer-frame--preview-window)
+                     (lambda ()
+                       'window))
+                    ((symbol-function #'set-window-dedicated-p)
+                     (lambda (window dedicated)
+                       (push (list 'dedicated window dedicated) events)))
+                    ((symbol-function #'set-window-buffer)
+                     (lambda (window buffer)
+                       (setq new-buffer buffer)
+                       (push (list 'buffer window buffer) events)))
+                    ((symbol-function #'kill-buffer)
+                     (lambda (buffer)
+                       (push (list 'kill buffer) events)))
+                    ((symbol-function #'vertico-buffer-frame--show-frame)
+                     (lambda (frame)
+                       (push (list 'show frame) events))))
+            (vertico-buffer-frame--show-preview
+             (list 'text "Symbol" (lambda ()
+                                    (insert "preview"))))
+            (should (buffer-live-p new-buffer))
+            (should (equal (nreverse events)
+                           (list '(dedicated window nil)
+                                 (list 'buffer 'window new-buffer)
+                                 '(dedicated window t)
+                                 (list 'kill old-buffer)
+                                 '(show frame))))))
+      (mapc (lambda (buffer)
+              (when (buffer-live-p buffer)
+                (kill-buffer buffer)))
+            (list old-buffer new-buffer)))))
+
 (ert-deftest vertico-buffer-frame-set-window-line-centers-point ()
   (let ((buffer (generate-new-buffer " *vbf-line-preview*"))
         (window (selected-window))
@@ -1033,7 +1244,7 @@
                      'window))
                   ((symbol-function
                     #'vertico-buffer-frame--set-preview-window-buffer)
-                   (lambda (window buffer)
+                   (lambda (window buffer &optional _old-preview-buffer)
                      (push (list 'buffer window buffer) events)))
                   ((symbol-function #'vertico-buffer-frame--set-window-position)
                    (lambda (window position)
