@@ -79,14 +79,6 @@ When this is `fixed', use `vertico-buffer-frame-width' and
   "Width of the child frame border in pixels."
   :type 'natnum)
 
-(defcustom vertico-buffer-frame-cleanup-on-external-display t
-  "Non-nil means clean child frames before external buffer display.
-When enabled, `vertico-buffer-frame-mode' advises `display-buffer' so that
-completion child frames are deleted before unrelated buffers are displayed from
-inside an active minibuffer.  Set this to nil if the advice conflicts with other
-`display-buffer' customizations."
-  :type 'boolean)
-
 (defcustom vertico-buffer-frame-golden-ratio-scale 1.0
   "Scale factor applied to the golden-ratio child frame size.
 A value of 1.0 uses a frame one golden-ratio step smaller than the largest
@@ -101,7 +93,6 @@ ratio use the full fitting golden rectangle."
 (defvar vertico-buffer-frame--saved-buffer-mode nil)
 (defvar vertico-buffer-frame--saved-state nil)
 (defvar vertico-buffer-frame--minibuffers nil)
-(defvar vertico-buffer-frame--external-display-cleanup nil)
 (defvar vertico-buffer-frame-mode)
 (defvar vertico-buffer-frame-mode-map)
 (defvar vertico-buffer-frame-preview)
@@ -110,66 +101,6 @@ ratio use the full fitting golden rectangle."
 (defvar-local vertico-buffer-frame--candidate-frame nil)
 (defvar-local vertico-buffer-frame--candidate-window nil)
 (defvar-local vertico-buffer-frame--cleanup-function nil)
-
-(defun vertico-buffer-frame--live-frame-p (frame)
-  "Return non-nil when FRAME is a live frame object."
-  (and (framep frame)
-       (frame-live-p frame)))
-
-(defun vertico-buffer-frame--active-minibuffer-owner ()
-  "Return the active minibuffer buffer that owns child frames, if any."
-  (when-let* ((window (active-minibuffer-window))
-              (buffer (window-buffer window))
-              ((buffer-live-p buffer)))
-    buffer))
-
-(defun vertico-buffer-frame--completion-display-buffer-p (buffer-or-name)
-  "Return non-nil when BUFFER-OR-NAME is Vertico's transient buffer."
-  (let ((name (if (bufferp buffer-or-name)
-                  (buffer-name buffer-or-name)
-                buffer-or-name)))
-    (and (stringp name)
-         (string-prefix-p "*vertico-buffer*" name))))
-
-(defun vertico-buffer-frame--minibuffer-owns-live-frame-p (buffer)
-  "Return non-nil when minibuffer BUFFER owns a live child frame."
-  (and (buffer-live-p buffer)
-       (with-current-buffer buffer
-         (or (vertico-buffer-frame--live-frame-p
-              vertico-buffer-frame--candidate-frame)
-             (vertico-buffer-frame--live-frame-p
-              vertico-buffer-frame--preview-frame)))))
-
-(defun vertico-buffer-frame--cleanup-before-external-display
-    (buffer-or-name)
-  "Delete completion child frames before displaying BUFFER-OR-NAME."
-  (unless (or (not vertico-buffer-frame-cleanup-on-external-display)
-              vertico-buffer-frame--external-display-cleanup
-              (vertico-buffer-frame--completion-display-buffer-p
-               buffer-or-name))
-    (when-let* ((buffer (vertico-buffer-frame--active-minibuffer-owner))
-                ((vertico-buffer-frame--minibuffer-owns-live-frame-p
-                  buffer)))
-      (let ((vertico-buffer-frame--external-display-cleanup t))
-        (vertico-buffer-frame--cleanup-minibuffer buffer)))))
-
-(defun vertico-buffer-frame--display-buffer-advice
-    (original buffer-or-name &rest args)
-  "Clean child frames before ORIGINAL displays BUFFER-OR-NAME with ARGS."
-  (vertico-buffer-frame--cleanup-before-external-display buffer-or-name)
-  (apply original buffer-or-name args))
-
-(defun vertico-buffer-frame--install-display-buffer-advice ()
-  "Install display advice used by `vertico-buffer-frame-mode'."
-  (unless (advice-member-p #'vertico-buffer-frame--display-buffer-advice
-                           'display-buffer)
-    (advice-add 'display-buffer :around
-                #'vertico-buffer-frame--display-buffer-advice)))
-
-(defun vertico-buffer-frame--remove-display-buffer-advice ()
-  "Remove display advice used by `vertico-buffer-frame-mode'."
-  (advice-remove 'display-buffer
-                 #'vertico-buffer-frame--display-buffer-advice))
 
 ;;;###autoload
 (defun vertico-buffer-frame-display-action ()
@@ -468,7 +399,6 @@ This function is intended for `vertico-buffer-display-action'."
                     vertico-buffer-frame--preview-window nil
                     vertico-buffer-frame--preview-buffer nil
                     vertico-buffer-frame--preview-timer nil
-                    vertico-buffer-frame--preview-target-key nil
                     vertico-buffer-frame--preview-last-error-message nil
                     vertico-buffer-frame--cleanup-function nil))))
   (setq vertico-buffer-frame--minibuffers
@@ -524,12 +454,10 @@ Inside an active minibuffer, the change is buffer-local to that session."
               (vertico-buffer-frame-display-action))
         (add-hook 'minibuffer-setup-hook
                   #'vertico-buffer-frame--minibuffer-setup)
-        (vertico-buffer-frame--install-display-buffer-advice)
         (vertico-buffer-mode 1))
     (remove-hook 'minibuffer-setup-hook
                  #'vertico-buffer-frame--minibuffer-setup)
     (vertico-buffer-frame-cleanup)
-    (vertico-buffer-frame--remove-display-buffer-advice)
     (when vertico-buffer-frame--saved-state
       (setq vertico-buffer-display-action
             vertico-buffer-frame--saved-display-action)

@@ -100,7 +100,6 @@ Add this directory to ~load-path~, then:
 - ~vertico-buffer-frame-width~
 - ~vertico-buffer-frame-height~
 - ~vertico-buffer-frame-golden-ratio-scale~
-- ~vertico-buffer-frame-cleanup-on-external-display~
 - ~vertico-buffer-frame-preview~
 - ~vertico-buffer-frame-preview-delay~
 - ~vertico-buffer-frame-preview-width~
@@ -155,7 +154,6 @@ Example:
         vertico-buffer-frame-preview-directory-entry-limit 200
         vertico-buffer-frame-preview-search-buffer-limit 20
         vertico-buffer-frame-preview-report-errors t
-        vertico-buffer-frame-cleanup-on-external-display t
         vertico-buffer-frame-border-width 1
         vertico-buffer-frame-golden-ratio-scale 1.0)
 #+end_src
@@ -212,8 +210,7 @@ disable their preview, or add a function to
 ~vertico-buffer-frame-preview-target-functions~ for extra preview target
 resolution.
 
-The current prototype reuses the preview frame while the minibuffer is active
-and skips repeated updates for unchanged file, buffer, and location targets.
+The current prototype reuses the preview frame while the minibuffer is active.
 Temporary buffers are still created for file and text previews as needed.
 Regular file previews are guarded by a byte limit, a simple binary detector,
 and a remote-file opt-in.

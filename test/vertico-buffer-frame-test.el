@@ -499,7 +499,7 @@
         (should (equal canceled '(preview-timer)))
         (should (equal (car scheduled) 0.2))))))
 
-(ert-deftest vertico-buffer-frame-preview-later-does-not-cache-target ()
+(ert-deftest vertico-buffer-frame-preview-later-shows-target-each-time ()
   (with-temp-buffer
     (setq-local vertico--input "x")
     (let ((vertico-buffer-frame-mode t)
@@ -516,44 +516,6 @@
         (should (equal shown
                        '((buffer "vbf-target")
                          (buffer "vbf-target"))))))))
-
-(ert-deftest vertico-buffer-frame-preview-later-skips-unchanged-target ()
-  (with-temp-buffer
-    (setq-local vertico--input "x"
-                vertico-buffer-frame--preview-frame 'frame
-                vertico-buffer-frame--preview-window 'window)
-    (let ((vertico-buffer-frame-mode t)
-          (vertico-buffer-frame-preview t)
-          (target-name (buffer-name (current-buffer)))
-          (refreshed 0)
-          shown
-          visible)
-      (cl-letf (((symbol-function #'vertico-buffer-frame--preview-target)
-                 (lambda ()
-                   (list 'buffer target-name)))
-                ((symbol-function #'vertico-buffer-frame--show-preview)
-                 (lambda (target)
-                   (push target shown)))
-                ((symbol-function #'frame-live-p)
-                 (lambda (frame)
-                   (eq frame 'frame)))
-                ((symbol-function #'window-live-p)
-                 (lambda (window)
-                   (eq window 'window)))
-                ((symbol-function #'window-buffer)
-                 (lambda (_window)
-                   (current-buffer)))
-                ((symbol-function #'vertico-buffer-frame--refresh-preview-frame)
-                 (lambda ()
-                   (cl-incf refreshed)))
-                ((symbol-function #'vertico-buffer-frame--show-frame)
-                 (lambda (frame)
-                   (push frame visible))))
-        (vertico-buffer-frame--show-preview-later (current-buffer))
-        (vertico-buffer-frame--show-preview-later (current-buffer))
-        (should (equal shown (list (list 'buffer target-name))))
-        (should (= refreshed 1))
-        (should (equal visible '(frame)))))))
 
 (ert-deftest vertico-buffer-frame-preview-later-reports-error-once ()
   (with-temp-buffer
@@ -642,28 +604,6 @@
               (should (string-match-p "3 more entries not shown"
                                       (buffer-string))))))
       (delete-directory directory t))))
-
-(ert-deftest vertico-buffer-frame-external-display-cleanup-can-be-disabled ()
-  (with-temp-buffer
-    (let ((owner (current-buffer))
-          cleaned)
-      (cl-letf (((symbol-function
-                  #'vertico-buffer-frame--active-minibuffer-owner)
-                 (lambda ()
-                   owner))
-                ((symbol-function
-                  #'vertico-buffer-frame--minibuffer-owns-live-frame-p)
-                 (lambda (_buffer)
-                   t))
-                ((symbol-function #'vertico-buffer-frame--cleanup-minibuffer)
-                 (lambda (buffer)
-                   (push buffer cleaned))))
-        (let ((vertico-buffer-frame-cleanup-on-external-display nil))
-          (vertico-buffer-frame--cleanup-before-external-display "other")
-          (should-not cleaned))
-        (let ((vertico-buffer-frame-cleanup-on-external-display t))
-          (vertico-buffer-frame--cleanup-before-external-display "other")
-          (should (equal cleaned (list owner))))))))
 
 (ert-deftest vertico-buffer-frame-buffer-target-detects-existing-buffer ()
   (let ((candidate-buffer (generate-new-buffer "vbf-target"))

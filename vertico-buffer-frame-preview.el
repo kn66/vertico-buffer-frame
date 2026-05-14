@@ -137,7 +137,6 @@ candidate.")
 (defvar-local vertico-buffer-frame--preview-window nil)
 (defvar-local vertico-buffer-frame--preview-buffer nil)
 (defvar-local vertico-buffer-frame--preview-timer nil)
-(defvar-local vertico-buffer-frame--preview-target-key nil)
 (defvar-local vertico-buffer-frame--preview-last-error-message nil)
 
 (defconst vertico-buffer-frame-preview--golden-ratio
@@ -1135,43 +1134,6 @@ WINDOW."
        (vertico-buffer-frame--show-frame
         vertico-buffer-frame--preview-frame)))))
 
-(defun vertico-buffer-frame--preview-position-key (position)
-  "Return a stable comparison key for preview POSITION."
-  (if (markerp position)
-      (list 'marker (marker-buffer position) (marker-position position))
-    position))
-
-(defun vertico-buffer-frame--preview-target-key (target)
-  "Return a comparison key for TARGET, or nil when it should not be cached."
-  (pcase target
-    (`(file ,file)
-     (list 'file file))
-    (`(file-line ,file ,line)
-     (list 'file-line file line))
-    (`(file-position ,file ,position)
-     (list 'file-position
-           file
-           (vertico-buffer-frame--preview-position-key position)))
-    (`(buffer ,name)
-     (list 'buffer name))
-    (`(buffer-position ,buffer ,position)
-     (list 'buffer-position
-           buffer
-           (vertico-buffer-frame--preview-position-key position)))))
-
-(defun vertico-buffer-frame--preview-cache-live-p (target)
-  "Return non-nil when cached preview state can still show TARGET."
-  (and (frame-live-p vertico-buffer-frame--preview-frame)
-       (window-live-p vertico-buffer-frame--preview-window)
-       (let ((buffer (window-buffer vertico-buffer-frame--preview-window)))
-         (and (buffer-live-p buffer)
-              (pcase target
-                (`(buffer ,name)
-                 (eq buffer (get-buffer name)))
-                (`(buffer-position ,target-buffer ,_position)
-                 (eq buffer target-buffer))
-                (_ t))))))
-
 (defun vertico-buffer-frame--report-preview-error (error)
   "Hide the preview and optionally report ERROR."
   (vertico-buffer-frame--hide-preview)
@@ -1194,8 +1156,7 @@ WINDOW."
   (vertico-buffer-frame--delete-frame vertico-buffer-frame--preview-frame)
   (vertico-buffer-frame--kill-preview-buffer)
   (setq-local vertico-buffer-frame--preview-frame nil
-              vertico-buffer-frame--preview-window nil
-              vertico-buffer-frame--preview-target-key nil))
+              vertico-buffer-frame--preview-window nil))
 
 (defun vertico-buffer-frame--show-preview-later (buffer)
   "Show preview for minibuffer BUFFER after the configured delay."
@@ -1207,23 +1168,10 @@ WINDOW."
                    vertico-buffer-frame-preview
                    (bound-and-true-p vertico--input))
               (if-let* ((target (vertico-buffer-frame--preview-target)))
-                  (let ((key (vertico-buffer-frame--preview-target-key
-                              target)))
-                    (if (and key
-                             (equal key
-                                    vertico-buffer-frame--preview-target-key)
-                             (vertico-buffer-frame--preview-cache-live-p
-                              target))
-                        (progn
-                          (setq-local
-                           vertico-buffer-frame--preview-last-error-message nil)
-                          (vertico-buffer-frame--refresh-preview-frame)
-                          (vertico-buffer-frame--show-frame
-                           vertico-buffer-frame--preview-frame))
-                      (setq-local vertico-buffer-frame--preview-target-key key
-                                  vertico-buffer-frame--preview-last-error-message
-                                  nil)
-                      (vertico-buffer-frame--show-preview target)))
+                  (progn
+                    (vertico-buffer-frame--show-preview target)
+                    (setq-local
+                     vertico-buffer-frame--preview-last-error-message nil))
                 (vertico-buffer-frame--hide-preview))
             (vertico-buffer-frame--hide-preview))
         (error
