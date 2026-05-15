@@ -901,7 +901,8 @@ When HORIZONTAL is non-nil, convert columns; otherwise convert lines."
                      vertico-buffer-frame-preview-directory-entry-limit)
                     (max 0
                          vertico-buffer-frame-preview-directory-entry-limit))))
-    (dolist (entry (directory-files directory nil nil t))
+    (dolist (entry (directory-files directory nil nil t
+                                    (and limit (+ limit 3))))
       (unless (member entry '("." ".."))
         (cl-incf count)
         (when (or (null limit)
@@ -917,9 +918,7 @@ When HORIZONTAL is non-nil, convert columns; otherwise convert lines."
       (insert "Empty directory\n"))
     (when (and limit
                (> count limit))
-      (insert "\n"
-              (number-to-string (- count limit))
-              " more entries not shown.\n"))))
+      (insert "\nMore entries not shown.\n"))))
 
 (defun vertico-buffer-frame--file-size (file)
   "Return FILE size in bytes, or nil if it cannot be determined."

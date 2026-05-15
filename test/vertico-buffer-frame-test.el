@@ -601,7 +601,7 @@
           (let ((vertico-buffer-frame-preview-directory-entry-limit 2))
             (with-temp-buffer
               (vertico-buffer-frame--insert-directory-preview directory)
-              (should (string-match-p "3 more entries not shown"
+              (should (string-match-p "More entries not shown"
                                       (buffer-string))))))
       (delete-directory directory t))))
 
