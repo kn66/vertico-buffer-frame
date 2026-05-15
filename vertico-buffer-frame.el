@@ -86,6 +86,13 @@ golden rectangle fitting in the parent frame.  Values at or above the golden
 ratio use the full fitting golden rectangle."
   :type 'number)
 
+(defcustom vertico-buffer-frame-warm-up t
+  "Non-nil means warm up child-frame creation while Emacs is idle.
+The warm-up creates and deletes a tiny hidden child frame after the mode is
+enabled.  This moves the first GUI child-frame and font setup out of Vertico's
+minibuffer setup path, which can be more fragile on some PGTK builds."
+  :type 'boolean)
+
 (defconst vertico-buffer-frame--golden-ratio (/ (+ 1.0 (sqrt 5.0)) 2.0)
   "Golden ratio used for automatic child-frame layout.")
 
@@ -93,6 +100,9 @@ ratio use the full fitting golden rectangle."
 (defvar vertico-buffer-frame--saved-buffer-mode nil)
 (defvar vertico-buffer-frame--saved-state nil)
 (defvar vertico-buffer-frame--minibuffers nil)
+(defvar vertico-buffer-frame--warm-up-done nil)
+(defvar vertico-buffer-frame--warm-up-timer nil)
+(defvar vertico-buffer-frame--warming-up nil)
 (defvar vertico-buffer-frame-mode)
 (defvar vertico-buffer-frame-mode-map)
 (defvar vertico-buffer-frame-preview)
@@ -120,6 +130,7 @@ ratio use the full fitting golden rectangle."
   (append
    `((parent-frame . ,parent)
      (name . ,name)
+     (title . "")
      (minibuffer . nil)
      (width . ,width)
      (height . ,height)
@@ -293,10 +304,11 @@ SIZE may use text-pixel parameters or character counts."
 
 (defun vertico-buffer-frame--make-child-frame (parent name width height)
   "Create a fresh child frame under PARENT named NAME with WIDTH and HEIGHT."
-  (vertico-buffer-frame--apply-border-face
-   (make-frame
-    (vertico-buffer-frame--base-parameters
-     parent name width height))))
+  (let ((frame (make-frame
+                (vertico-buffer-frame--base-parameters
+                 parent name 1 1))))
+    (vertico-buffer-frame--resize-frame-to-size frame (cons width height))
+    (vertico-buffer-frame--apply-border-face frame)))
 
 (defun vertico-buffer-frame--show-frame (frame)
   "Make FRAME visible if it is live and currently hidden."
@@ -377,6 +389,51 @@ This function is intended for `vertico-buffer-display-action'."
   (when (frame-live-p frame)
     (delete-frame frame t)))
 
+(defun vertico-buffer-frame--cancel-warm-up ()
+  "Cancel any pending child-frame warm-up."
+  (when (timerp vertico-buffer-frame--warm-up-timer)
+    (cancel-timer vertico-buffer-frame--warm-up-timer))
+  (setq vertico-buffer-frame--warm-up-timer nil))
+
+(defun vertico-buffer-frame--warm-up ()
+  "Create and delete a tiny hidden child frame once."
+  (setq vertico-buffer-frame--warm-up-timer nil)
+  (when (and vertico-buffer-frame-mode
+             vertico-buffer-frame-warm-up
+             (not vertico-buffer-frame--warm-up-done)
+             (display-graphic-p (selected-frame)))
+    (let (frame)
+      (condition-case-unless-debug error
+          (progn
+            (let ((vertico-buffer-frame--warming-up t))
+              (setq frame
+                    (vertico-buffer-frame--make-child-frame
+                     (selected-frame)
+                     "Vertico Warm Up"
+                     1
+                     1)))
+            (setq vertico-buffer-frame--warm-up-done t))
+        (error
+         (message "vertico-buffer-frame warm-up error: %s"
+                  (error-message-string error))))
+      (vertico-buffer-frame--delete-frame frame))))
+
+(defun vertico-buffer-frame--schedule-warm-up ()
+  "Schedule child-frame warm-up if requested."
+  (vertico-buffer-frame--cancel-warm-up)
+  (when (and vertico-buffer-frame-mode
+             vertico-buffer-frame-warm-up
+             (not vertico-buffer-frame--warm-up-done))
+    (setq vertico-buffer-frame--warm-up-timer
+          (run-with-idle-timer
+           0.2 nil #'vertico-buffer-frame--warm-up))))
+
+(defun vertico-buffer-frame--after-make-frame (_frame)
+  "Schedule child-frame warm-up after a new graphical frame appears."
+  (when (and vertico-buffer-frame-mode
+             (not vertico-buffer-frame--warming-up))
+    (vertico-buffer-frame--schedule-warm-up)))
+
 (defun vertico-buffer-frame--cleanup-minibuffer (buffer)
   "Delete child frames owned by minibuffer BUFFER."
   (when (buffer-live-p buffer)
@@ -454,9 +511,15 @@ Inside an active minibuffer, the change is buffer-local to that session."
               (vertico-buffer-frame-display-action))
         (add-hook 'minibuffer-setup-hook
                   #'vertico-buffer-frame--minibuffer-setup)
-        (vertico-buffer-mode 1))
+        (add-hook 'after-make-frame-functions
+                  #'vertico-buffer-frame--after-make-frame)
+        (vertico-buffer-mode 1)
+        (vertico-buffer-frame--schedule-warm-up))
     (remove-hook 'minibuffer-setup-hook
                  #'vertico-buffer-frame--minibuffer-setup)
+    (remove-hook 'after-make-frame-functions
+                 #'vertico-buffer-frame--after-make-frame)
+    (vertico-buffer-frame--cancel-warm-up)
     (vertico-buffer-frame-cleanup)
     (when vertico-buffer-frame--saved-state
       (setq vertico-buffer-display-action

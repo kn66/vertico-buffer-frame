@@ -35,22 +35,27 @@
          (old-action vertico-buffer-display-action)
          (old-saved-action vertico-buffer-frame--saved-display-action)
          (old-saved-buffer-mode vertico-buffer-frame--saved-buffer-mode)
-         (old-saved-state vertico-buffer-frame--saved-state))
+         (old-saved-state vertico-buffer-frame--saved-state)
+         (old-warm-up-done vertico-buffer-frame--warm-up-done))
      (unwind-protect
          (progn
            (when vertico-buffer-frame-mode
              (vertico-buffer-frame-mode -1))
+           (vertico-buffer-frame--cancel-warm-up)
            (setq vertico-buffer-frame--saved-display-action nil
                  vertico-buffer-frame--saved-buffer-mode nil
-                 vertico-buffer-frame--saved-state nil)
+                 vertico-buffer-frame--saved-state nil
+                 vertico-buffer-frame--warm-up-done nil)
            ,@body)
        (when vertico-buffer-frame-mode
          (vertico-buffer-frame-mode -1))
+       (vertico-buffer-frame--cancel-warm-up)
        (vertico-buffer-frame-cleanup)
        (setq vertico-buffer-display-action old-action
              vertico-buffer-frame--saved-display-action old-saved-action
              vertico-buffer-frame--saved-buffer-mode old-saved-buffer-mode
-             vertico-buffer-frame--saved-state old-saved-state)
+             vertico-buffer-frame--saved-state old-saved-state
+             vertico-buffer-frame--warm-up-done old-warm-up-done)
        (if old-buffer-mode
            (vertico-buffer-mode 1)
          (vertico-buffer-mode -1))
@@ -69,6 +74,63 @@
    (should-not vertico-buffer-mode)
    (should (equal vertico-buffer-display-action
                   '(display-buffer-at-bottom)))))
+
+(ert-deftest vertico-buffer-frame-mode-schedules-warm-up ()
+  (vertico-buffer-frame-test--with-clean-state
+   (let ((vertico-buffer-frame-warm-up t)
+         scheduled canceled)
+     (cl-letf (((symbol-function #'run-with-idle-timer)
+                (lambda (delay repeat function &rest args)
+                  (setq scheduled (list delay repeat function args))
+                  'warm-up-timer))
+               ((symbol-function #'timerp)
+                (lambda (timer)
+                  (eq timer 'warm-up-timer)))
+               ((symbol-function #'cancel-timer)
+                (lambda (timer)
+                  (push timer canceled))))
+       (vertico-buffer-frame-mode 1)
+       (should (equal scheduled
+                      (list 0.2
+                            nil
+                            #'vertico-buffer-frame--warm-up
+                            nil)))
+       (should (memq #'vertico-buffer-frame--after-make-frame
+                     after-make-frame-functions))
+       (vertico-buffer-frame-mode -1)
+       (should (equal canceled '(warm-up-timer)))
+       (should-not (memq #'vertico-buffer-frame--after-make-frame
+                         after-make-frame-functions))))))
+
+(ert-deftest vertico-buffer-frame-warm-up-creates-hidden-child-frame-once ()
+  (let (created deleted)
+    (cl-letf (((symbol-function #'display-graphic-p)
+               (lambda (_frame)
+                 t))
+              ((symbol-function #'selected-frame)
+               (lambda ()
+                 'parent))
+              ((symbol-function #'vertico-buffer-frame--make-child-frame)
+               (lambda (parent name width height)
+                 (setq created (list parent name width height))
+                 'warm-frame))
+              ((symbol-function #'vertico-buffer-frame--delete-frame)
+               (lambda (frame)
+                 (push frame deleted))))
+      (let ((vertico-buffer-frame-mode t)
+            (vertico-buffer-frame-warm-up t)
+            (vertico-buffer-frame--warm-up-done nil)
+            (vertico-buffer-frame--warm-up-timer 'warm-up-timer))
+        (vertico-buffer-frame--warm-up)
+        (should (equal created '(parent "Vertico Warm Up" 1 1)))
+        (should (equal deleted '(warm-frame)))
+        (should vertico-buffer-frame--warm-up-done)
+        (should-not vertico-buffer-frame--warm-up-timer)
+        (setq created nil
+              deleted nil)
+        (vertico-buffer-frame--warm-up)
+        (should-not created)
+        (should-not deleted)))))
 
 (ert-deftest vertico-buffer-frame-display-action-is-simple ()
   (should (equal (vertico-buffer-frame-display-action)
@@ -90,6 +152,7 @@
         (should (equal (alist-get 'internal-border-width parameters) 0))
         (should (equal (alist-get 'child-frame-border-width parameters) 1))
         (should (equal (alist-get 'border-width parameters) 0))
+        (should (equal (alist-get 'title parameters) ""))
         (should (equal (alist-get 'left-fringe parameters) 0))
         (should (equal (alist-get 'right-fringe parameters) 0))
         (should (equal (alist-get 'right-divider-width parameters) 0))
@@ -98,11 +161,17 @@
         (should (equal (alist-get 'alpha-background parameters) 100))))))
 
 (ert-deftest vertico-buffer-frame-make-child-frame-uses-opaque-default-colors ()
-  (let (created-parameters face-background)
+  (let (created-parameters face-background resized)
     (cl-letf (((symbol-function #'make-frame)
                (lambda (parameters)
                  (setq created-parameters parameters)
                  'frame))
+              ((symbol-function #'frame-live-p)
+               (lambda (frame)
+                 (eq frame 'frame)))
+              ((symbol-function #'set-frame-size)
+               (lambda (frame width height &optional pixelwise)
+                 (setq resized (list frame width height pixelwise))))
               ((symbol-function #'vertico-buffer-frame--default-background)
                (lambda (frame)
                  (should (eq frame 'parent))
@@ -116,6 +185,9 @@
                  (setq face-background (list face color frame)))))
       (should (eq (vertico-buffer-frame--make-child-frame 'parent "name" 80 10)
                   'frame))
+      (should (equal (alist-get 'width created-parameters) 1))
+      (should (equal (alist-get 'height created-parameters) 1))
+      (should (equal (alist-get 'title created-parameters) ""))
       (should (equal (alist-get 'child-frame-border-width created-parameters)
                      vertico-buffer-frame-border-width))
       (should (equal (alist-get 'background-color created-parameters)
@@ -124,6 +196,7 @@
                      "foreground"))
       (should (equal (alist-get 'alpha created-parameters) 100))
       (should (equal (alist-get 'alpha-background created-parameters) 100))
+      (should (equal resized '(frame 80 10 nil)))
       (should (equal face-background
                      '(child-frame-border "foreground" frame))))))
 
