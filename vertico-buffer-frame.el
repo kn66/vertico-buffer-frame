@@ -69,7 +69,8 @@
 
 (defcustom vertico-buffer-frame-size-method 'golden-ratio
   "How to size the Vertico child frame.
-When this is `golden-ratio', derive the size from the selected frame.
+When this is `golden-ratio', derive the size from the selected frame and round
+it to character cells.
 When this is `fixed', use `vertico-buffer-frame-width' and
 `vertico-buffer-frame-height'."
   :type '(choice (const :tag "Golden ratio" golden-ratio)
@@ -190,6 +191,13 @@ minibuffer setup path, which can be more fragile on some PGTK builds."
       value
     1))
 
+(defun vertico-buffer-frame--pixels-to-chars (pixels char-size)
+  "Return PIXELS rounded to a positive character count using CHAR-SIZE."
+  (let ((pixels (if (numberp pixels) pixels 1))
+        (char-size (if (numberp char-size) char-size 1)))
+    (max 1 (round (/ (float (max 1 pixels))
+                     (max 1 char-size))))))
+
 (defun vertico-buffer-frame--parent-pixel-size (parent)
   "Return PARENT frame size in pixels."
   (cons (max 1 (frame-pixel-width parent))
@@ -223,10 +231,14 @@ minibuffer setup path, which can be more fragile on some PGTK builds."
            (* golden-height scale)))))
 
 (defun vertico-buffer-frame--golden-frame-size (parent)
-  "Return golden-ratio child frame size parameters for PARENT."
+  "Return golden-ratio child frame size in characters for PARENT."
   (let ((size (vertico-buffer-frame--golden-pixel-size parent)))
-    (cons (cons 'text-pixels (car size))
-          (cons 'text-pixels (cdr size)))))
+    (cons (vertico-buffer-frame--pixels-to-chars
+           (car size)
+           (frame-char-width parent))
+          (vertico-buffer-frame--pixels-to-chars
+           (cdr size)
+           (frame-char-height parent)))))
 
 (defun vertico-buffer-frame--fixed-frame-size ()
   "Return fixed child frame size parameters in characters."

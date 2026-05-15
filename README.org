@@ -60,14 +60,16 @@ Additional preview target adapters can be added with the hook variable
 by the internal preview renderer, or nil.
 
 The candidate frame is sized from the parent frame using the golden ratio by
-default.  Set ~vertico-buffer-frame-size-method~ to ~fixed~ to use
+default, then rounded to the nearest character-cell size before applying it to
+the child frame.  Set ~vertico-buffer-frame-size-method~ to ~fixed~ to use
 ~vertico-buffer-frame-width~ and ~vertico-buffer-frame-height~ as character
 counts.  With the default scale of 1.0, the candidate frame is one
 golden-ratio step smaller than the largest golden rectangle fitting in the
 parent frame.  Values near 1.618 use the full fitting rectangle.
 
 The preview frame is sized automatically from the candidate frame so it follows
-parent frame resizing.  ~vertico-buffer-frame-preview-width~ and
+parent frame resizing.  The automatic preview size is also rounded to character
+cells.  ~vertico-buffer-frame-preview-width~ and
 ~vertico-buffer-frame-preview-height~ can be set to character counts to cap the
 automatic preview size.
 

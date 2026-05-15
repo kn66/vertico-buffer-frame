@@ -170,6 +170,7 @@ candidate.")
 (declare-function vertico-buffer-frame--delete-frame "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--make-child-frame "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--parent-frame "vertico-buffer-frame")
+(declare-function vertico-buffer-frame--pixels-to-chars "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--place-preview-frame "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--prepare-window "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--resize-frame-to-size
@@ -825,32 +826,35 @@ When STRINGP is non-nil, look for a @String definition."
     (cons width height)))
 
 (defun vertico-buffer-frame--preview-size-cap (parent value horizontal)
-  "Return VALUE converted from characters to pixels on PARENT.
-When HORIZONTAL is non-nil, convert columns; otherwise convert lines."
+  "Return VALUE as a positive character size cap.
+PARENT and HORIZONTAL are accepted for compatibility with older callers."
+  (ignore parent horizontal)
   (and (integerp value)
        (> value 0)
-       (* value
-          (if horizontal
-              (frame-char-width parent)
-            (frame-char-height parent)))))
+       value))
 
 (defun vertico-buffer-frame--preview-frame-size (parent)
-  "Return preview frame size parameters for PARENT."
+  "Return preview frame size in characters for PARENT."
   (let* ((auto (vertico-buffer-frame--preview-auto-pixel-size parent))
+         (auto-width
+          (vertico-buffer-frame--pixels-to-chars
+           (car auto)
+           (frame-char-width parent)))
+         (auto-height
+          (vertico-buffer-frame--pixels-to-chars
+           (cdr auto)
+           (frame-char-height parent)))
          (width-cap
           (vertico-buffer-frame--preview-size-cap
            parent vertico-buffer-frame-preview-width t))
          (height-cap
           (vertico-buffer-frame--preview-size-cap
            parent vertico-buffer-frame-preview-height nil))
-         (width (min (car auto)
-                     (max 1 (- (frame-pixel-width parent) 8))
+         (width (min auto-width
                      (or width-cap most-positive-fixnum)))
-         (height (min (cdr auto)
-                      (max 1 (- (frame-pixel-height parent) 8))
+         (height (min auto-height
                       (or height-cap most-positive-fixnum))))
-    (cons (cons 'text-pixels width)
-          (cons 'text-pixels height))))
+    (cons width height)))
 
 (defun vertico-buffer-frame--refresh-preview-frame ()
   "Resize and reposition the current preview frame, if it is live."
