@@ -544,7 +544,7 @@
             (kill-buffer vertico-buffer-frame--preview-buffer)))
       (delete-file file))))
 
-(ert-deftest vertico-buffer-frame-file-preview-buffer-is-not-reused ()
+(ert-deftest vertico-buffer-frame-file-preview-buffer-reuses-unchanged-file ()
   (let ((file (make-temp-file "vbf-preview")))
     (unwind-protect
         (with-temp-buffer
@@ -552,11 +552,30 @@
             (insert "abcdef"))
           (let ((first (vertico-buffer-frame--file-preview-buffer file))
                 (second (vertico-buffer-frame--file-preview-buffer file)))
-            (should-not (eq first second))
+            (should (eq first second))
             (mapc (lambda (buffer)
                     (when (buffer-live-p buffer)
                       (kill-buffer buffer)))
                   (list first second))))
+      (delete-file file))))
+
+(ert-deftest vertico-buffer-frame-file-preview-buffer-refreshes-changed-file ()
+  (let ((file (make-temp-file "vbf-preview")))
+    (unwind-protect
+        (with-temp-buffer
+          (with-temp-file file
+            (insert "abcdef"))
+          (let ((first (vertico-buffer-frame--file-preview-buffer file)))
+            (with-temp-file file
+              (insert "changed"))
+            (let ((second (vertico-buffer-frame--file-preview-buffer file)))
+              (should-not (eq first second))
+              (with-current-buffer second
+                (should (equal (buffer-string) "changed")))
+              (mapc (lambda (buffer)
+                      (when (buffer-live-p buffer)
+                        (kill-buffer buffer)))
+                    (list first second)))))
       (delete-file file))))
 
 (ert-deftest vertico-buffer-frame-preview-post-command-uses-delay ()
@@ -586,8 +605,8 @@
         (should (eq vertico-buffer-frame--preview-timer 'preview-timer))
         (setq scheduled nil)
         (vertico-buffer-frame--preview-post-command)
-        (should (equal canceled '(preview-timer)))
-        (should (equal (car scheduled) 0.2))))))
+        (should-not canceled)
+        (should-not scheduled)))))
 
 (ert-deftest vertico-buffer-frame-preview-later-shows-target-each-time ()
   (with-temp-buffer
@@ -1198,12 +1217,48 @@
                 (kill-buffer buffer)))
             (list source minibuffer)))))
 
+(ert-deftest vertico-buffer-frame-imenu-target-caches-generated-index ()
+  (let* ((source (generate-new-buffer " *vbf-imenu-cache-source*"))
+         (minibuffer (generate-new-buffer " *vbf-imenu-cache-minibuffer*"))
+         (calls 0))
+    (unwind-protect
+        (progn
+          (require 'imenu)
+          (cl-letf (((symbol-function #'minibuffer-selected-window)
+                     (lambda ()
+                       'source-window))
+                    ((symbol-function #'window-live-p)
+                     (lambda (window)
+                       (eq window 'source-window)))
+                    ((symbol-function #'window-buffer)
+                     (lambda (window)
+                       (and (eq window 'source-window) source)))
+                    ((symbol-function #'imenu--make-index-alist)
+                     (lambda ()
+                       (cl-incf calls)
+                       (list (cons "target" 7)))))
+            (with-current-buffer minibuffer
+              (should (equal (vertico-buffer-frame--imenu-target
+                              "target"
+                              "target")
+                             (list 'buffer-position source 7)))
+              (should (equal (vertico-buffer-frame--imenu-target
+                              "target"
+                              "target")
+                             (list 'buffer-position source 7)))
+              (should (= calls 1)))))
+      (mapc (lambda (buffer)
+              (when (buffer-live-p buffer)
+                (kill-buffer buffer)))
+            (list source minibuffer)))))
+
 (ert-deftest vertico-buffer-frame-consult-imenu-target-uses-consult-items ()
   (let* ((source (generate-new-buffer " *vbf-consult-imenu-source*"))
          (minibuffer (generate-new-buffer " *vbf-consult-imenu-minibuffer*"))
          (marker (with-current-buffer source
                    (insert "target")
-                   (copy-marker 3))))
+                   (copy-marker 3)))
+         (calls 0))
     (unwind-protect
         (cl-letf (((symbol-function #'minibuffer-selected-window)
                    (lambda ()
@@ -1216,11 +1271,16 @@
                      (and (eq window 'source-window) source)))
                   ((symbol-function #'consult-imenu--items)
                    (lambda ()
+                     (cl-incf calls)
                      (list (cons "Functions target" marker)))))
           (with-current-buffer minibuffer
             (should (equal (vertico-buffer-frame-consult--imenu-target
                             "Functions target")
-                           (list 'buffer-position source marker)))))
+                           (list 'buffer-position source marker)))
+            (should (equal (vertico-buffer-frame-consult--imenu-target
+                            "Functions target")
+                           (list 'buffer-position source marker)))
+            (should (= calls 1))))
       (set-marker marker nil)
       (mapc (lambda (buffer)
               (when (buffer-live-p buffer)

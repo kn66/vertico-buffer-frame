@@ -138,6 +138,10 @@ candidate.")
 (defvar-local vertico-buffer-frame--preview-buffer nil)
 (defvar-local vertico-buffer-frame--preview-timer nil)
 (defvar-local vertico-buffer-frame--preview-last-error-message nil)
+(defvar-local vertico-buffer-frame--preview-scheduled-state nil)
+(defvar-local vertico-buffer-frame--project-root-cache nil)
+(defvar-local vertico-buffer-frame--file-preview-cache nil)
+(defvar-local vertico-buffer-frame--imenu-cache nil)
 
 (defconst vertico-buffer-frame-preview--golden-ratio
   (/ (+ 1.0 (sqrt 5.0)) 2.0)
@@ -248,8 +252,16 @@ the `multi-category' text property."
 (defun vertico-buffer-frame--project-root ()
   "Return the current project root, if any."
   (when (require 'project nil t)
-    (when-let* ((project (ignore-errors (project-current nil))))
-      (project-root project))))
+    (let ((key default-directory))
+      (if (and (consp vertico-buffer-frame--project-root-cache)
+               (equal key (car vertico-buffer-frame--project-root-cache)))
+          (cdr vertico-buffer-frame--project-root-cache)
+        (let ((root (when-let* ((project (ignore-errors
+                                           (project-current nil))))
+                      (project-root project))))
+          (setq-local vertico-buffer-frame--project-root-cache
+                      (cons key root))
+          root)))))
 
 (defun vertico-buffer-frame--project-file-target (candidate)
   "Return a file preview target for project-file CANDIDATE."
@@ -287,22 +299,21 @@ the `multi-category' text property."
 
 (defun vertico-buffer-frame--color-target (candidate)
   "Return a text preview target for color CANDIDATE."
-  (when (and (color-defined-p candidate)
-             (color-values candidate))
+  (when-let* (((color-defined-p candidate))
+              (rgb (color-values candidate)))
     (list 'text
           "Color"
           (lambda ()
-            (let ((rgb (color-values candidate)))
-              (insert candidate "\n\n")
-              (insert (propertize "        "
-                                  'face
-                                  `(:background ,candidate
-                                                :foreground ,candidate))
-                      "\n\n")
-              (insert (format "#%04X%04X%04X\n"
-                              (nth 0 rgb)
-                              (nth 1 rgb)
-                              (nth 2 rgb))))))))
+            (insert candidate "\n\n")
+            (insert (propertize "        "
+                                'face
+                                `(:background ,candidate
+                                              :foreground ,candidate))
+                    "\n\n")
+            (insert (format "#%04X%04X%04X\n"
+                            (nth 0 rgb)
+                            (nth 1 rgb)
+                            (nth 2 rgb)))))))
 
 (defun vertico-buffer-frame--custom-theme-target (candidate)
   "Return a preview target for custom theme CANDIDATE."
@@ -578,12 +589,14 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
   "Return a preview target for bookmark CANDIDATE."
   (when (require 'bookmark nil t)
     (when-let* ((bookmark (bookmark-get-bookmark candidate 'noerror)))
-      (let ((file (bookmark-get-filename bookmark))
-            (position (bookmark-get-position bookmark)))
+      (let* ((file (bookmark-get-filename bookmark))
+             (position (bookmark-get-position bookmark))
+             (readable-file (and file
+                                 (vertico-buffer-frame--readable-file file))))
         (cond
-         ((and file (vertico-buffer-frame--readable-file file))
+         (readable-file
           (list 'file-position
-                (vertico-buffer-frame--readable-file file)
+                readable-file
                 position))
          (t
           (list 'text
@@ -647,30 +660,46 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
                             (cdr entry))))
           (throw 'found match)))))))
 
+(defun vertico-buffer-frame--imenu-cache-key (buffer)
+  "Return the cache key for BUFFER's imenu index."
+  (with-current-buffer buffer
+    (cons buffer (buffer-chars-modified-tick))))
+
+(defun vertico-buffer-frame--imenu-index (buffer)
+  "Return a cached imenu index for BUFFER."
+  (let ((key (vertico-buffer-frame--imenu-cache-key buffer)))
+    (if (and (consp vertico-buffer-frame--imenu-cache)
+             (equal key (car vertico-buffer-frame--imenu-cache)))
+        (cdr vertico-buffer-frame--imenu-cache)
+      (let ((entries (with-current-buffer buffer
+                       (ignore-errors
+                         (imenu--make-index-alist)))))
+        (setq-local vertico-buffer-frame--imenu-cache
+                    (cons key entries))
+        entries))))
+
 (defun vertico-buffer-frame--imenu-target (candidate raw-candidate)
   "Return a preview target for imenu CANDIDATE and RAW-CANDIDATE."
   (when (require 'imenu nil t)
     (when-let* ((buffer (vertico-buffer-frame--origin-buffer)))
-      (with-current-buffer buffer
-        (let* ((choice (or (and (stringp raw-candidate)
-                                (get-text-property 0 'imenu-choice
-                                                   raw-candidate))
-                           (ignore-errors
-                             (vertico-buffer-frame--imenu-find-entry
-                              candidate
-                              (imenu--make-index-alist)))))
-               (position (and choice
-                              (vertico-buffer-frame--imenu-entry-position
-                               choice))))
-          (cond
-           ((markerp position)
-            (vertico-buffer-frame--buffer-position-target
-             (or (marker-buffer position) buffer)
-             position))
-           (position
-            (vertico-buffer-frame--buffer-position-target
-             buffer
-             position))))))))
+      (let* ((choice (or (and (stringp raw-candidate)
+                              (get-text-property 0 'imenu-choice
+                                                 raw-candidate))
+                         (vertico-buffer-frame--imenu-find-entry
+                          candidate
+                          (vertico-buffer-frame--imenu-index buffer))))
+             (position (and choice
+                            (vertico-buffer-frame--imenu-entry-position
+                             choice))))
+        (cond
+         ((markerp position)
+          (vertico-buffer-frame--buffer-position-target
+           (or (marker-buffer position) buffer)
+           position))
+         (position
+          (vertico-buffer-frame--buffer-position-target
+           buffer
+           position)))))))
 
 (defun vertico-buffer-frame--bibtex-target (candidate stringp)
   "Return a preview target for BibTeX CANDIDATE.
@@ -863,15 +892,21 @@ When STRINGP is non-nil, look for a @String definition."
 
 (defun vertico-buffer-frame--kill-preview-buffer ()
   "Kill the temporary preview buffer owned by this minibuffer."
-  (when (buffer-live-p vertico-buffer-frame--preview-buffer)
-    (kill-buffer vertico-buffer-frame--preview-buffer))
+  (let ((buffer vertico-buffer-frame--preview-buffer))
+    (when (buffer-live-p buffer)
+      (kill-buffer buffer))
+    (when (eq (cdr-safe vertico-buffer-frame--file-preview-cache) buffer)
+      (setq-local vertico-buffer-frame--file-preview-cache nil)))
   (setq-local vertico-buffer-frame--preview-buffer nil))
 
 (defun vertico-buffer-frame--kill-old-preview-buffer (old-buffer new-buffer)
   "Kill OLD-BUFFER when it is live and different from NEW-BUFFER."
   (when (and (buffer-live-p old-buffer)
              (not (eq old-buffer new-buffer)))
-    (kill-buffer old-buffer)))
+    (kill-buffer old-buffer)
+    (when (eq (cdr-safe vertico-buffer-frame--file-preview-cache)
+              old-buffer)
+      (setq-local vertico-buffer-frame--file-preview-cache nil))))
 
 (defun vertico-buffer-frame--text-preview-buffer (name inserter)
   "Return a temporary preview buffer named NAME populated by INSERTER."
@@ -969,18 +1004,47 @@ SIZE is the file size in bytes, or nil if it is unknown."
                 (number-to-string size)
                 " bytes.\n"))))))
 
+(defun vertico-buffer-frame--file-preview-cache-key (file)
+  "Return a cache key for FILE preview content."
+  (when-let* ((attributes (ignore-errors
+                            (file-attributes file 'integer))))
+    (list file
+          (car attributes)
+          (nth 5 attributes)
+          (nth 7 attributes)
+          vertico-buffer-frame-preview-max-file-size
+          vertico-buffer-frame-preview-binary-files
+          vertico-buffer-frame-preview-directory-entry-limit)))
+
+(defun vertico-buffer-frame--cached-file-preview-buffer (key)
+  "Return the cached file preview buffer for KEY, if it is still valid."
+  (when (and key
+             (consp vertico-buffer-frame--file-preview-cache)
+             (equal key (car vertico-buffer-frame--file-preview-cache)))
+    (let ((buffer (cdr vertico-buffer-frame--file-preview-cache)))
+      (when (buffer-live-p buffer)
+        (setq-local vertico-buffer-frame--preview-buffer buffer)
+        buffer))))
+
 (defun vertico-buffer-frame--file-preview-buffer (file)
-  "Return a new temporary preview buffer for FILE."
-  (vertico-buffer-frame--text-preview-buffer
-   "file"
-   (lambda ()
-     (cond
-      ((file-directory-p file)
-       (vertico-buffer-frame--insert-directory-preview file))
-      ((file-regular-p file)
-       (vertico-buffer-frame--insert-regular-file-preview file))
-      (t
-       (insert (abbreviate-file-name file) "\n"))))))
+  "Return a temporary preview buffer for FILE."
+  (let ((key (vertico-buffer-frame--file-preview-cache-key file)))
+    (or (vertico-buffer-frame--cached-file-preview-buffer key)
+        (let ((buffer
+               (vertico-buffer-frame--text-preview-buffer
+                "file"
+                (lambda ()
+                  (cond
+                   ((file-directory-p file)
+                    (vertico-buffer-frame--insert-directory-preview file))
+                   ((file-regular-p file)
+                    (vertico-buffer-frame--insert-regular-file-preview file))
+                   (t
+                    (insert (abbreviate-file-name file) "\n")))))))
+          (when key
+            (setq-local vertico-buffer-frame--file-preview-cache
+                        (cons key buffer)))
+          buffer))))
 
 (defun vertico-buffer-frame--insert-symbol-preview (symbol)
   "Insert a preview for SYMBOL."
@@ -1143,7 +1207,14 @@ WINDOW."
   "Cancel the pending preview timer for the current minibuffer buffer."
   (when (timerp vertico-buffer-frame--preview-timer)
     (cancel-timer vertico-buffer-frame--preview-timer))
-  (setq-local vertico-buffer-frame--preview-timer nil))
+  (setq-local vertico-buffer-frame--preview-timer nil
+              vertico-buffer-frame--preview-scheduled-state nil))
+
+(defun vertico-buffer-frame--preview-state ()
+  "Return state used to coalesce pending preview refresh timers."
+  (list vertico--input
+        (vertico-buffer-frame--category)
+        (vertico-buffer-frame--candidate)))
 
 (defun vertico-buffer-frame--hide-preview ()
   "Hide the preview child frame."
@@ -1151,13 +1222,15 @@ WINDOW."
   (vertico-buffer-frame--delete-frame vertico-buffer-frame--preview-frame)
   (vertico-buffer-frame--kill-preview-buffer)
   (setq-local vertico-buffer-frame--preview-frame nil
-              vertico-buffer-frame--preview-window nil))
+              vertico-buffer-frame--preview-window nil
+              vertico-buffer-frame--preview-scheduled-state nil))
 
 (defun vertico-buffer-frame--show-preview-later (buffer)
   "Show preview for minibuffer BUFFER after the configured delay."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (setq-local vertico-buffer-frame--preview-timer nil)
+      (setq-local vertico-buffer-frame--preview-timer nil
+                  vertico-buffer-frame--preview-scheduled-state nil)
       (condition-case-unless-debug error
           (if (and vertico-buffer-frame-mode
                    vertico-buffer-frame-preview
@@ -1172,22 +1245,27 @@ WINDOW."
         (error
          (vertico-buffer-frame--report-preview-error error))))))
 
-(defun vertico-buffer-frame--schedule-preview ()
+(defun vertico-buffer-frame--schedule-preview (&optional state)
   "Schedule preview display for the current minibuffer buffer."
-  (vertico-buffer-frame--cancel-preview-timer)
-  (setq-local vertico-buffer-frame--preview-timer
-              (run-with-idle-timer
-               (max 0 (float vertico-buffer-frame-preview-delay))
-               nil
-               #'vertico-buffer-frame--show-preview-later
-               (current-buffer))))
+  (unless (and state
+               (timerp vertico-buffer-frame--preview-timer)
+               (equal state vertico-buffer-frame--preview-scheduled-state))
+    (vertico-buffer-frame--cancel-preview-timer)
+    (setq-local vertico-buffer-frame--preview-scheduled-state state
+                vertico-buffer-frame--preview-timer
+                (run-with-idle-timer
+                 (max 0 (float vertico-buffer-frame-preview-delay))
+                 nil
+                 #'vertico-buffer-frame--show-preview-later
+                 (current-buffer)))))
 
 (defun vertico-buffer-frame--preview-post-command ()
   "Schedule a delayed preview refresh after Vertico candidate refresh."
   (if (and vertico-buffer-frame-mode
            vertico-buffer-frame-preview
            (bound-and-true-p vertico--input))
-      (vertico-buffer-frame--schedule-preview)
+      (vertico-buffer-frame--schedule-preview
+       (vertico-buffer-frame--preview-state))
     (vertico-buffer-frame--hide-preview)))
 
 (provide 'vertico-buffer-frame-preview)

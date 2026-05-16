@@ -18,6 +18,7 @@
 (defvar vertico-buffer-frame-preview-categories)
 (defvar vertico-buffer-frame-preview-target-functions)
 (defvar xref-file-name-display)
+(defvar-local vertico-buffer-frame-consult--imenu-cache nil)
 
 (declare-function vertico-buffer-frame--buffer-position-target
                   "vertico-buffer-frame-preview")
@@ -136,19 +137,37 @@ FALLBACK-BUFFER is used for integer positions which do not carry a buffer."
      (when (buffer-live-p buffer)
        (vertico-buffer-frame-consult--imenu-position-target pos buffer)))))
 
+(defun vertico-buffer-frame-consult--imenu-cache-key (buffer)
+  "Return the cache key for BUFFER's Consult imenu items."
+  (with-current-buffer buffer
+    (cons buffer (buffer-chars-modified-tick))))
+
+(defun vertico-buffer-frame-consult--imenu-items (buffer)
+  "Return cached Consult imenu items for BUFFER."
+  (let ((key (vertico-buffer-frame-consult--imenu-cache-key buffer)))
+    (if (and (consp vertico-buffer-frame-consult--imenu-cache)
+             (equal key (car vertico-buffer-frame-consult--imenu-cache)))
+        (cdr vertico-buffer-frame-consult--imenu-cache)
+      (let ((items (with-current-buffer buffer
+                     (ignore-errors
+                       (copy-tree (consult-imenu--items))))))
+        (when (and items
+                   (fboundp 'consult-imenu--deduplicate))
+          (consult-imenu--deduplicate items))
+        (setq-local vertico-buffer-frame-consult--imenu-cache
+                    (cons key items))
+        items))))
+
 (defun vertico-buffer-frame-consult--imenu-target (candidate)
   "Return a preview target for a Consult Imenu CANDIDATE."
   (when-let* ((buffer (vertico-buffer-frame--origin-buffer))
               ((fboundp 'consult-imenu--items)))
-    (with-current-buffer buffer
-      (when-let* ((items (ignore-errors
-                           (copy-tree (consult-imenu--items)))))
-        (when (fboundp 'consult-imenu--deduplicate)
-          (consult-imenu--deduplicate items))
-        (when-let* ((item (assoc candidate items)))
-          (vertico-buffer-frame-consult--imenu-position-target
-           (cdr item)
-           buffer))))))
+    (when-let* ((item (assoc candidate
+                             (vertico-buffer-frame-consult--imenu-items
+                              buffer))))
+      (vertico-buffer-frame-consult--imenu-position-target
+       (cdr item)
+       buffer))))
 
 (defun vertico-buffer-frame-consult-preview-target
     (category candidate raw-candidate)

@@ -455,6 +455,10 @@ This function is intended for `vertico-buffer-display-action'."
                     vertico-buffer-frame--preview-buffer nil
                     vertico-buffer-frame--preview-timer nil
                     vertico-buffer-frame--preview-last-error-message nil
+                    vertico-buffer-frame--preview-scheduled-state nil
+                    vertico-buffer-frame--project-root-cache nil
+                    vertico-buffer-frame--file-preview-cache nil
+                    vertico-buffer-frame--imenu-cache nil
                     vertico-buffer-frame--cleanup-function nil))))
   (setq vertico-buffer-frame--minibuffers
         (delq buffer vertico-buffer-frame--minibuffers)))
