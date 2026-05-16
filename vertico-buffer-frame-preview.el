@@ -142,6 +142,7 @@ candidate.")
 (defvar-local vertico-buffer-frame--project-root-cache nil)
 (defvar-local vertico-buffer-frame--file-preview-cache nil)
 (defvar-local vertico-buffer-frame--imenu-cache nil)
+(defvar-local vertico-buffer-frame--temporary-preview-buffer nil)
 
 (defconst vertico-buffer-frame-preview--golden-ratio
   (/ (+ 1.0 (sqrt 5.0)) 2.0)
@@ -660,13 +661,36 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
                             (cdr entry))))
           (throw 'found match)))))))
 
+(defun vertico-buffer-frame--imenu-entry-name (entry)
+  "Return the display name for imenu ENTRY."
+  (when (and (consp entry)
+             (stringp (car entry))
+             (not (imenu--subalist-p entry)))
+    (substring-no-properties (car entry))))
+
+(defun vertico-buffer-frame--imenu-entry-table (entries)
+  "Return a hash table mapping candidate names to imenu ENTRIES."
+  (let ((table (make-hash-table :test #'equal)))
+    (cl-labels
+        ((walk (items)
+           (dolist (entry items)
+             (when (consp entry)
+               (if (imenu--subalist-p entry)
+                   (walk (cdr entry))
+                 (when-let* ((name (vertico-buffer-frame--imenu-entry-name
+                                    entry)))
+                   (unless (gethash name table)
+                     (puthash name entry table))))))))
+      (walk entries))
+    table))
+
 (defun vertico-buffer-frame--imenu-cache-key (buffer)
   "Return the cache key for BUFFER's imenu index."
   (with-current-buffer buffer
     (cons buffer (buffer-chars-modified-tick))))
 
-(defun vertico-buffer-frame--imenu-index (buffer)
-  "Return a cached imenu index for BUFFER."
+(defun vertico-buffer-frame--imenu-cache-value (buffer)
+  "Return cached imenu index details for BUFFER."
   (let ((key (vertico-buffer-frame--imenu-cache-key buffer)))
     (if (and (consp vertico-buffer-frame--imenu-cache)
              (equal key (car vertico-buffer-frame--imenu-cache)))
@@ -675,19 +699,28 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
                        (ignore-errors
                          (imenu--make-index-alist)))))
         (setq-local vertico-buffer-frame--imenu-cache
-                    (cons key entries))
-        entries))))
+                    (cons key
+                          (cons entries
+                                (vertico-buffer-frame--imenu-entry-table
+                                 entries))))
+        (cdr vertico-buffer-frame--imenu-cache)))))
+
+(defun vertico-buffer-frame--imenu-index (buffer)
+  "Return a cached imenu index for BUFFER."
+  (car (vertico-buffer-frame--imenu-cache-value buffer)))
 
 (defun vertico-buffer-frame--imenu-target (candidate raw-candidate)
   "Return a preview target for imenu CANDIDATE and RAW-CANDIDATE."
   (when (require 'imenu nil t)
     (when-let* ((buffer (vertico-buffer-frame--origin-buffer)))
-      (let* ((choice (or (and (stringp raw-candidate)
+      (let* ((cache (vertico-buffer-frame--imenu-cache-value buffer))
+             (choice (or (and (stringp raw-candidate)
                               (get-text-property 0 'imenu-choice
                                                  raw-candidate))
+                         (gethash candidate (cdr cache))
                          (vertico-buffer-frame--imenu-find-entry
                           candidate
-                          (vertico-buffer-frame--imenu-index buffer))))
+                          (car cache))))
              (position (and choice
                             (vertico-buffer-frame--imenu-entry-position
                              choice))))
@@ -910,14 +943,24 @@ When STRINGP is non-nil, look for a @String definition."
 
 (defun vertico-buffer-frame--text-preview-buffer (name inserter)
   "Return a temporary preview buffer named NAME populated by INSERTER."
-  (let ((buffer (generate-new-buffer
-                 (format " *vertico-buffer-frame-%s-preview*" name))))
+  (let ((buffer (if (and (buffer-live-p
+                          vertico-buffer-frame--preview-buffer)
+                         (buffer-local-value
+                          'vertico-buffer-frame--temporary-preview-buffer
+                          vertico-buffer-frame--preview-buffer)
+                         (not (eq (cdr-safe
+                                   vertico-buffer-frame--file-preview-cache)
+                                  vertico-buffer-frame--preview-buffer)))
+                    vertico-buffer-frame--preview-buffer
+                  (generate-new-buffer
+                   (format " *vertico-buffer-frame-%s-preview*" name)))))
     (setq-local vertico-buffer-frame--preview-buffer buffer)
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
         (erase-buffer)
         (fundamental-mode)
-        (setq-local truncate-lines t)
+        (setq-local truncate-lines t
+                    vertico-buffer-frame--temporary-preview-buffer t)
         (funcall inserter))
       (goto-char (point-min))
       (setq buffer-read-only t))
@@ -1246,7 +1289,8 @@ WINDOW."
          (vertico-buffer-frame--report-preview-error error))))))
 
 (defun vertico-buffer-frame--schedule-preview (&optional state)
-  "Schedule preview display for the current minibuffer buffer."
+  "Schedule preview display for the current minibuffer buffer.
+When STATE matches the pending timer state, keep the existing timer."
   (unless (and state
                (timerp vertico-buffer-frame--preview-timer)
                (equal state vertico-buffer-frame--preview-scheduled-state))

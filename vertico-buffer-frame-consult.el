@@ -142,8 +142,18 @@ FALLBACK-BUFFER is used for integer positions which do not carry a buffer."
   (with-current-buffer buffer
     (cons buffer (buffer-chars-modified-tick))))
 
-(defun vertico-buffer-frame-consult--imenu-items (buffer)
-  "Return cached Consult imenu items for BUFFER."
+(defun vertico-buffer-frame-consult--imenu-item-table (items)
+  "Return a hash table mapping Consult imenu item names to ITEMS."
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (item items)
+      (when (and (consp item)
+                 (stringp (car item)))
+        (unless (gethash (car item) table)
+          (puthash (car item) item table))))
+    table))
+
+(defun vertico-buffer-frame-consult--imenu-cache-value (buffer)
+  "Return cached Consult imenu item details for BUFFER."
   (let ((key (vertico-buffer-frame-consult--imenu-cache-key buffer)))
     (if (and (consp vertico-buffer-frame-consult--imenu-cache)
              (equal key (car vertico-buffer-frame-consult--imenu-cache)))
@@ -155,19 +165,26 @@ FALLBACK-BUFFER is used for integer positions which do not carry a buffer."
                    (fboundp 'consult-imenu--deduplicate))
           (consult-imenu--deduplicate items))
         (setq-local vertico-buffer-frame-consult--imenu-cache
-                    (cons key items))
-        items))))
+                    (cons key
+                          (cons items
+                                (vertico-buffer-frame-consult--imenu-item-table
+                                 items))))
+        (cdr vertico-buffer-frame-consult--imenu-cache)))))
+
+(defun vertico-buffer-frame-consult--imenu-items (buffer)
+  "Return cached Consult imenu items for BUFFER."
+  (car (vertico-buffer-frame-consult--imenu-cache-value buffer)))
 
 (defun vertico-buffer-frame-consult--imenu-target (candidate)
   "Return a preview target for a Consult Imenu CANDIDATE."
   (when-let* ((buffer (vertico-buffer-frame--origin-buffer))
               ((fboundp 'consult-imenu--items)))
-    (when-let* ((item (assoc candidate
-                             (vertico-buffer-frame-consult--imenu-items
-                              buffer))))
-      (vertico-buffer-frame-consult--imenu-position-target
-       (cdr item)
-       buffer))))
+    (let ((cache (vertico-buffer-frame-consult--imenu-cache-value buffer)))
+      (when-let* ((item (or (gethash candidate (cdr cache))
+                            (assoc candidate (car cache)))))
+        (vertico-buffer-frame-consult--imenu-position-target
+         (cdr item)
+         buffer)))))
 
 (defun vertico-buffer-frame-consult-preview-target
     (category candidate raw-candidate)

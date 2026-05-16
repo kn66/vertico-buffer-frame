@@ -26,6 +26,7 @@
         nil t))
 
 (declare-function consult-imenu--items "consult-imenu" ())
+(declare-function imenu--make-index-alist "imenu" ())
 
 (defmacro vertico-buffer-frame-test--with-clean-state (&rest body)
   "Run BODY with global mode state restored afterwards."
@@ -1031,6 +1032,31 @@
               (should (equal (buffer-string) "preview"))))
         (when (buffer-live-p preview)
           (kill-buffer preview))))))
+
+(ert-deftest vertico-buffer-frame-text-preview-buffer-reuses-owned-buffer ()
+  (with-temp-buffer
+    (let (first second)
+      (unwind-protect
+          (progn
+            (setq first
+                  (vertico-buffer-frame--text-preview-buffer
+                   "test"
+                   (lambda ()
+                     (insert "first"))))
+            (setq second
+                  (vertico-buffer-frame--text-preview-buffer
+                   "test"
+                   (lambda ()
+                     (insert "second"))))
+            (should (eq first second))
+            (with-current-buffer second
+              (should buffer-read-only)
+              (should (equal (buffer-string) "second"))))
+        (when (buffer-live-p second)
+          (kill-buffer second))
+        (when (and (buffer-live-p first)
+                   (not (eq first second)))
+          (kill-buffer first))))))
 
 (ert-deftest vertico-buffer-frame-preview-window-buffer-set-before-dedication ()
   (let (events)
