@@ -135,6 +135,7 @@ candidate.")
 
 (defvar-local vertico-buffer-frame--preview-frame nil)
 (defvar-local vertico-buffer-frame--preview-window nil)
+(defvar-local vertico-buffer-frame--preview-layout-state nil)
 (defvar-local vertico-buffer-frame--preview-buffer nil)
 (defvar-local vertico-buffer-frame--preview-timer nil)
 (defvar-local vertico-buffer-frame--preview-last-error-message nil)
@@ -175,6 +176,8 @@ candidate.")
 (declare-function vertico-buffer-frame--delete-frame "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--make-child-frame "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--parent-frame "vertico-buffer-frame")
+(declare-function vertico-buffer-frame--frame-layout-state
+                  "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--pixels-to-chars "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--place-preview-frame "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--prepare-window "vertico-buffer-frame")
@@ -914,11 +917,17 @@ When STRINGP is non-nil, look for a @String definition."
   "Resize and reposition the current preview frame, if it is live."
   (when (frame-live-p vertico-buffer-frame--preview-frame)
     (let* ((parent (vertico-buffer-frame--preview-parent-frame))
-           (size (vertico-buffer-frame--preview-frame-size parent)))
-      (vertico-buffer-frame--resize-frame-to-size
-       vertico-buffer-frame--preview-frame size)
-      (vertico-buffer-frame--place-preview-frame
-       vertico-buffer-frame--preview-frame parent)
+           (size (vertico-buffer-frame--preview-frame-size parent))
+           (state (vertico-buffer-frame--frame-layout-state
+                   vertico-buffer-frame--preview-frame parent size)))
+      (unless (equal state vertico-buffer-frame--preview-layout-state)
+        (vertico-buffer-frame--resize-frame-to-size
+         vertico-buffer-frame--preview-frame size)
+        (vertico-buffer-frame--place-preview-frame
+         vertico-buffer-frame--preview-frame parent)
+        (setq-local vertico-buffer-frame--preview-layout-state
+                    (vertico-buffer-frame--frame-layout-state
+                     vertico-buffer-frame--preview-frame parent size)))
       (when (window-live-p vertico-buffer-frame--preview-window)
         (force-window-update
          (window-buffer vertico-buffer-frame--preview-window))))))
@@ -1131,7 +1140,10 @@ SIZE is the file size in bytes, or nil if it is unknown."
       (vertico-buffer-frame--prepare-window window)
       (setq-local vertico-buffer-frame--preview-frame frame
                   vertico-buffer-frame--preview-window window)
-      (vertico-buffer-frame--place-preview-frame frame parent)))
+      (vertico-buffer-frame--place-preview-frame frame parent)
+      (setq-local vertico-buffer-frame--preview-layout-state
+                  (vertico-buffer-frame--frame-layout-state
+                   frame parent size))))
   (vertico-buffer-frame--refresh-preview-frame)
   vertico-buffer-frame--preview-window)
 
@@ -1140,9 +1152,12 @@ SIZE is the file size in bytes, or nil if it is unknown."
   "Display BUFFER in preview WINDOW and dedicate it afterwards.
 When OLD-PREVIEW-BUFFER is live, kill it after BUFFER has replaced it in
 WINDOW."
-  (set-window-dedicated-p window nil)
-  (set-window-buffer window buffer)
-  (set-window-dedicated-p window t)
+  (if (eq (window-buffer window) buffer)
+      (unless (window-dedicated-p window)
+        (set-window-dedicated-p window t))
+    (set-window-dedicated-p window nil)
+    (set-window-buffer window buffer)
+    (set-window-dedicated-p window t))
   (vertico-buffer-frame--kill-old-preview-buffer old-preview-buffer buffer))
 
 (defun vertico-buffer-frame--center-window-point (window)
@@ -1266,6 +1281,7 @@ WINDOW."
   (vertico-buffer-frame--kill-preview-buffer)
   (setq-local vertico-buffer-frame--preview-frame nil
               vertico-buffer-frame--preview-window nil
+              vertico-buffer-frame--preview-layout-state nil
               vertico-buffer-frame--preview-scheduled-state nil))
 
 (defun vertico-buffer-frame--show-preview-later (buffer)

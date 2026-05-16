@@ -110,6 +110,7 @@ minibuffer setup path, which can be more fragile on some PGTK builds."
 
 (defvar-local vertico-buffer-frame--candidate-frame nil)
 (defvar-local vertico-buffer-frame--candidate-window nil)
+(defvar-local vertico-buffer-frame--candidate-layout-state nil)
 (defvar-local vertico-buffer-frame--cleanup-function nil)
 
 ;;;###autoload
@@ -302,6 +303,15 @@ minibuffer setup path, which can be more fragile on some PGTK builds."
              (frame-pixel-height frame)
              8))))
 
+(defun vertico-buffer-frame--frame-layout-state (frame parent size)
+  "Return layout state for FRAME in PARENT with character SIZE."
+  (list parent
+        (frame-pixel-width parent)
+        (frame-pixel-height parent)
+        (frame-pixel-width frame)
+        (frame-pixel-height frame)
+        size))
+
 (defun vertico-buffer-frame--make-child-frame (parent name width height)
   "Create a fresh child frame under PARENT named NAME with WIDTH and HEIGHT."
   (let ((frame (make-frame
@@ -354,17 +364,26 @@ This function is intended for `vertico-buffer-display-action'."
         (vertico-buffer-frame--install-cleanup)
         (vertico-buffer-frame--place-candidate-frame
          vertico-buffer-frame--candidate-frame parent)
+        (setq-local vertico-buffer-frame--candidate-layout-state
+                    (vertico-buffer-frame--frame-layout-state
+                     vertico-buffer-frame--candidate-frame parent size))
         vertico-buffer-frame--candidate-window))))
 
 (defun vertico-buffer-frame--reveal-candidate-frame ()
   "Reveal and refresh the current minibuffer's candidate frame."
   (when (vertico-buffer-frame--candidate-window-live-p)
     (let* ((parent (vertico-buffer-frame--parent-frame))
-           (size (vertico-buffer-frame--candidate-frame-size parent)))
-      (vertico-buffer-frame--resize-frame-to-size
-       vertico-buffer-frame--candidate-frame size)
-      (vertico-buffer-frame--place-candidate-frame
-       vertico-buffer-frame--candidate-frame parent)
+           (size (vertico-buffer-frame--candidate-frame-size parent))
+           (state (vertico-buffer-frame--frame-layout-state
+                   vertico-buffer-frame--candidate-frame parent size)))
+      (unless (equal state vertico-buffer-frame--candidate-layout-state)
+        (vertico-buffer-frame--resize-frame-to-size
+         vertico-buffer-frame--candidate-frame size)
+        (vertico-buffer-frame--place-candidate-frame
+         vertico-buffer-frame--candidate-frame parent)
+        (setq-local vertico-buffer-frame--candidate-layout-state
+                    (vertico-buffer-frame--frame-layout-state
+                     vertico-buffer-frame--candidate-frame parent size)))
       (vertico-buffer-frame--refresh-preview-frame)
       (vertico-buffer-frame--show-frame
        vertico-buffer-frame--candidate-frame)
@@ -450,8 +469,10 @@ This function is intended for `vertico-buffer-display-action'."
         (vertico-buffer-frame--kill-preview-buffer)
         (setq-local vertico-buffer-frame--candidate-frame nil
                     vertico-buffer-frame--candidate-window nil
+                    vertico-buffer-frame--candidate-layout-state nil
                     vertico-buffer-frame--preview-frame nil
                     vertico-buffer-frame--preview-window nil
+                    vertico-buffer-frame--preview-layout-state nil
                     vertico-buffer-frame--preview-buffer nil
                     vertico-buffer-frame--preview-timer nil
                     vertico-buffer-frame--preview-last-error-message nil
