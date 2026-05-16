@@ -103,7 +103,6 @@ minibuffer setup path, which can be more fragile on some PGTK builds."
 (defvar vertico-buffer-frame--minibuffers nil)
 (defvar vertico-buffer-frame--warm-up-done nil)
 (defvar vertico-buffer-frame--warm-up-timer nil)
-(defvar vertico-buffer-frame--warming-up nil)
 (defvar vertico-buffer-frame-mode)
 (defvar vertico-buffer-frame-mode-map)
 (defvar vertico-buffer-frame-preview)
@@ -193,10 +192,8 @@ minibuffer setup path, which can be more fragile on some PGTK builds."
 
 (defun vertico-buffer-frame--pixels-to-chars (pixels char-size)
   "Return PIXELS rounded to a positive character count using CHAR-SIZE."
-  (let ((pixels (if (numberp pixels) pixels 1))
-        (char-size (if (numberp char-size) char-size 1)))
-    (max 1 (round (/ (float (max 1 pixels))
-                     (max 1 char-size))))))
+  (max 1 (round (/ (float (max 1 pixels))
+                   (max 1 char-size)))))
 
 (defun vertico-buffer-frame--parent-pixel-size (parent)
   "Return PARENT frame size in pixels."
@@ -256,24 +253,15 @@ minibuffer setup path, which can be more fragile on some PGTK builds."
      (vertico-buffer-frame--golden-frame-size parent))))
 
 (defun vertico-buffer-frame--resize-frame-to-size (frame size)
-  "Resize FRAME to SIZE.
-SIZE may use text-pixel parameters or character counts."
+  "Resize FRAME to character SIZE."
   (when (frame-live-p frame)
     (let ((width (car size))
           (height (cdr size)))
-      (cond
-       ((and (consp width)
-             (eq (car width) 'text-pixels)
-             (natnump (cdr width))
-             (consp height)
-             (eq (car height) 'text-pixels)
-             (natnump (cdr height)))
-        (set-frame-size frame (cdr width) (cdr height) t))
-       ((and (natnump width)
-             (natnump height))
+      (when (and (natnump width)
+                 (natnump height))
         (set-frame-size frame
                         (vertico-buffer-frame--positive-chars width)
-                        (vertico-buffer-frame--positive-chars height)))))))
+                        (vertico-buffer-frame--positive-chars height))))))
 
 (defun vertico-buffer-frame--prepare-window (window)
   "Remove chrome and spacing from child frame WINDOW."
@@ -415,17 +403,16 @@ This function is intended for `vertico-buffer-display-action'."
              (not vertico-buffer-frame--warm-up-done)
              (display-graphic-p (selected-frame)))
     (let (frame)
+      (setq vertico-buffer-frame--warm-up-done t)
       (condition-case-unless-debug error
-          (progn
-            (let ((vertico-buffer-frame--warming-up t))
-              (setq frame
-                    (vertico-buffer-frame--make-child-frame
-                     (selected-frame)
-                     "Vertico Warm Up"
-                     1
-                     1)))
-            (setq vertico-buffer-frame--warm-up-done t))
+          (setq frame
+                (vertico-buffer-frame--make-child-frame
+                 (selected-frame)
+                 "Vertico Warm Up"
+                 1
+                 1))
         (error
+         (setq vertico-buffer-frame--warm-up-done nil)
          (message "vertico-buffer-frame warm-up error: %s"
                   (error-message-string error))))
       (vertico-buffer-frame--delete-frame frame))))
@@ -442,8 +429,7 @@ This function is intended for `vertico-buffer-display-action'."
 
 (defun vertico-buffer-frame--after-make-frame (_frame)
   "Schedule child-frame warm-up after a new graphical frame appears."
-  (when (and vertico-buffer-frame-mode
-             (not vertico-buffer-frame--warming-up))
+  (when vertico-buffer-frame-mode
     (vertico-buffer-frame--schedule-warm-up)))
 
 (defun vertico-buffer-frame--cleanup-minibuffer (buffer)

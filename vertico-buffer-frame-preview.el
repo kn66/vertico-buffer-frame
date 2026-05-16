@@ -825,14 +825,6 @@ When STRINGP is non-nil, look for a @String definition."
          (height (max 1 (- parent-height top-offset))))
     (cons width height)))
 
-(defun vertico-buffer-frame--preview-size-cap (parent value horizontal)
-  "Return VALUE as a positive character size cap.
-PARENT and HORIZONTAL are accepted for compatibility with older callers."
-  (ignore parent horizontal)
-  (and (integerp value)
-       (> value 0)
-       value))
-
 (defun vertico-buffer-frame--preview-frame-size (parent)
   "Return preview frame size in characters for PARENT."
   (let* ((auto (vertico-buffer-frame--preview-auto-pixel-size parent))
@@ -844,12 +836,12 @@ PARENT and HORIZONTAL are accepted for compatibility with older callers."
           (vertico-buffer-frame--pixels-to-chars
            (cdr auto)
            (frame-char-height parent)))
-         (width-cap
-          (vertico-buffer-frame--preview-size-cap
-           parent vertico-buffer-frame-preview-width t))
-         (height-cap
-          (vertico-buffer-frame--preview-size-cap
-           parent vertico-buffer-frame-preview-height nil))
+         (width-cap (and (integerp vertico-buffer-frame-preview-width)
+                         (> vertico-buffer-frame-preview-width 0)
+                         vertico-buffer-frame-preview-width))
+         (height-cap (and (integerp vertico-buffer-frame-preview-height)
+                          (> vertico-buffer-frame-preview-height 0)
+                          vertico-buffer-frame-preview-height))
          (width (min auto-width
                      (or width-cap most-positive-fixnum)))
          (height (min auto-height
