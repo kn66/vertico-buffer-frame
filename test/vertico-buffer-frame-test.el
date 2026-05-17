@@ -1234,8 +1234,7 @@
     (unwind-protect
         (let* ((default-directory (file-name-as-directory directory))
                (file (expand-file-name "xref-target.el" directory))
-               (candidate (propertize "xref-target.el:2:match"
-                                      'xref--group "xref-target.el")))
+               (candidate "xref-target.el:2:match"))
           (with-temp-file file
             (insert "line 1\nline 2\n"))
           (should (equal (vertico-buffer-frame--xref-location-target
@@ -1249,10 +1248,7 @@
     (unwind-protect
         (let* ((default-directory (file-name-as-directory directory))
                (file (expand-file-name "xref-target.el" directory))
-               (candidate (concat "prefix "
-                                  (propertize "xref-target.el"
-                                              'xref--group "xref-target.el")
-                                  ":2:match")))
+               (candidate "prefix xref-target.el:2:match"))
           (with-temp-file file
             (insert "line 1\nline 2\n"))
           (should (equal (vertico-buffer-frame--xref-location-target

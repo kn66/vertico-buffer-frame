@@ -608,30 +608,50 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
                   (when position
                     (insert "Position: " (number-to-string position) "\n"))))))))))
 
-(defun vertico-buffer-frame--xref-location-target (candidate raw-candidate)
-  "Return a preview target for xref CANDIDATE and RAW-CANDIDATE."
-  (let* ((group (or (vertico-buffer-frame--text-property-value
-                     'xref--group raw-candidate)
-                    (and (string-match "\\`\\(.+\\):[0-9]+:" candidate)
-                         (match-string 1 candidate))))
-         (group-end (vertico-buffer-frame--text-property-end
-                     'xref--group raw-candidate))
-         (line (cond
-                ((and group-end
-                      (< group-end (length raw-candidate))
-                      (eq (aref raw-candidate group-end) ?:)
-                      (string-match "\\`\\([0-9]+\\):"
-                                    raw-candidate
-                                    (1+ group-end)))
-                 (string-to-number (match-string 1 raw-candidate)))
-                ((string-match "\\`.+:\\([0-9]+\\):" candidate)
-                 (string-to-number (match-string 1 candidate))))))
-    (when (and group (> (or line 0) 0))
-      (when-let* ((file (or (vertico-buffer-frame--readable-file group)
-                            (when-let* ((root (vertico-buffer-frame--project-root)))
-                              (vertico-buffer-frame--readable-file
-                               group root)))))
-        (list 'file-line file line)))))
+(defun vertico-buffer-frame--xref-readable-file (file)
+  "Return readable xref FILE, optionally relative to the project root."
+  (or (vertico-buffer-frame--readable-file file)
+      (when-let* ((root (vertico-buffer-frame--project-root)))
+        (vertico-buffer-frame--readable-file file root))))
+
+(defun vertico-buffer-frame--xref-file-name-candidates (prefix)
+  "Return possible file names from an xref candidate PREFIX."
+  (let ((prefix (string-trim prefix))
+        candidates)
+    (unless (string-empty-p prefix)
+      (push prefix candidates)
+      (let ((start 0))
+        (while (string-match "[[:space:]]+" prefix start)
+          (let ((suffix (string-trim-left
+                         (substring prefix (match-end 0)))))
+            (unless (string-empty-p suffix)
+              (push suffix candidates)))
+          (setq start (match-end 0)))))
+    (nreverse (delete-dups candidates))))
+
+(defun vertico-buffer-frame--xref-location-from-candidate (candidate)
+  "Return (FILE . LINE) parsed from xref CANDIDATE."
+  (when (stringp candidate)
+    (let ((candidate (substring-no-properties candidate))
+          (start 0)
+          location)
+      (while (and (not location)
+                  (string-match ":\\([0-9]+\\):" candidate start))
+        (let ((line (string-to-number (match-string 1 candidate)))
+              (prefix (substring candidate 0 (match-beginning 0))))
+          (when-let* ((file (cl-some
+                             #'vertico-buffer-frame--xref-readable-file
+                             (vertico-buffer-frame--xref-file-name-candidates
+                              prefix))))
+            (setq location (cons file line))))
+        (setq start (match-end 0)))
+      location)))
+
+(defun vertico-buffer-frame--xref-location-target (candidate _raw-candidate)
+  "Return a preview target for xref CANDIDATE."
+  (when-let* ((location
+               (vertico-buffer-frame--xref-location-from-candidate candidate)))
+    (list 'file-line (car location) (cdr location))))
 
 (defun vertico-buffer-frame--imenu-entry-position (entry)
   "Return the buffer position described by imenu ENTRY."
