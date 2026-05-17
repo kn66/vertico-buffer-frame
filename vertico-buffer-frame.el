@@ -392,7 +392,7 @@ instead."
         (push (cons role frame) vertico-buffer-frame--hidden-frames)))))
 
 (defun vertico-buffer-frame--obtain-child-frame (role parent name width height)
-  "Return a hidden or fresh child frame for ROLE under PARENT."
+  "Return a hidden or fresh child frame named NAME for ROLE under PARENT."
   (let ((frame (or (vertico-buffer-frame--take-hidden-frame role parent)
                    (vertico-buffer-frame--make-child-frame
                     parent name width height role))))
@@ -482,6 +482,10 @@ This function is intended for `vertico-buffer-display-action'."
       (force-window-update
        (window-buffer vertico-buffer-frame--candidate-window)))))
 
+(defun vertico-buffer-frame--pre-redisplay (_window)
+  "Reveal and refresh the current minibuffer's candidate frame before redisplay."
+  (vertico-buffer-frame--reveal-candidate-frame))
+
 (defun vertico-buffer-frame--install-cleanup ()
   "Install cleanup for the current minibuffer buffer."
   (unless vertico-buffer-frame--cleanup-function
@@ -550,6 +554,8 @@ This function is intended for `vertico-buffer-display-action'."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (let ((cleanup vertico-buffer-frame--cleanup-function))
+        (remove-hook 'pre-redisplay-functions
+                     #'vertico-buffer-frame--pre-redisplay t)
         (remove-hook 'post-command-hook
                      #'vertico-buffer-frame--preview-post-command t)
         (vertico-buffer-frame--cancel-preview-timer)
@@ -610,6 +616,8 @@ Inside an active minibuffer, the change is buffer-local to that session."
     (setq-local mode-line-format nil
                 header-line-format nil
                 tab-line-format nil)
+    (add-hook 'pre-redisplay-functions
+              #'vertico-buffer-frame--pre-redisplay nil t)
     (add-hook 'post-command-hook
               #'vertico-buffer-frame--preview-post-command t t)))
 
@@ -648,11 +656,5 @@ Inside an active minibuffer, the change is buffer-local to that session."
       (setq vertico-buffer-frame--saved-display-action nil
             vertico-buffer-frame--saved-buffer-mode nil
             vertico-buffer-frame--saved-state nil))))
-
-(cl-defmethod vertico--display-candidates
-  :after (_lines &context (vertico-buffer-frame-mode (eql t)))
-  "Reveal the child frame after Vertico displays candidates."
-  (vertico-buffer-frame--reveal-candidate-frame))
-
 (provide 'vertico-buffer-frame)
 ;;; vertico-buffer-frame.el ends here

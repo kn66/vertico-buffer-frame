@@ -18,6 +18,9 @@
   (require 'ert)
   (require 'cl-lib)
   (require 'xref)
+  (load (expand-file-name "vertico-buffer-frame-preview.el"
+                          vertico-buffer-frame-test--root)
+        nil t)
   (load (expand-file-name "vertico-buffer-frame.el"
                           vertico-buffer-frame-test--root)
         nil t)
@@ -25,8 +28,7 @@
                           vertico-buffer-frame-test--root)
         nil t))
 
-(declare-function consult-imenu--items "consult-imenu" ())
-(declare-function imenu--make-index-alist "imenu" ())
+(defvar consult-imenu-config)
 
 (defmacro vertico-buffer-frame-test--with-clean-state (&rest body)
   "Run BODY with global mode state restored afterwards."
@@ -348,6 +350,8 @@
       (should-not mode-line-format)
       (should-not header-line-format)
       (should-not tab-line-format)
+      (should (memq #'vertico-buffer-frame--pre-redisplay
+                    pre-redisplay-functions))
       (should (memq #'vertico-buffer-frame--preview-post-command
                     post-command-hook)))))
 
@@ -810,7 +814,6 @@
 
 (ert-deftest vertico-buffer-frame-preview-post-command-uses-delay ()
   (with-temp-buffer
-    (setq-local vertico--input "x")
     (let ((vertico-buffer-frame-mode t)
           (vertico-buffer-frame-preview t)
           (vertico-buffer-frame-preview-delay 0.2)
@@ -825,7 +828,11 @@
                    (eq timer 'preview-timer)))
                 ((symbol-function #'cancel-timer)
                  (lambda (timer)
-                   (push timer canceled))))
+                   (push timer canceled)))
+                ((symbol-function
+                  #'vertico-buffer-frame--completion-active-p)
+                 (lambda ()
+                   t)))
         (vertico-buffer-frame--preview-post-command)
         (should (equal scheduled
                        (list 0.2
@@ -840,13 +847,16 @@
 
 (ert-deftest vertico-buffer-frame-preview-later-shows-target-each-time ()
   (with-temp-buffer
-    (setq-local vertico--input "x")
     (let ((vertico-buffer-frame-mode t)
           (vertico-buffer-frame-preview t)
           shown)
       (cl-letf (((symbol-function #'vertico-buffer-frame--preview-target)
                  (lambda ()
                    '(buffer "vbf-target")))
+                ((symbol-function
+                  #'vertico-buffer-frame--completion-active-p)
+                 (lambda ()
+                   t))
                 ((symbol-function #'vertico-buffer-frame--show-preview)
                  (lambda (target)
                    (push target shown))))
@@ -858,7 +868,6 @@
 
 (ert-deftest vertico-buffer-frame-preview-later-reports-error-once ()
   (with-temp-buffer
-    (setq-local vertico--input "x")
     (let ((vertico-buffer-frame-mode t)
           (vertico-buffer-frame-preview t)
           (vertico-buffer-frame-preview-report-errors t)
@@ -868,6 +877,10 @@
       (cl-letf (((symbol-function #'vertico-buffer-frame--preview-target)
                  (lambda ()
                    (error "Boom")))
+                ((symbol-function
+                  #'vertico-buffer-frame--completion-active-p)
+                 (lambda ()
+                   t))
                 ((symbol-function #'vertico-buffer-frame--hide-preview)
                  (lambda ()
                    (push 'hide hidden)))
@@ -982,13 +995,10 @@
         (minibuffer (generate-new-buffer " *vbf-minibuffer*")))
     (unwind-protect
         (with-current-buffer minibuffer
-          (setq-local vertico--input t
-                      vertico--metadata '(metadata (category . buffer)))
-          (cl-letf (((symbol-function #'vertico--candidate)
-                     (lambda (&optional _hl)
-                       (buffer-name candidate-buffer))))
-            (should (equal (vertico-buffer-frame--preview-target)
-                           (list 'buffer (buffer-name candidate-buffer))))))
+          (should (equal (vertico-buffer-frame--preview-target
+                          (buffer-name candidate-buffer)
+                          'buffer)
+                         (list 'buffer (buffer-name candidate-buffer)))))
       (mapc (lambda (buffer)
               (when (buffer-live-p buffer)
                 (kill-buffer buffer)))
@@ -999,18 +1009,15 @@
         (minibuffer (generate-new-buffer " *vbf-minibuffer*")))
     (unwind-protect
         (with-current-buffer minibuffer
-          (setq-local vertico--input t
-                      vertico--metadata '(metadata (category . multi-category)))
           (let ((candidate (propertize
                             "displayed buffer"
                             'multi-category
                             (cons 'buffer (buffer-name candidate-buffer)))))
-            (cl-letf (((symbol-function #'vertico--candidate)
-                       (lambda (&optional _hl)
-                         candidate)))
-              (should (equal (vertico-buffer-frame--preview-target)
-                             (list 'buffer
-                                   (buffer-name candidate-buffer)))))))
+            (should (equal (vertico-buffer-frame--preview-target
+                            candidate
+                            'multi-category)
+                           (list 'buffer
+                                 (buffer-name candidate-buffer))))))
       (mapc (lambda (buffer)
               (when (buffer-live-p buffer)
                 (kill-buffer buffer)))
@@ -1021,18 +1028,15 @@
         (minibuffer (generate-new-buffer " *vbf-minibuffer*")))
     (unwind-protect
         (with-current-buffer minibuffer
-          (setq-local vertico--input t
-                      vertico--metadata '(metadata (category . multi-category)))
           (let ((candidate (propertize
                             "displayed buffer"
                             'multi-category
                             (cons 'buffer candidate-buffer))))
-            (cl-letf (((symbol-function #'vertico--candidate)
-                       (lambda (&optional _hl)
-                         candidate)))
-              (should (equal (vertico-buffer-frame--preview-target)
-                             (list 'buffer
-                                   (buffer-name candidate-buffer)))))))
+            (should (equal (vertico-buffer-frame--preview-target
+                            candidate
+                            'multi-category)
+                           (list 'buffer
+                                 (buffer-name candidate-buffer))))))
       (mapc (lambda (buffer)
               (when (buffer-live-p buffer)
                 (kill-buffer buffer)))
@@ -1043,17 +1047,14 @@
         (minibuffer (generate-new-buffer " *vbf-minibuffer*")))
     (unwind-protect
         (with-current-buffer minibuffer
-          (setq-local vertico--input t
-                      vertico--metadata '(metadata (category . multi-category)))
           (let ((candidate (propertize
                             "displayed file"
                             'multi-category
                             (cons 'file file))))
-            (cl-letf (((symbol-function #'vertico--candidate)
-                       (lambda (&optional _hl)
-                         candidate)))
-              (should (equal (vertico-buffer-frame--preview-target)
-                             (list 'file file))))))
+            (should (equal (vertico-buffer-frame--preview-target
+                            candidate
+                            'multi-category)
+                           (list 'file file)))))
       (delete-file file)
       (when (buffer-live-p minibuffer)
         (kill-buffer minibuffer)))))
@@ -1063,20 +1064,17 @@
         (minibuffer (generate-new-buffer " *vbf-minibuffer*")))
     (unwind-protect
         (with-current-buffer minibuffer
-          (setq-local vertico--input t
-                      vertico--metadata '(metadata (category . multi-category)))
           (let ((candidate
                  (concat "prefix "
                          (propertize
                           "displayed buffer"
                           'multi-category
                           (cons 'buffer (buffer-name candidate-buffer))))))
-            (cl-letf (((symbol-function #'vertico--candidate)
-                       (lambda (&optional _hl)
-                         candidate)))
-              (should (equal (vertico-buffer-frame--preview-target)
-                             (list 'buffer
-                                   (buffer-name candidate-buffer)))))))
+            (should (equal (vertico-buffer-frame--preview-target
+                            candidate
+                            'multi-category)
+                           (list 'buffer
+                                 (buffer-name candidate-buffer))))))
       (mapc (lambda (buffer)
               (when (buffer-live-p buffer)
                 (kill-buffer buffer)))
@@ -1084,31 +1082,25 @@
 
 (ert-deftest vertico-buffer-frame-file-target-skips-remote-files-by-default ()
   (with-temp-buffer
-    (setq-local vertico--input t
-                vertico--metadata '(metadata (category . file)))
     (let (readable-called)
-      (cl-letf (((symbol-function #'vertico--candidate)
-                 (lambda (&optional _hl)
-                   "/ssh:example:/tmp/file"))
-                ((symbol-function #'file-readable-p)
+      (cl-letf (((symbol-function #'file-readable-p)
                  (lambda (_file)
                    (setq readable-called t)
                    t)))
-        (should-not (vertico-buffer-frame--preview-target))
+        (should-not (vertico-buffer-frame--preview-target
+                     "/ssh:example:/tmp/file"
+                     'file))
         (should-not readable-called)))))
 
 (ert-deftest vertico-buffer-frame-file-target-allows-remote-files-when-enabled ()
   (with-temp-buffer
-    (setq-local vertico--input t
-                vertico--metadata '(metadata (category . file)))
     (let ((vertico-buffer-frame-preview-remote-files t))
-      (cl-letf (((symbol-function #'vertico--candidate)
-                 (lambda (&optional _hl)
-                   "/ssh:example:/tmp/file"))
-                ((symbol-function #'file-readable-p)
+      (cl-letf (((symbol-function #'file-readable-p)
                  (lambda (_file)
                    t)))
-        (should (equal (vertico-buffer-frame--preview-target)
+        (should (equal (vertico-buffer-frame--preview-target
+                        "/ssh:example:/tmp/file"
+                        'file)
                        '(file "/ssh:example:/tmp/file")))))))
 
 (ert-deftest vertico-buffer-frame-preview-categories-include-builtins ()
@@ -1120,7 +1112,6 @@
                       symbol-help
                       calendar-month
                       unicode-name
-                      environment-variable
                       bookmark
                       command
                       function
@@ -1140,7 +1131,6 @@
                       imenu
                       dabbrev
                       input-method
-                      process
                       email
                       ecomplete
                       bibtex-key
@@ -1158,17 +1148,14 @@
         (minibuffer (generate-new-buffer " *vbf-consult-location-minibuffer*")))
     (unwind-protect
         (with-current-buffer minibuffer
-          (setq-local vertico--input t
-                      vertico--metadata '(metadata (category . consult-location)))
           (let ((candidate (propertize
                             "matching line"
                             'consult-location
                             (cons (cons source 7) 1))))
-            (cl-letf (((symbol-function #'vertico--candidate)
-                       (lambda (&optional _hl)
-                         candidate)))
-              (should (equal (vertico-buffer-frame--preview-target)
-                             (list 'buffer-position source 7))))))
+            (should (equal (vertico-buffer-frame--preview-target
+                            candidate
+                            'consult-location)
+                           (list 'buffer-position source 7)))))
       (mapc (lambda (buffer)
               (when (buffer-live-p buffer)
                 (kill-buffer buffer)))
@@ -1179,18 +1166,15 @@
         (minibuffer (generate-new-buffer " *vbf-consult-location-minibuffer*")))
     (unwind-protect
         (with-current-buffer minibuffer
-          (setq-local vertico--input t
-                      vertico--metadata '(metadata (category . consult-location)))
           (let ((candidate (concat "prefix "
                                    (propertize
                                     "matching line"
                                     'consult-location
                                     (cons (cons source 7) 1)))))
-            (cl-letf (((symbol-function #'vertico--candidate)
-                       (lambda (&optional _hl)
-                         candidate)))
-              (should (equal (vertico-buffer-frame--preview-target)
-                             (list 'buffer-position source 7))))))
+            (should (equal (vertico-buffer-frame--preview-target
+                            candidate
+                            'consult-location)
+                           (list 'buffer-position source 7)))))
       (mapc (lambda (buffer)
               (when (buffer-live-p buffer)
                 (kill-buffer buffer)))
@@ -1208,14 +1192,11 @@
           (add-face-text-property 0 9 'consult-file t candidate)
           (add-face-text-property 10 11 'consult-line-number t candidate)
           (with-current-buffer minibuffer
-            (setq-local vertico--input t
-                        vertico--metadata '(metadata (category . consult-grep))
-                        default-directory (file-name-as-directory directory))
-            (cl-letf (((symbol-function #'vertico--candidate)
-                       (lambda (&optional _hl)
-                         candidate)))
-              (should (equal (vertico-buffer-frame--preview-target)
-                             (list 'file-line file 2))))))
+            (setq-local default-directory (file-name-as-directory directory))
+            (should (equal (vertico-buffer-frame--preview-target
+                            candidate
+                            'consult-grep)
+                           (list 'file-line file 2)))))
       (delete-directory directory t)
       (when (buffer-live-p minibuffer)
         (kill-buffer minibuffer)))))
@@ -1561,7 +1542,8 @@
                     ((symbol-function #'window-buffer)
                      (lambda (window)
                        (and (eq window 'source-window) source)))
-                    ((symbol-function #'imenu--make-index-alist)
+                    ((symbol-function
+                      #'vertico-buffer-frame--imenu-index-entries)
                      (lambda ()
                        (cl-incf calls)
                        (list (cons "target" 7)))))
@@ -1580,13 +1562,11 @@
                 (kill-buffer buffer)))
             (list source minibuffer)))))
 
-(ert-deftest vertico-buffer-frame-consult-imenu-target-uses-consult-items ()
-  (let* ((source (generate-new-buffer " *vbf-consult-imenu-source*"))
-         (minibuffer (generate-new-buffer " *vbf-consult-imenu-minibuffer*"))
-         (marker (with-current-buffer source
-                   (insert "target")
-                   (copy-marker 3)))
-         (calls 0))
+(ert-deftest vertico-buffer-frame-consult-imenu-target-uses-consult-prefix ()
+  (let ((source (generate-new-buffer " *vbf-consult-imenu-source*"))
+        (minibuffer (generate-new-buffer " *vbf-consult-imenu-minibuffer*"))
+        (consult-imenu-config
+         '((fundamental-mode :toplevel "Functions"))))
     (unwind-protect
         (cl-letf (((symbol-function #'minibuffer-selected-window)
                    (lambda ()
@@ -1597,19 +1577,49 @@
                   ((symbol-function #'window-buffer)
                    (lambda (window)
                      (and (eq window 'source-window) source)))
-                  ((symbol-function #'consult-imenu--items)
+                  ((symbol-function
+                    #'vertico-buffer-frame--imenu-index-entries)
                    (lambda ()
-                     (cl-incf calls)
-                     (list (cons "Functions target" marker)))))
+                     (list (cons "target" 7)))))
+          (with-current-buffer source
+            (setq-local major-mode 'fundamental-mode))
           (with-current-buffer minibuffer
-            (should (equal (vertico-buffer-frame-consult--imenu-target
+            (should (equal (vertico-buffer-frame--imenu-target
+                            "Functions target"
                             "Functions target")
-                           (list 'buffer-position source marker)))
-            (should (equal (vertico-buffer-frame-consult--imenu-target
-                            "Functions target")
-                           (list 'buffer-position source marker)))
-            (should (= calls 1))))
-      (set-marker marker nil)
+                           (list 'buffer-position source 7)))))
+      (mapc (lambda (buffer)
+              (when (buffer-live-p buffer)
+                (kill-buffer buffer)))
+            (list source minibuffer)))))
+
+(ert-deftest vertico-buffer-frame-consult-imenu-target-handles-deduplicated-name ()
+  (let ((source (generate-new-buffer " *vbf-consult-imenu-dupe-source*"))
+        (minibuffer (generate-new-buffer " *vbf-consult-imenu-dupe-minibuffer*"))
+        (consult-imenu-config
+         '((fundamental-mode :toplevel "Functions"))))
+    (unwind-protect
+        (cl-letf (((symbol-function #'minibuffer-selected-window)
+                   (lambda ()
+                     'source-window))
+                  ((symbol-function #'window-live-p)
+                   (lambda (window)
+                     (eq window 'source-window)))
+                  ((symbol-function #'window-buffer)
+                   (lambda (window)
+                     (and (eq window 'source-window) source)))
+                  ((symbol-function
+                    #'vertico-buffer-frame--imenu-index-entries)
+                   (lambda ()
+                     (list (cons "target" 7)
+                           (cons "target" 11)))))
+          (with-current-buffer source
+            (setq-local major-mode 'fundamental-mode))
+          (with-current-buffer minibuffer
+            (should (equal (vertico-buffer-frame--imenu-target
+                            "Functions target (1)"
+                            "Functions target (1)")
+                           (list 'buffer-position source 11)))))
       (mapc (lambda (buffer)
               (when (buffer-live-p buffer)
                 (kill-buffer buffer)))

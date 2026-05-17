@@ -82,7 +82,6 @@ non-nil, preview errors are not caught."
     face
     symbol
     unicode-name
-    environment-variable
     info-menu
     calendar-month
     color
@@ -98,7 +97,6 @@ non-nil, preview errors are not caught."
     imenu
     dabbrev
     input-method
-    process
     email
     ecomplete
     bibtex-key
@@ -124,11 +122,11 @@ candidate.")
 
 (defvar vertico-buffer-frame-mode)
 (defvar vertico-buffer-frame--candidate-frame)
-(defvar vertico--input)
-(defvar vertico--metadata)
 (defvar Info-complete-menu-buffer)
 (defvar calendar-month-name-array)
+(defvar consult-imenu-config)
 (defvar custom-enabled-themes)
+(defvar imenu-create-index-function)
 (defvar input-method-alist)
 (defvar package-alist)
 (defvar package-archive-contents)
@@ -162,8 +160,6 @@ candidate.")
 (declare-function custom-available-themes "custom")
 (declare-function custom-theme-p "cus-theme")
 (declare-function get-charset-property "charset")
-(declare-function imenu--make-index-alist "imenu")
-(declare-function imenu--subalist-p "imenu")
 (declare-function locate-library "files")
 (declare-function mail-extract-address-components "mail-extr")
 (declare-function package-desc-kind "package")
@@ -185,15 +181,33 @@ candidate.")
 (declare-function vertico-buffer-frame--resize-frame-to-size
                   "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--show-frame "vertico-buffer-frame")
+(declare-function vertico--candidate "vertico")
+
+(defun vertico-buffer-frame--completion-active-p ()
+  "Return non-nil when the current buffer is an active completion minibuffer."
+  (and (minibufferp)
+       (boundp 'minibuffer-completion-table)
+       minibuffer-completion-table))
+
+(defun vertico-buffer-frame--minibuffer-input ()
+  "Return current minibuffer input without text properties, if available."
+  (when (minibufferp)
+    (minibuffer-contents-no-properties)))
 
 (defun vertico-buffer-frame--category ()
-  "Return the current Vertico completion category."
-  (when (and (boundp 'vertico--metadata) vertico--metadata)
-    (completion-metadata-get vertico--metadata 'category)))
+  "Return the current completion category."
+  (when (vertico-buffer-frame--completion-active-p)
+    (ignore-errors
+      (completion-metadata-get
+       (completion-metadata
+        (or (vertico-buffer-frame--minibuffer-input) "")
+        minibuffer-completion-table
+        minibuffer-completion-predicate)
+       'category))))
 
 (defun vertico-buffer-frame--candidate ()
   "Return the current raw Vertico candidate."
-  (when (and (boundp 'vertico--input) vertico--input
+  (when (and (vertico-buffer-frame--completion-active-p)
              (fboundp 'vertico--candidate))
     (ignore-errors (vertico--candidate))))
 
@@ -237,21 +251,30 @@ the `multi-category' text property."
                   (cdr multi)))
         (cons metadata-category candidate)))))
 
-(defun vertico-buffer-frame--readable-file (file)
-  "Return expanded FILE when it is readable."
+(defun vertico-buffer-frame--remote-file-name-p (file directory)
+  "Return non-nil when FILE names a remote path under DIRECTORY."
+  (or (file-remote-p file)
+      (and (not (file-name-absolute-p file))
+           (file-remote-p directory))))
+
+(defun vertico-buffer-frame--readable-file (file &optional directory)
+  "Return expanded FILE under DIRECTORY when it is readable."
   (when (stringp file)
-    (let ((expanded (expand-file-name (substitute-in-file-name file))))
-      (and (or vertico-buffer-frame-preview-remote-files
-               (not (file-remote-p expanded)))
-           (file-readable-p expanded)
-           expanded))))
+    (let ((file (substitute-in-file-name file))
+          (directory (or directory default-directory)))
+      (unless (and (not vertico-buffer-frame-preview-remote-files)
+                   (vertico-buffer-frame--remote-file-name-p file directory))
+        (let ((expanded (expand-file-name file directory)))
+          (and (or vertico-buffer-frame-preview-remote-files
+                   (not (file-remote-p expanded)))
+               (file-readable-p expanded)
+               expanded))))))
 
 (defun vertico-buffer-frame--file-target (candidate &optional directory)
   "Return a file preview target for CANDIDATE under DIRECTORY."
   (when (stringp candidate)
     (when-let* ((file (vertico-buffer-frame--readable-file
-                       (expand-file-name candidate
-                                         (or directory default-directory)))))
+                       candidate directory)))
       (list 'file file))))
 
 (defun vertico-buffer-frame--project-root ()
@@ -490,26 +513,6 @@ the `multi-category' text property."
                   (_
                    (insert (format "%S\n" value))))))))))
 
-(defun vertico-buffer-frame--process-target (candidate)
-  "Return a text preview target for process CANDIDATE."
-  (when-let* ((process (get-process candidate)))
-    (list 'text
-          "Process"
-          (lambda ()
-            (insert (process-name process) "\n\n")
-            (insert "Status: " (format "%S" (process-status process)) "\n")
-            (when-let* ((pid (process-id process)))
-              (insert "PID: " (number-to-string pid) "\n"))
-            (when-let* ((buffer (process-buffer process)))
-              (insert "Buffer: " (buffer-name buffer) "\n"))
-            (when-let* ((tty (process-tty-name process)))
-              (insert "TTY: " tty "\n"))
-            (when-let* ((command (process-command process)))
-              (insert "Command: " (mapconcat #'identity command " ") "\n"))
-            (when-let* ((contact (ignore-errors
-                                   (process-contact process t t))))
-              (insert "Contact: " (format "%S" contact) "\n"))))))
-
 (defun vertico-buffer-frame--email-target (candidate)
   "Return a text preview target for email CANDIDATE."
   (list 'text
@@ -565,14 +568,6 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
             "Dabbrev"
             (lambda ()
               (insert candidate "\n")))))
-
-(defun vertico-buffer-frame--environment-variable-target (candidate)
-  "Return a text preview target for environment variable CANDIDATE."
-  (when-let* ((value (getenv candidate)))
-    (list 'text
-          "Environment Variable"
-          (lambda ()
-            (insert candidate "\n\n" value "\n")))))
 
 (defun vertico-buffer-frame--unicode-name-target (candidate)
   "Return a text preview target for Unicode name CANDIDATE."
@@ -635,7 +630,7 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
       (when-let* ((file (or (vertico-buffer-frame--readable-file group)
                             (when-let* ((root (vertico-buffer-frame--project-root)))
                               (vertico-buffer-frame--readable-file
-                               (expand-file-name group root))))))
+                               group root)))))
         (list 'file-line file line)))))
 
 (defun vertico-buffer-frame--imenu-entry-position (entry)
@@ -647,7 +642,30 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
      ((integer-or-marker-p position)
       position)
      ((overlayp position)
-      (overlay-start position)))))
+      (overlay-start position))
+     ((consp position)
+      (let ((position (car position)))
+        (cond
+         ((markerp position)
+          position)
+         ((integer-or-marker-p position)
+          position)
+         ((overlayp position)
+          (overlay-start position))))))))
+
+(defun vertico-buffer-frame--imenu-subalist-p (entry)
+  "Return non-nil when imenu ENTRY is a nested sub-alist."
+  (and (consp entry)
+       (consp (cdr entry))
+       (listp (cadr entry))
+       (not (functionp (cadr entry)))))
+
+(defun vertico-buffer-frame--imenu-index-entries ()
+  "Return imenu index entries for the current buffer."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (funcall imenu-create-index-function))))
 
 (defun vertico-buffer-frame--imenu-find-entry (candidate entries)
   "Return the imenu entry for CANDIDATE in ENTRIES."
@@ -656,10 +674,10 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
       (cond
        ((and (consp entry)
              (string= candidate (substring-no-properties (car entry)))
-             (not (imenu--subalist-p entry)))
+             (not (vertico-buffer-frame--imenu-subalist-p entry)))
         (throw 'found entry))
        ((and (consp entry)
-             (imenu--subalist-p entry))
+             (vertico-buffer-frame--imenu-subalist-p entry))
         (when-let* ((match (vertico-buffer-frame--imenu-find-entry
                             candidate
                             (cdr entry))))
@@ -669,7 +687,7 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
   "Return the display name for imenu ENTRY."
   (when (and (consp entry)
              (stringp (car entry))
-             (not (imenu--subalist-p entry)))
+             (not (vertico-buffer-frame--imenu-subalist-p entry)))
     (substring-no-properties (car entry))))
 
 (defun vertico-buffer-frame--imenu-entry-table (entries)
@@ -679,13 +697,76 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
         ((walk (items)
            (dolist (entry items)
              (when (consp entry)
-               (if (imenu--subalist-p entry)
+               (if (vertico-buffer-frame--imenu-subalist-p entry)
                    (walk (cdr entry))
                  (when-let* ((name (vertico-buffer-frame--imenu-entry-name
                                     entry)))
                    (unless (gethash name table)
                      (puthash name entry table))))))))
       (walk entries))
+    table))
+
+(defun vertico-buffer-frame--consult-imenu-config ()
+  "Return Consult imenu configuration for the current buffer."
+  (when (boundp 'consult-imenu-config)
+    (cdr (cl-find-if (lambda (entry)
+                       (derived-mode-p (car entry)))
+                     consult-imenu-config))))
+
+(defun vertico-buffer-frame--consult-imenu-items (entries)
+  "Return ENTRIES arranged like Consult imenu candidates."
+  (if-let* ((toplevel
+             (plist-get (vertico-buffer-frame--consult-imenu-config)
+                        :toplevel)))
+      (let ((tops (cl-remove-if (lambda (entry)
+                                  (listp (cdr entry)))
+                                entries))
+            (rest (cl-remove-if-not (lambda (entry)
+                                      (listp (cdr entry)))
+                                    entries)))
+        (nconc rest
+               (and tops
+                    (list (cons toplevel tops)))))
+    entries))
+
+(defun vertico-buffer-frame--consult-imenu-flatten (prefix entries)
+  "Return Consult-style (NAME . ENTRY) pairs for PREFIX and imenu ENTRIES."
+  (mapcan
+   (lambda (entry)
+     (when (consp entry)
+       (let ((name (and (stringp (car entry))
+                        (substring-no-properties (car entry)))))
+         (cond
+          ((and name
+                (vertico-buffer-frame--imenu-subalist-p entry))
+           (vertico-buffer-frame--consult-imenu-flatten
+            (if prefix
+                (concat prefix "/" name)
+              name)
+            (cdr entry)))
+          (name
+           (list (cons (if prefix
+                           (concat prefix " " name)
+                         name)
+                       entry)))))))
+   entries))
+
+(defun vertico-buffer-frame--consult-imenu-entry-table (entries)
+  "Return a hash table mapping Consult imenu names to imenu ENTRIES."
+  (let ((table (make-hash-table :test #'equal))
+        (counts (make-hash-table :test #'equal)))
+    (dolist (pair (vertico-buffer-frame--consult-imenu-flatten
+                   nil
+                   (vertico-buffer-frame--consult-imenu-items entries)))
+      (let* ((name (car pair))
+             (count (gethash name counts)))
+        (if count
+            (setq name (format "%s (%s)"
+                               name
+                               (puthash name (1+ count) counts)))
+          (puthash name 0 counts))
+        (unless (gethash name table)
+          (puthash name (cdr pair) table))))
     table))
 
 (defun vertico-buffer-frame--imenu-cache-key (buffer)
@@ -701,7 +782,7 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
         (cdr vertico-buffer-frame--imenu-cache)
       (let ((entries (with-current-buffer buffer
                        (ignore-errors
-                         (imenu--make-index-alist)))))
+                         (vertico-buffer-frame--imenu-index-entries)))))
         (setq-local vertico-buffer-frame--imenu-cache
                     (cons key
                           (cons entries
@@ -719,9 +800,13 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
     (when-let* ((buffer (vertico-buffer-frame--origin-buffer)))
       (let* ((cache (vertico-buffer-frame--imenu-cache-value buffer))
              (choice (or (and (stringp raw-candidate)
-                              (get-text-property 0 'imenu-choice
-                                                 raw-candidate))
+              (get-text-property 0 'imenu-choice
+                                 raw-candidate))
                          (gethash candidate (cdr cache))
+                         (gethash
+                          candidate
+                          (vertico-buffer-frame--consult-imenu-entry-table
+                           (car cache)))
                          (vertico-buffer-frame--imenu-find-entry
                           candidate
                           (car cache))))
@@ -804,12 +889,16 @@ When STRINGP is non-nil, look for a @String definition."
               (lambda ()
                 (calendar-generate-month month year 0)))))))
 
-(defun vertico-buffer-frame--preview-target ()
-  "Return the current preview target."
-  (when-let* ((raw-candidate (vertico-buffer-frame--candidate))
+(defun vertico-buffer-frame--preview-target (&optional raw-candidate category)
+  "Return the current preview target.
+When RAW-CANDIDATE or CATEGORY are non-nil, use them instead of reading the
+current minibuffer state."
+  (when-let* ((raw-candidate (or raw-candidate
+                                 (vertico-buffer-frame--candidate)))
               (entry (vertico-buffer-frame--candidate-entry
                       raw-candidate
-                      (vertico-buffer-frame--category)))
+                      (or category
+                          (vertico-buffer-frame--category))))
               (category (car entry))
               (candidate (cdr entry)))
     (when (memq category vertico-buffer-frame-preview-categories)
@@ -833,8 +922,6 @@ When STRINGP is non-nil, look for a @String definition."
              (vertico-buffer-frame--symbol-preview-target candidate))
             ('unicode-name
              (vertico-buffer-frame--unicode-name-target candidate))
-            ('environment-variable
-             (vertico-buffer-frame--environment-variable-target candidate))
             ('info-menu
              (vertico-buffer-frame--info-menu-target candidate))
             ('calendar-month
@@ -857,8 +944,6 @@ When STRINGP is non-nil, look for a @String definition."
              (vertico-buffer-frame--package-target candidate))
             ('register
              (vertico-buffer-frame--register-target candidate))
-            ('process
-             (vertico-buffer-frame--process-target candidate))
             ((or 'email 'ecomplete)
              (vertico-buffer-frame--email-target candidate))
             ('dabbrev
@@ -1273,7 +1358,8 @@ WINDOW."
 
 (defun vertico-buffer-frame--preview-state ()
   "Return state used to coalesce pending preview refresh timers."
-  (list vertico--input
+  (list (vertico-buffer-frame--minibuffer-input)
+        (point)
         (vertico-buffer-frame--category)
         (vertico-buffer-frame--candidate)))
 
@@ -1297,7 +1383,7 @@ WINDOW."
       (condition-case-unless-debug error
           (if (and vertico-buffer-frame-mode
                    vertico-buffer-frame-preview
-                   (bound-and-true-p vertico--input))
+                   (vertico-buffer-frame--completion-active-p))
               (if-let* ((target (vertico-buffer-frame--preview-target)))
                   (progn
                     (vertico-buffer-frame--show-preview target)
@@ -1327,7 +1413,7 @@ When STATE matches the pending timer state, keep the existing timer."
   "Schedule a delayed preview refresh after Vertico candidate refresh."
   (if (and vertico-buffer-frame-mode
            vertico-buffer-frame-preview
-           (bound-and-true-p vertico--input))
+           (vertico-buffer-frame--completion-active-p))
       (vertico-buffer-frame--schedule-preview
        (vertico-buffer-frame--preview-state))
     (vertico-buffer-frame--hide-preview)))

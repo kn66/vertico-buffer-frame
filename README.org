@@ -133,26 +133,29 @@ minibuffer sessions.
 * Stability notes
 
 This package intentionally builds on ~vertico-buffer-mode~ and Emacs child
-frames, but it still depends on some Vertico internals.  Candidate lookup uses
-~vertico--candidate~ and ~vertico--metadata~, and frame reveal is hooked with an
-~:after~ method on ~vertico--display-candidates~.  Consult support is isolated
-in ~vertico-buffer-frame-consult.el~ and uses Consult text properties plus a
-small amount of Consult imenu internals.  These hooks may need adjustment when
-Vertico or Consult changes their internal APIs.
+frames.  Candidate lookup still uses Vertico's internal ~vertico--candidate~,
+since Vertico does not expose the selected raw candidate as a public API.
+Category lookup uses Emacs completion metadata, and frame reveal is installed
+through Emacs' ~pre-redisplay-functions~ instead of a Vertico display method.
+Consult support is isolated in ~vertico-buffer-frame-consult.el~ and uses
+Consult candidate text properties.  These hooks may need adjustment when Vertico
+or Consult changes their candidate metadata.
 
 * Preview
 
 Built-in preview targets currently cover files, project files, directories,
 buffers, bookmarks, xref locations, imenu entries, symbols and documentation-like
 categories such as commands, functions, variables, faces, minor modes, Custom
-groups and Custom variables.  They also cover Unicode names, environment
-variables, Info menu items, calendar months, colors, themes, input methods,
-coding systems, charsets, libraries, packages, registers, processes, email,
-ecomplete, dabbrev, BibTeX keys and strings, and kill-ring entries.
+groups and Custom variables.  They also cover Unicode names, Info menu items,
+calendar months, colors, themes, input methods, coding systems, charsets,
+libraries, packages, registers, email, ecomplete, dabbrev, BibTeX keys and
+strings, and kill-ring entries.
 
 Consult-specific targets live in ~vertico-buffer-frame-consult.el~.  They are
 loaded automatically after Consult is loaded, and add support for
-~consult-location~, ~consult-grep~, ~consult-xref~ and Consult imenu candidates.
+~consult-location~, ~consult-grep~ and ~consult-xref~.  Consult imenu candidates
+are resolved by the generic imenu preview target, including Consult's
+configured imenu prefixes and duplicate-name suffixes.
 
 Preview display is category-gated by
 ~vertico-buffer-frame-preview-categories~.  Remove categories from that list to

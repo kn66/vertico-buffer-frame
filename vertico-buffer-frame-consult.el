@@ -18,7 +18,6 @@
 (defvar vertico-buffer-frame-preview-categories)
 (defvar vertico-buffer-frame-preview-target-functions)
 (defvar xref-file-name-display)
-(defvar-local vertico-buffer-frame-consult--imenu-cache nil)
 
 (declare-function vertico-buffer-frame--buffer-position-target
                   "vertico-buffer-frame-preview")
@@ -32,8 +31,6 @@
 (declare-function xref-location-group "xref")
 (declare-function xref-location-line "xref")
 (declare-function xref-location-marker "xref")
-(declare-function consult-imenu--deduplicate "consult-imenu")
-(declare-function consult-imenu--items "consult-imenu")
 
 (defun vertico-buffer-frame-consult--location-value (raw-candidate)
   "Return Consult location metadata from RAW-CANDIDATE."
@@ -123,69 +120,6 @@
                     (buffer (marker-buffer marker)))
           (vertico-buffer-frame--buffer-position-target buffer marker)))))
 
-(defun vertico-buffer-frame-consult--imenu-position-target
-    (position fallback-buffer)
-  "Return a preview target for Consult Imenu POSITION.
-FALLBACK-BUFFER is used for integer positions which do not carry a buffer."
-  (pcase position
-    ((pred markerp)
-     (when-let* ((buffer (marker-buffer position)))
-       (vertico-buffer-frame--buffer-position-target buffer position)))
-    ((pred integerp)
-     (vertico-buffer-frame--buffer-position-target fallback-buffer position))
-    (`(,pos ,_function ,buffer . ,_args)
-     (when (buffer-live-p buffer)
-       (vertico-buffer-frame-consult--imenu-position-target pos buffer)))))
-
-(defun vertico-buffer-frame-consult--imenu-cache-key (buffer)
-  "Return the cache key for BUFFER's Consult imenu items."
-  (with-current-buffer buffer
-    (cons buffer (buffer-chars-modified-tick))))
-
-(defun vertico-buffer-frame-consult--imenu-item-table (items)
-  "Return a hash table mapping Consult imenu item names to ITEMS."
-  (let ((table (make-hash-table :test #'equal)))
-    (dolist (item items)
-      (when (and (consp item)
-                 (stringp (car item)))
-        (unless (gethash (car item) table)
-          (puthash (car item) item table))))
-    table))
-
-(defun vertico-buffer-frame-consult--imenu-cache-value (buffer)
-  "Return cached Consult imenu item details for BUFFER."
-  (let ((key (vertico-buffer-frame-consult--imenu-cache-key buffer)))
-    (if (and (consp vertico-buffer-frame-consult--imenu-cache)
-             (equal key (car vertico-buffer-frame-consult--imenu-cache)))
-        (cdr vertico-buffer-frame-consult--imenu-cache)
-      (let ((items (with-current-buffer buffer
-                     (ignore-errors
-                       (copy-tree (consult-imenu--items))))))
-        (when (and items
-                   (fboundp 'consult-imenu--deduplicate))
-          (consult-imenu--deduplicate items))
-        (setq-local vertico-buffer-frame-consult--imenu-cache
-                    (cons key
-                          (cons items
-                                (vertico-buffer-frame-consult--imenu-item-table
-                                 items))))
-        (cdr vertico-buffer-frame-consult--imenu-cache)))))
-
-(defun vertico-buffer-frame-consult--imenu-items (buffer)
-  "Return cached Consult imenu items for BUFFER."
-  (car (vertico-buffer-frame-consult--imenu-cache-value buffer)))
-
-(defun vertico-buffer-frame-consult--imenu-target (candidate)
-  "Return a preview target for a Consult Imenu CANDIDATE."
-  (when-let* ((buffer (vertico-buffer-frame--origin-buffer))
-              ((fboundp 'consult-imenu--items)))
-    (let ((cache (vertico-buffer-frame-consult--imenu-cache-value buffer)))
-      (when-let* ((item (or (gethash candidate (cdr cache))
-                            (assoc candidate (car cache)))))
-        (vertico-buffer-frame-consult--imenu-position-target
-         (cdr item)
-         buffer)))))
-
 (defun vertico-buffer-frame-consult-preview-target
     (category candidate raw-candidate)
   "Return a Consult preview target for CATEGORY, CANDIDATE and RAW-CANDIDATE."
@@ -195,9 +129,7 @@ FALLBACK-BUFFER is used for integer positions which do not carry a buffer."
     ('consult-grep
      (vertico-buffer-frame-consult--grep-target candidate raw-candidate))
     ('consult-xref
-     (vertico-buffer-frame-consult--xref-target raw-candidate))
-    ('imenu
-     (vertico-buffer-frame-consult--imenu-target candidate))))
+     (vertico-buffer-frame-consult--xref-target raw-candidate))))
 
 (defun vertico-buffer-frame-consult--install ()
   "Install Consult preview target support."
