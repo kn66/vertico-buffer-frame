@@ -505,6 +505,14 @@ This function is intended for `vertico-buffer-display-action'."
   (when (frame-live-p frame)
     (delete-frame frame t)))
 
+(defun vertico-buffer-frame--delete-hidden-frames ()
+  "Delete all child frames kept in the hidden frame pool."
+  (let ((frames (delete-dups
+                 (mapcar #'cdr vertico-buffer-frame--hidden-frames))))
+    (setq vertico-buffer-frame--hidden-frames nil)
+    (dolist (frame frames)
+      (vertico-buffer-frame--delete-frame frame))))
+
 (defun vertico-buffer-frame--cancel-warm-up ()
   "Cancel any pending child-frame warm-up."
   (when (timerp vertico-buffer-frame--warm-up-timer)
@@ -648,6 +656,7 @@ Inside an active minibuffer, the change is buffer-local to that session."
                  #'vertico-buffer-frame--after-make-frame)
     (vertico-buffer-frame--cancel-warm-up)
     (vertico-buffer-frame-cleanup)
+    (vertico-buffer-frame--delete-hidden-frames)
     (when vertico-buffer-frame--saved-state
       (setq vertico-buffer-display-action
             vertico-buffer-frame--saved-display-action)

@@ -1227,31 +1227,35 @@ SIZE is the file size in bytes, or nil if it is unknown."
 
 (defun vertico-buffer-frame--preview-window ()
   "Return the preview window, creating a child frame when needed."
-  (unless (and (frame-live-p vertico-buffer-frame--preview-frame)
-               (window-live-p vertico-buffer-frame--preview-window))
-    (vertico-buffer-frame--release-frame
-     'preview vertico-buffer-frame--preview-frame)
-    (vertico-buffer-frame--kill-preview-buffer)
-    (setq-local vertico-buffer-frame--preview-frame nil
-                vertico-buffer-frame--preview-window nil)
-    (let* ((parent (vertico-buffer-frame--preview-parent-frame))
-           (size (vertico-buffer-frame--preview-frame-size parent))
-           (frame (vertico-buffer-frame--obtain-child-frame
-                   'preview
-                   parent
-                   (format "Vertico Preview %s" (minibuffer-depth))
-                   (car size)
-                   (cdr size)))
-           (window (frame-root-window frame)))
-      (set-window-parameter window 'no-other-window t)
-      (set-window-parameter window 'no-delete-other-windows t)
-      (vertico-buffer-frame--prepare-window window)
-      (setq-local vertico-buffer-frame--preview-frame frame
-                  vertico-buffer-frame--preview-window window)
-      (vertico-buffer-frame--place-preview-frame frame parent)
-      (setq-local vertico-buffer-frame--preview-layout-state
-                  (vertico-buffer-frame--frame-layout-state
-                   frame parent size))))
+  (let ((parent (vertico-buffer-frame--preview-parent-frame)))
+    (unless (and (frame-live-p vertico-buffer-frame--preview-frame)
+                 (window-live-p vertico-buffer-frame--preview-window)
+                 (eq (frame-parameter
+                      vertico-buffer-frame--preview-frame
+                      'parent-frame)
+                     parent))
+      (vertico-buffer-frame--release-frame
+       'preview vertico-buffer-frame--preview-frame)
+      (vertico-buffer-frame--kill-preview-buffer)
+      (setq-local vertico-buffer-frame--preview-frame nil
+                  vertico-buffer-frame--preview-window nil)
+      (let* ((size (vertico-buffer-frame--preview-frame-size parent))
+             (frame (vertico-buffer-frame--obtain-child-frame
+                     'preview
+                     parent
+                     (format "Vertico Preview %s" (minibuffer-depth))
+                     (car size)
+                     (cdr size)))
+             (window (frame-root-window frame)))
+        (set-window-parameter window 'no-other-window t)
+        (set-window-parameter window 'no-delete-other-windows t)
+        (vertico-buffer-frame--prepare-window window)
+        (setq-local vertico-buffer-frame--preview-frame frame
+                    vertico-buffer-frame--preview-window window)
+        (vertico-buffer-frame--place-preview-frame frame parent)
+        (setq-local vertico-buffer-frame--preview-layout-state
+                    (vertico-buffer-frame--frame-layout-state
+                     frame parent size)))))
   (vertico-buffer-frame--refresh-preview-frame)
   vertico-buffer-frame--preview-window)
 
