@@ -3,6 +3,7 @@
 ;; Copyright (C) 2026 Nobuyuki Kamimoto
 
 ;; Author: Nobuyuki Kamimoto
+;; Assisted-by: OpenAI Codex:GPT-5
 ;; Version: 0.2.0
 ;; Package-Requires: ((emacs "29.1") (vertico "2.8"))
 ;; Keywords: convenience, frames, minibuffer
