@@ -1,7 +1,10 @@
 #+title: vertico-buffer-frame
 
-Experimental child-frame display for Vertico's ~vertico-buffer-mode~, with an
-optional candidate preview child frame.
+Beta child-frame display for Vertico's ~vertico-buffer-mode~, with an optional
+candidate preview child frame.  The package is intended to be usable for
+day-to-day testing on displays where Emacs child frames work, but child-frame
+behavior and upstream Vertico/Consult metadata compatibility may still vary by
+environment and version.
 
 The package enables ~vertico-buffer-mode~ and replaces
 ~vertico-buffer-display-action~ with a display action which creates or reuses
@@ -150,6 +153,23 @@ Consult support is isolated in ~vertico-buffer-frame-consult.el~ and uses
 Consult candidate text properties.  These hooks may need adjustment when Vertico
 or Consult changes their candidate metadata.
 
+* Known limitations
+
+- The package depends on a display where Emacs can create child frames.  GUI
+  child-frame behavior can differ between PGTK, X, NS and other builds, and
+  terminal support depends on Emacs' ~tty-child-frames~ support.
+- The global mode temporarily replaces ~vertico-buffer-display-action~ while it
+  is enabled.  If another package or user configuration changes that variable
+  while ~vertico-buffer-frame-mode~ is active, the value restored on disable may
+  not include that later change.
+- Selected candidate lookup uses Vertico's internal ~vertico--candidate~ because
+  Vertico does not expose the selected raw candidate as a public API.
+- Consult previews rely on Consult candidate text properties and display
+  strings.  They may need updates if Consult changes those details.
+- The non-graphical unit tests cover target resolution, cleanup and layout
+  calculations, but they do not prove that child frames behave correctly on every
+  GUI backend.
+
 * Preview
 
 Built-in preview targets currently cover files, project files, directories,
@@ -172,7 +192,8 @@ disable their preview, or add a function to
 ~vertico-buffer-frame-preview-target-functions~ for extra preview target
 resolution.
 
-The current prototype reuses the preview frame while the minibuffer is active.
+The current implementation reuses the preview frame while the minibuffer is
+active.
 Temporary buffers are still created for file and text previews as needed.
 Regular file previews are guarded by a byte limit, a simple binary detector,
 and a remote-file opt-in.
@@ -218,3 +239,15 @@ Run the non-graphical unit tests with:
         -l test/vertico-buffer-frame-test.el \
         -f ert-run-tests-batch-and-exit
 #+end_src
+
+Before tagging a release, also smoke-test an interactive graphical session:
+
+- ~find-file~ and long path editing with preview enabled and disabled.
+- ~switch-to-buffer~, ~bookmark-jump~ and ~imenu~ previews.
+- ~consult-line~, ~consult-ripgrep~ and ~consult-xref~, when Consult is
+  installed.
+- Recursive minibuffers, for example using Embark or another command which opens
+  a minibuffer from the active minibuffer.
+- Large files, binary-looking files, directories with many entries and remote
+  file candidates.
+- Multiple Emacs frames and frame resizing while the minibuffer is active.
