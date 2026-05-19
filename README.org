@@ -7,11 +7,11 @@ behavior and upstream Vertico/Consult metadata compatibility may still vary by
 environment and version.
 
 The package enables ~vertico-buffer-mode~ and replaces
-~vertico-buffer-display-action~ with a display action which creates or reuses
-hidden child frames for each minibuffer session.  The candidate frame is
-centered in the parent frame and sized from a golden-ratio rectangle.  When
-preview is enabled, preview content is shown in a second child frame overlaid on
-the lower-right side of the candidate frame.
+~vertico-buffer-display-action~ with a display action backed by
+~display-buffer-in-child-frame~.  The candidate frame is centered in the parent
+frame and sized from a golden-ratio rectangle.  When preview is enabled,
+preview content is shown in a second child frame overlaid on the lower-right
+side of the candidate frame.
 
 Child frames require a display where Emacs can create child frames.  This is
 normally a graphical display, or a terminal display with Emacs'
@@ -45,7 +45,7 @@ Add this directory to ~load-path~, then:
 - ~vertico-buffer-frame-height~
 - ~vertico-buffer-frame-golden-ratio-scale~
 - ~vertico-buffer-frame-warm-up~
-- ~vertico-buffer-frame-delete-hidden-frames~
+- ~vertico-buffer-frame-parameters~
 - ~vertico-buffer-frame-preview~
 - ~vertico-buffer-frame-preview-delay~
 - ~vertico-buffer-frame-preview-width~
@@ -105,19 +105,18 @@ Example:
         vertico-buffer-frame-border-width 1
         vertico-buffer-frame-golden-ratio-scale 1.0
         vertico-buffer-frame-warm-up t
-        vertico-buffer-frame-delete-hidden-frames nil)
+        vertico-buffer-frame-parameters nil)
 #+end_src
 
 When ~vertico-buffer-frame-warm-up~ is non-nil, the mode creates a tiny child
-frame while Emacs is idle after the mode is enabled, then releases it through
-the normal hidden-frame path.  This pre-initializes child-frame and font
-handling before the first Vertico minibuffer session, which can reduce first-use
-crashes on fragile PGTK builds.
+frame while Emacs is idle after the mode is enabled, then deletes it.  This
+pre-initializes child-frame and font handling before the first Vertico
+minibuffer session, which can reduce first-use crashes on fragile PGTK builds.
 
-Released child frames are hidden and reused by default.  Set
-~vertico-buffer-frame-delete-hidden-frames~ non-nil to delete them immediately
-instead.  When ~vertico-buffer-frame-mode~ is disabled, any child frames left in
-the hidden-frame pool are deleted.
+Child frames are created with Emacs' ~display-buffer-in-child-frame~.  The
+package keeps only the currently active minibuffer frames and deletes them when
+the minibuffer exits or the mode is disabled; it does not keep a hidden
+child-frame pool.
 
 To toggle the preview while completing, bind the toggle command in
 ~vertico-map~:
@@ -138,9 +137,12 @@ preview visibility only for the current minibuffer session.  When called
 outside the minibuffer, it changes the global default
 ~vertico-buffer-frame-preview~.
 
-~vertico-buffer-frame-cleanup~ releases child frames currently owned by active
-minibuffer sessions.  With the default frame-pool behavior, released frames are
-hidden for reuse rather than deleted immediately.
+~vertico-buffer-frame-cleanup~ deletes child frames currently owned by active
+minibuffer sessions.
+
+When Embark opens ~*Embark Collect:*~ or ~*Embark Export*~ from the minibuffer,
+the global mode installs a display rule which shows that buffer in the window
+that started the minibuffer instead of in the Vertico child frame.
 
 * Stability notes
 

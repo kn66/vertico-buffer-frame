@@ -188,10 +188,10 @@ candidate.")
 (declare-function package-built-in-p "package")
 (declare-function package-version-join "package")
 (declare-function project-root "project")
-(declare-function vertico-buffer-frame--obtain-child-frame
+(declare-function vertico-buffer-frame--delete-frame "vertico-buffer-frame")
+(declare-function vertico-buffer-frame--display-buffer-in-child-frame
                   "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--parent-frame "vertico-buffer-frame")
-(declare-function vertico-buffer-frame--release-frame "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--frame-layout-state
                   "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--pixels-to-chars "vertico-buffer-frame")
@@ -1244,6 +1244,16 @@ SIZE is the file size in bytes, or nil if it is unknown."
     (when (= (point) content-start)
       (insert "No documentation available.\n"))))
 
+(defun vertico-buffer-frame--preview-placeholder-buffer ()
+  "Return the buffer initially displayed by a preview child frame."
+  (let ((buffer (get-buffer-create " *vertico-buffer-frame-preview*")))
+    (with-current-buffer buffer
+      (setq-local cursor-type nil
+                  mode-line-format nil
+                  header-line-format nil
+                  tab-line-format nil))
+    buffer))
+
 (defun vertico-buffer-frame--preview-window ()
   "Return the preview window, creating a child frame when needed."
   (let ((parent (vertico-buffer-frame--preview-parent-frame)))
@@ -1253,19 +1263,19 @@ SIZE is the file size in bytes, or nil if it is unknown."
                       vertico-buffer-frame--preview-frame
                       'parent-frame)
                      parent))
-      (vertico-buffer-frame--release-frame
-       'preview vertico-buffer-frame--preview-frame)
+      (vertico-buffer-frame--delete-frame
+       vertico-buffer-frame--preview-frame)
       (vertico-buffer-frame--kill-preview-buffer)
       (setq-local vertico-buffer-frame--preview-frame nil
                   vertico-buffer-frame--preview-window nil)
       (let* ((size (vertico-buffer-frame--preview-frame-size parent))
-             (frame (vertico-buffer-frame--obtain-child-frame
-                     'preview
-                     parent
-                     (format "Vertico Preview %s" (minibuffer-depth))
-                     (car size)
-                     (cdr size)))
-             (window (frame-root-window frame)))
+             (window (vertico-buffer-frame--display-buffer-in-child-frame
+                      (vertico-buffer-frame--preview-placeholder-buffer)
+                      parent
+                      (format "Vertico Preview %s" (minibuffer-depth))
+                      size
+                      'preview))
+             (frame (window-frame window)))
         (set-window-parameter window 'no-other-window t)
         (set-window-parameter window 'no-delete-other-windows t)
         (vertico-buffer-frame--prepare-window window)
@@ -1409,8 +1419,8 @@ WINDOW."
 (defun vertico-buffer-frame--hide-preview ()
   "Hide the preview child frame."
   (vertico-buffer-frame--cancel-preview-timer)
-  (vertico-buffer-frame--release-frame
-   'preview vertico-buffer-frame--preview-frame)
+  (vertico-buffer-frame--delete-frame
+   vertico-buffer-frame--preview-frame)
   (vertico-buffer-frame--kill-preview-buffer)
   (setq-local vertico-buffer-frame--preview-frame nil
               vertico-buffer-frame--preview-window nil
