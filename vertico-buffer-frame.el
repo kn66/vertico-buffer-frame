@@ -530,6 +530,7 @@ of a Vertico child frame."
                     vertico-buffer-frame--preview-timer nil
                     vertico-buffer-frame--preview-last-error-message nil
                     vertico-buffer-frame--preview-scheduled-state nil
+                    vertico-buffer-frame--preview-last-input nil
                     vertico-buffer-frame--project-root-cache nil
                     vertico-buffer-frame--file-preview-cache nil
                     vertico-buffer-frame--imenu-cache nil
@@ -567,7 +568,9 @@ Inside an active minibuffer, the change is buffer-local to that session."
   (when vertico-buffer-frame-mode
     (setq-local mode-line-format nil
                 header-line-format nil
-                tab-line-format nil)
+                tab-line-format nil
+                vertico-buffer-frame--preview-last-input
+                (vertico-buffer-frame--minibuffer-input))
     (add-hook 'pre-redisplay-functions
               #'vertico-buffer-frame--pre-redisplay nil t)
     (add-hook 'post-command-hook

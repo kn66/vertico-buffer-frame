@@ -828,6 +828,72 @@
         (should-not canceled)
         (should-not scheduled)))))
 
+(ert-deftest vertico-buffer-frame-preview-post-command-defers-input-changes ()
+  (with-temp-buffer
+    (setq-local vertico-buffer-frame--preview-last-input "a")
+    (let ((vertico-buffer-frame-mode t)
+          (vertico-buffer-frame-preview t)
+          (vertico-buffer-frame-preview-during-input nil)
+          (vertico-buffer-frame-preview-input-delay 0.7)
+          (input "ab")
+          hidden
+          scheduled)
+      (cl-letf (((symbol-function #'vertico-buffer-frame--minibuffer-input)
+                 (lambda ()
+                   input))
+                ((symbol-function #'vertico-buffer-frame--completion-active-p)
+                 (lambda ()
+                   t))
+                ((symbol-function #'vertico-buffer-frame--hide-preview)
+                 (lambda ()
+                   (setq hidden t)))
+                ((symbol-function #'run-with-idle-timer)
+                 (lambda (delay repeat function &rest args)
+                   (setq scheduled (list delay repeat function args))
+                   'preview-timer)))
+        (vertico-buffer-frame--preview-post-command)
+        (should hidden)
+        (should (equal scheduled
+                       (list 0.7
+                             nil
+                             #'vertico-buffer-frame--show-preview-later
+                             (list (current-buffer)))))
+        (should (equal vertico-buffer-frame--preview-last-input "ab"))))))
+
+(ert-deftest vertico-buffer-frame-preview-post-command-allows-input-changes ()
+  (with-temp-buffer
+    (setq-local vertico-buffer-frame--preview-last-input "a")
+    (let ((vertico-buffer-frame-mode t)
+          (vertico-buffer-frame-preview t)
+          (vertico-buffer-frame-preview-during-input t)
+          (vertico-buffer-frame-preview-delay 0.2)
+          (input "ab")
+          scheduled
+          hidden)
+      (cl-letf (((symbol-function #'vertico-buffer-frame--minibuffer-input)
+                 (lambda ()
+                   input))
+                ((symbol-function #'vertico-buffer-frame--candidate)
+                 (lambda ()
+                   "candidate"))
+                ((symbol-function #'vertico-buffer-frame--completion-active-p)
+                 (lambda ()
+                   t))
+                ((symbol-function #'vertico-buffer-frame--hide-preview)
+                 (lambda ()
+                   (setq hidden t)))
+                ((symbol-function #'run-with-idle-timer)
+                 (lambda (delay repeat function &rest args)
+                   (setq scheduled (list delay repeat function args))
+                   'preview-timer)))
+        (vertico-buffer-frame--preview-post-command)
+        (should-not hidden)
+        (should (equal scheduled
+                       (list 0.2
+                             nil
+                             #'vertico-buffer-frame--show-preview-later
+                             (list (current-buffer)))))))))
+
 (ert-deftest vertico-buffer-frame-preview-state-is-cheap ()
   (with-temp-buffer
     (cl-letf (((symbol-function #'vertico-buffer-frame--minibuffer-input)

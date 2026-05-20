@@ -48,6 +48,8 @@ Add this directory to ~load-path~, then:
 - ~vertico-buffer-frame-report-display-errors~
 - ~vertico-buffer-frame-preview~
 - ~vertico-buffer-frame-preview-delay~
+- ~vertico-buffer-frame-preview-during-input~
+- ~vertico-buffer-frame-preview-input-delay~
 - ~vertico-buffer-frame-preview-width~
 - ~vertico-buffer-frame-preview-height~
 - ~vertico-buffer-frame-preview-max-file-size~
@@ -77,6 +79,14 @@ cells.  ~vertico-buffer-frame-preview-width~ and
 ~vertico-buffer-frame-preview-height~ can be set to character counts to cap the
 automatic preview size.
 
+By default, preview refreshes are deferred while minibuffer input is changing:
+typing, deletion, yanking and other input edits hide the current preview and
+schedule the next one after ~vertico-buffer-frame-preview-input-delay~ seconds
+of idleness.  Candidate navigation still previews after
+~vertico-buffer-frame-preview-delay~.  Set
+~vertico-buffer-frame-preview-during-input~ to non-nil to restore the normal
+preview delay after input edits.
+
 File previews read at most ~vertico-buffer-frame-preview-max-file-size~ bytes
 from regular files by default.  Remote files and binary-looking files are not
 previewed unless ~vertico-buffer-frame-preview-remote-files~ or
@@ -94,6 +104,8 @@ Example:
   (setq vertico-buffer-frame-size-method 'golden-ratio
         vertico-buffer-frame-preview t
         vertico-buffer-frame-preview-delay 0.2
+        vertico-buffer-frame-preview-during-input nil
+        vertico-buffer-frame-preview-input-delay 0.7
         vertico-buffer-frame-preview-width nil
         vertico-buffer-frame-preview-height nil
         vertico-buffer-frame-preview-max-file-size 1048576
