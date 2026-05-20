@@ -161,6 +161,7 @@ candidate."
 (defvar-local vertico-buffer-frame--project-root-cache nil)
 (defvar-local vertico-buffer-frame--file-preview-cache nil)
 (defvar-local vertico-buffer-frame--imenu-cache nil)
+(defvar-local vertico-buffer-frame--consult-imenu-entry-table-cache nil)
 (defvar-local vertico-buffer-frame--temporary-preview-buffer nil)
 
 (defconst vertico-buffer-frame-preview--golden-ratio
@@ -808,6 +809,17 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
           (puthash name (cdr pair) table))))
     table))
 
+(defun vertico-buffer-frame--consult-imenu-entry-table-cached (entries)
+  "Return cached Consult-style imenu table for ENTRIES."
+  (if (and (consp vertico-buffer-frame--consult-imenu-entry-table-cache)
+           (eq (car vertico-buffer-frame--consult-imenu-entry-table-cache)
+               entries))
+      (cdr vertico-buffer-frame--consult-imenu-entry-table-cache)
+    (let ((table (vertico-buffer-frame--consult-imenu-entry-table entries)))
+      (setq-local vertico-buffer-frame--consult-imenu-entry-table-cache
+                  (cons entries table))
+      table)))
+
 (defun vertico-buffer-frame--imenu-cache-key (buffer)
   "Return the cache key for BUFFER's imenu index."
   (with-current-buffer buffer
@@ -844,7 +856,7 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
                          (gethash candidate (cdr cache))
                          (gethash
                           candidate
-                          (vertico-buffer-frame--consult-imenu-entry-table
+                          (vertico-buffer-frame--consult-imenu-entry-table-cached
                            (car cache)))
                          (vertico-buffer-frame--imenu-find-entry
                           candidate
@@ -1055,8 +1067,10 @@ current minibuffer state."
     (let* ((parent (vertico-buffer-frame--preview-parent-frame))
            (size (vertico-buffer-frame--preview-frame-size parent))
            (state (vertico-buffer-frame--frame-layout-state
-                   vertico-buffer-frame--preview-frame parent size)))
-      (unless (equal state vertico-buffer-frame--preview-layout-state)
+                   vertico-buffer-frame--preview-frame parent size))
+           (layout-changed
+            (not (equal state vertico-buffer-frame--preview-layout-state))))
+      (when layout-changed
         (vertico-buffer-frame--resize-frame-to-size
          vertico-buffer-frame--preview-frame size)
         (vertico-buffer-frame--place-preview-frame
@@ -1064,7 +1078,8 @@ current minibuffer state."
         (setq-local vertico-buffer-frame--preview-layout-state
                     (vertico-buffer-frame--frame-layout-state
                      vertico-buffer-frame--preview-frame parent size)))
-      (when (window-live-p vertico-buffer-frame--preview-window)
+      (when (and layout-changed
+                 (window-live-p vertico-buffer-frame--preview-window))
         (force-window-update
          (window-buffer vertico-buffer-frame--preview-window))))))
 
@@ -1413,10 +1428,9 @@ temporary preview buffer."
               vertico-buffer-frame--preview-scheduled-state nil))
 
 (defun vertico-buffer-frame--preview-state ()
-  "Return state used to coalesce pending preview refresh timers."
+  "Return cheap state used to coalesce pending preview refresh timers."
   (list (vertico-buffer-frame--minibuffer-input)
         (point)
-        (vertico-buffer-frame--category)
         (vertico-buffer-frame--candidate)))
 
 (defun vertico-buffer-frame--hide-preview ()

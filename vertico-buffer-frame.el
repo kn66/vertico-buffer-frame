@@ -369,6 +369,21 @@ display action used by `display-buffer-in-child-frame'."
   (and (frame-live-p vertico-buffer-frame--candidate-frame)
        (window-live-p vertico-buffer-frame--candidate-window)))
 
+(defun vertico-buffer-frame--sync-candidate-frame-layout (parent size)
+  "Resize and position the current candidate frame when layout changed.
+PARENT is the expected parent frame and SIZE is the target character size."
+  (when (vertico-buffer-frame--candidate-window-live-p)
+    (let ((state (vertico-buffer-frame--frame-layout-state
+                  vertico-buffer-frame--candidate-frame parent size)))
+      (unless (equal state vertico-buffer-frame--candidate-layout-state)
+        (vertico-buffer-frame--resize-frame-to-size
+         vertico-buffer-frame--candidate-frame size)
+        (vertico-buffer-frame--place-candidate-frame
+         vertico-buffer-frame--candidate-frame parent)
+        (setq-local vertico-buffer-frame--candidate-layout-state
+                    (vertico-buffer-frame--frame-layout-state
+                     vertico-buffer-frame--candidate-frame parent size))))))
+
 (defun vertico-buffer-frame--report-display-error (error)
   "Report child-frame display ERROR when diagnostics are enabled."
   (when vertico-buffer-frame-report-display-errors
@@ -405,16 +420,15 @@ This function is intended for `vertico-buffer-display-action'."
                 buffer parent name size 'candidate alist)
                vertico-buffer-frame--candidate-frame
                (window-frame vertico-buffer-frame--candidate-window)))
-            (set-window-dedicated-p vertico-buffer-frame--candidate-window nil)
-            (set-window-buffer vertico-buffer-frame--candidate-window buffer)
+            (unless (eq (window-buffer
+                         vertico-buffer-frame--candidate-window)
+                        buffer)
+              (set-window-dedicated-p
+               vertico-buffer-frame--candidate-window nil)
+              (set-window-buffer
+               vertico-buffer-frame--candidate-window buffer))
             (vertico-buffer-frame--install-cleanup)
-            (vertico-buffer-frame--resize-frame-to-size
-             vertico-buffer-frame--candidate-frame size)
-            (vertico-buffer-frame--place-candidate-frame
-             vertico-buffer-frame--candidate-frame parent)
-            (setq-local vertico-buffer-frame--candidate-layout-state
-                        (vertico-buffer-frame--frame-layout-state
-                         vertico-buffer-frame--candidate-frame parent size))
+            (vertico-buffer-frame--sync-candidate-frame-layout parent size)
             (setq vertico-buffer-frame--last-display-error-message nil)
             vertico-buffer-frame--candidate-window)))
     (error
@@ -425,17 +439,8 @@ This function is intended for `vertico-buffer-display-action'."
   "Reveal and refresh the current minibuffer's candidate frame."
   (when (vertico-buffer-frame--candidate-window-live-p)
     (let* ((parent (vertico-buffer-frame--parent-frame))
-           (size (vertico-buffer-frame--candidate-frame-size parent))
-           (state (vertico-buffer-frame--frame-layout-state
-                   vertico-buffer-frame--candidate-frame parent size)))
-      (unless (equal state vertico-buffer-frame--candidate-layout-state)
-        (vertico-buffer-frame--resize-frame-to-size
-         vertico-buffer-frame--candidate-frame size)
-        (vertico-buffer-frame--place-candidate-frame
-         vertico-buffer-frame--candidate-frame parent)
-        (setq-local vertico-buffer-frame--candidate-layout-state
-                    (vertico-buffer-frame--frame-layout-state
-                     vertico-buffer-frame--candidate-frame parent size)))
+           (size (vertico-buffer-frame--candidate-frame-size parent)))
+      (vertico-buffer-frame--sync-candidate-frame-layout parent size)
       (vertico-buffer-frame--refresh-preview-frame)
       (vertico-buffer-frame--show-frame
        vertico-buffer-frame--candidate-frame)
@@ -528,6 +533,7 @@ of a Vertico child frame."
                     vertico-buffer-frame--project-root-cache nil
                     vertico-buffer-frame--file-preview-cache nil
                     vertico-buffer-frame--imenu-cache nil
+                    vertico-buffer-frame--consult-imenu-entry-table-cache nil
                     vertico-buffer-frame--cleanup-function nil))))
   (setq vertico-buffer-frame--minibuffers
         (delq buffer vertico-buffer-frame--minibuffers)))

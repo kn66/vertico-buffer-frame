@@ -366,16 +366,20 @@
   (with-temp-buffer
     (let ((created nil)
           (deleted nil)
-          (buffers nil))
+          (buffers nil)
+          window-buffer
+          resized
+          placed)
       (cl-letf (((symbol-function #'vertico-buffer-frame--parent-frame)
                  (lambda ()
                    'parent))
                 ((symbol-function #'vertico-buffer-frame--display-buffer-in-child-frame)
-                 (lambda (_buffer _parent _name _size role &optional _alist)
+                 (lambda (buffer _parent _name _size role &optional _alist)
                    (should (eq role 'candidate))
                    (let ((frame (intern (format "frame-%s"
                                                 (1+ (length created))))))
                      (push frame created)
+                     (setq window-buffer buffer)
                      (intern (format "window-%s"
                                      (substring (symbol-name frame) 6))))))
                 ((symbol-function #'vertico-buffer-frame--candidate-frame-size)
@@ -390,6 +394,9 @@
                 ((symbol-function #'window-frame)
                  (lambda (window)
                    (and (eq window 'window-1) 'frame-1)))
+                ((symbol-function #'window-buffer)
+                 (lambda (window)
+                   (and (eq window 'window-1) window-buffer)))
                 ((symbol-function #'frame-parameter)
                  (lambda (_frame parameter)
                    (and (eq parameter 'parent-frame)
@@ -405,25 +412,30 @@
                    (when frame
                      (push frame deleted))))
                 ((symbol-function #'vertico-buffer-frame--resize-frame-to-size)
-                 (lambda (&rest _args)))
+                 (lambda (frame size)
+                   (push (list frame size) resized)))
                 ((symbol-function #'set-window-dedicated-p)
                  (lambda (&rest _args)))
                 ((symbol-function #'set-window-buffer)
                  (lambda (window buffer)
-                   (push (list window buffer) buffers)))
+                   (push (list window buffer) buffers)
+                   (setq window-buffer buffer)))
                 ((symbol-function #'vertico-buffer-frame--install-cleanup)
                  (lambda ()))
                 ((symbol-function #'vertico-buffer-frame--place-candidate-frame)
-                 (lambda (&rest _args))))
+                 (lambda (frame parent)
+                   (push (list frame parent) placed))))
         (should (eq (vertico-buffer-frame--display-buffer 'buffer-a nil)
+                    'window-1))
+        (should (eq (vertico-buffer-frame--display-buffer 'buffer-b nil)
                     'window-1))
         (should (eq (vertico-buffer-frame--display-buffer 'buffer-b nil)
                     'window-1))
         (should (equal created '(frame-1)))
         (should-not deleted)
-        (should (equal buffers
-                       '((window-1 buffer-b)
-                         (window-1 buffer-a))))))))
+        (should (equal buffers '((window-1 buffer-b))))
+        (should (equal resized '((frame-1 (80 . 10)))))
+        (should (equal placed '((frame-1 parent))))))))
 
 (ert-deftest vertico-buffer-frame-display-buffer-reports-fallback-error ()
   (let ((vertico-buffer-frame-report-display-errors t)
@@ -610,7 +622,9 @@
                        (push frame deleted)))))
           (with-current-buffer buffer-a
             (setq-local vertico-buffer-frame--candidate-frame 'a-candidate
-                        vertico-buffer-frame--preview-frame 'a-preview))
+                        vertico-buffer-frame--preview-frame 'a-preview
+                        vertico-buffer-frame--consult-imenu-entry-table-cache
+                        '(entries . table)))
           (with-current-buffer buffer-b
             (setq-local vertico-buffer-frame--candidate-frame 'b-candidate
                         vertico-buffer-frame--preview-frame 'b-preview))
@@ -619,6 +633,9 @@
           (vertico-buffer-frame--cleanup-minibuffer buffer-a)
           (should (equal deleted
                          '(a-candidate a-preview)))
+          (with-current-buffer buffer-a
+            (should-not
+             vertico-buffer-frame--consult-imenu-entry-table-cache))
           (with-current-buffer buffer-b
             (should (eq vertico-buffer-frame--candidate-frame 'b-candidate))
             (should (eq vertico-buffer-frame--preview-frame 'b-preview))))
@@ -811,6 +828,20 @@
         (should-not canceled)
         (should-not scheduled)))))
 
+(ert-deftest vertico-buffer-frame-preview-state-is-cheap ()
+  (with-temp-buffer
+    (cl-letf (((symbol-function #'vertico-buffer-frame--minibuffer-input)
+               (lambda ()
+                 "input"))
+              ((symbol-function #'vertico-buffer-frame--candidate)
+               (lambda ()
+                 "candidate"))
+              ((symbol-function #'vertico-buffer-frame--category)
+               (lambda ()
+                 (error "category lookup should be delayed"))))
+      (should (equal (vertico-buffer-frame--preview-state)
+                     (list "input" (point) "candidate"))))))
+
 (ert-deftest vertico-buffer-frame-preview-later-shows-target-each-time ()
   (with-temp-buffer
     (let ((vertico-buffer-frame-mode t)
@@ -980,6 +1011,97 @@
         (should (equal vertico-buffer-frame--preview-layout-state
                        '(new-frame new-parent (42 . 11))))
         (should refreshed)))))
+
+(ert-deftest vertico-buffer-frame-refresh-preview-frame-updates-changed-layout ()
+  (with-temp-buffer
+    (setq-local vertico-buffer-frame--preview-frame 'frame
+                vertico-buffer-frame--preview-window 'window)
+    (let (forced placed resized)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame)
+                   (eq frame 'frame)))
+                ((symbol-function #'window-live-p)
+                 (lambda (window)
+                   (eq window 'window)))
+                ((symbol-function #'window-buffer)
+                 (lambda (window)
+                   (and (eq window 'window) 'buffer)))
+                ((symbol-function #'force-window-update)
+                 (lambda (buffer)
+                   (push buffer forced)))
+                ((symbol-function #'frame-pixel-width)
+                 (lambda (frame)
+                   (pcase frame
+                     ('parent 100)
+                     ('frame 80))))
+                ((symbol-function #'frame-pixel-height)
+                 (lambda (frame)
+                   (pcase frame
+                     ('parent 50)
+                     ('frame 20))))
+                ((symbol-function #'vertico-buffer-frame--preview-parent-frame)
+                 (lambda ()
+                   'parent))
+                ((symbol-function #'vertico-buffer-frame--preview-frame-size)
+                 (lambda (parent)
+                   (should (eq parent 'parent))
+                   'size))
+                ((symbol-function #'vertico-buffer-frame--resize-frame-to-size)
+                 (lambda (frame size)
+                   (push (list frame size) resized)))
+                ((symbol-function #'vertico-buffer-frame--place-preview-frame)
+                 (lambda (frame parent)
+                   (push (list frame parent) placed))))
+        (vertico-buffer-frame--refresh-preview-frame)
+        (should (equal forced '(buffer)))
+        (should (equal resized '((frame size))))
+        (should (equal placed '((frame parent))))))))
+
+(ert-deftest vertico-buffer-frame-refresh-preview-frame-skips-unchanged-layout ()
+  (with-temp-buffer
+    (setq-local vertico-buffer-frame--preview-frame 'frame
+                vertico-buffer-frame--preview-window 'window
+                vertico-buffer-frame--preview-layout-state
+                (list 'parent 100 50 80 20 'size))
+    (let (forced placed resized)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame)
+                   (eq frame 'frame)))
+                ((symbol-function #'window-live-p)
+                 (lambda (window)
+                   (eq window 'window)))
+                ((symbol-function #'window-buffer)
+                 (lambda (window)
+                   (and (eq window 'window) 'buffer)))
+                ((symbol-function #'force-window-update)
+                 (lambda (buffer)
+                   (push buffer forced)))
+                ((symbol-function #'frame-pixel-width)
+                 (lambda (frame)
+                   (pcase frame
+                     ('parent 100)
+                     ('frame 80))))
+                ((symbol-function #'frame-pixel-height)
+                 (lambda (frame)
+                   (pcase frame
+                     ('parent 50)
+                     ('frame 20))))
+                ((symbol-function #'vertico-buffer-frame--preview-parent-frame)
+                 (lambda ()
+                   'parent))
+                ((symbol-function #'vertico-buffer-frame--preview-frame-size)
+                 (lambda (_parent)
+                   'size))
+                ((symbol-function #'vertico-buffer-frame--resize-frame-to-size)
+                 (lambda (frame size)
+                   (push (list frame size) resized)))
+                ((symbol-function #'vertico-buffer-frame--place-preview-frame)
+                 (lambda (frame parent)
+                   (push (list frame parent) placed))))
+        (vertico-buffer-frame--refresh-preview-frame)
+        (should-not forced)
+        (should-not resized)
+        (should-not placed)))))
 
 (ert-deftest vertico-buffer-frame-find-buffer-position-respects-buffer-limit ()
   (let ((first (generate-new-buffer " *vbf-search-first*"))
@@ -1652,6 +1774,36 @@
               (when (buffer-live-p buffer)
                 (kill-buffer buffer)))
             (list source minibuffer)))))
+
+(ert-deftest vertico-buffer-frame-consult-imenu-table-cache-reuses-entries ()
+  (with-temp-buffer
+    (let ((entries-a (list (cons "a" 1)))
+          (entries-b (list (cons "b" 2)))
+          (calls 0))
+      (cl-letf (((symbol-function
+                  #'vertico-buffer-frame--consult-imenu-entry-table)
+                 (lambda (entries)
+                   (cl-incf calls)
+                   (let ((table (make-hash-table :test #'equal)))
+                     (puthash (caar entries) (cdar entries) table)
+                     table))))
+        (should (equal
+                 (gethash "a"
+                          (vertico-buffer-frame--consult-imenu-entry-table-cached
+                           entries-a))
+                 1))
+        (should (equal
+                 (gethash "a"
+                          (vertico-buffer-frame--consult-imenu-entry-table-cached
+                           entries-a))
+                 1))
+        (should (= calls 1))
+        (should (equal
+                 (gethash "b"
+                          (vertico-buffer-frame--consult-imenu-entry-table-cached
+                           entries-b))
+                 2))
+        (should (= calls 2))))))
 
 (ert-deftest vertico-buffer-frame-dabbrev-target-finds-origin-buffer ()
   (let ((source (generate-new-buffer " *vbf-dabbrev-source*")))
