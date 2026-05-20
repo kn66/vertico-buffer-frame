@@ -11,3 +11,5 @@
 .elsa/
 .eldev/
 dist/
+*-autoloads.el
+*-pkg.el

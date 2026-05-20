@@ -44,8 +44,8 @@ Add this directory to ~load-path~, then:
 - ~vertico-buffer-frame-width~
 - ~vertico-buffer-frame-height~
 - ~vertico-buffer-frame-golden-ratio-scale~
-- ~vertico-buffer-frame-warm-up~
 - ~vertico-buffer-frame-parameters~
+- ~vertico-buffer-frame-report-display-errors~
 - ~vertico-buffer-frame-preview~
 - ~vertico-buffer-frame-preview-delay~
 - ~vertico-buffer-frame-preview-width~
@@ -104,14 +104,9 @@ Example:
         vertico-buffer-frame-preview-report-errors t
         vertico-buffer-frame-border-width 1
         vertico-buffer-frame-golden-ratio-scale 1.0
-        vertico-buffer-frame-warm-up t
+        vertico-buffer-frame-report-display-errors nil
         vertico-buffer-frame-parameters nil)
 #+end_src
-
-When ~vertico-buffer-frame-warm-up~ is non-nil, the mode creates a tiny child
-frame while Emacs is idle after the mode is enabled, then deletes it.  This
-pre-initializes child-frame and font handling before the first Vertico
-minibuffer session, which can reduce first-use crashes on fragile PGTK builds.
 
 Child frames are created with Emacs' ~display-buffer-in-child-frame~.  The
 package keeps only the currently active minibuffer frames and deletes them when

@@ -129,12 +129,13 @@ non-nil, preview errors are not caught."
   "Completion categories for which candidate previews are shown."
   :type '(repeat symbol))
 
-(defvar vertico-buffer-frame-preview-target-functions nil
+(defcustom vertico-buffer-frame-preview-target-functions nil
   "Hook functions for additional preview targets.
 Each function is called with CATEGORY, CANDIDATE and RAW-CANDIDATE.
 It should return a preview target accepted by
 `vertico-buffer-frame--show-preview', or nil if it cannot handle the
-candidate.")
+candidate."
+  :type 'hook)
 
 (with-eval-after-load 'consult
   (require 'vertico-buffer-frame-consult nil t))
@@ -196,7 +197,6 @@ candidate.")
                   "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--pixels-to-chars "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--place-preview-frame "vertico-buffer-frame")
-(declare-function vertico-buffer-frame--prepare-window "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--resize-frame-to-size
                   "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--show-frame "vertico-buffer-frame")
@@ -839,8 +839,8 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
     (when-let* ((buffer (vertico-buffer-frame--origin-buffer)))
       (let* ((cache (vertico-buffer-frame--imenu-cache-value buffer))
              (choice (or (and (stringp raw-candidate)
-              (get-text-property 0 'imenu-choice
-                                 raw-candidate))
+                              (get-text-property 0 'imenu-choice
+                                                 raw-candidate))
                          (gethash candidate (cdr cache))
                          (gethash
                           candidate
@@ -928,6 +928,69 @@ When STRINGP is non-nil, look for a @String definition."
               (lambda ()
                 (calendar-generate-month month year 0)))))))
 
+(defun vertico-buffer-frame--simple-text-target (candidate name)
+  "Return a text preview target for CANDIDATE named NAME."
+  (list 'text
+        name
+        (lambda ()
+          (insert candidate "\n"))))
+
+(defconst vertico-buffer-frame--preview-target-resolvers
+  '((file vertico-buffer-frame--file-target)
+    (project-file vertico-buffer-frame--project-file-target)
+    (buffer vertico-buffer-frame--buffer-target)
+    (xref-location vertico-buffer-frame--xref-location-target :raw-candidate)
+    (bookmark vertico-buffer-frame--bookmark-target)
+    (symbol-help vertico-buffer-frame--symbol-preview-target)
+    (command vertico-buffer-frame--symbol-preview-target)
+    (function vertico-buffer-frame--symbol-preview-target)
+    (variable vertico-buffer-frame--symbol-preview-target)
+    (face vertico-buffer-frame--symbol-preview-target)
+    (symbol vertico-buffer-frame--symbol-preview-target)
+    (minor-mode vertico-buffer-frame--symbol-preview-target)
+    (customization-group vertico-buffer-frame--symbol-preview-target)
+    (custom-variable vertico-buffer-frame--symbol-preview-target)
+    (apropos-symbol vertico-buffer-frame--symbol-preview-target)
+    (unicode-name vertico-buffer-frame--unicode-name-target)
+    (info-menu vertico-buffer-frame--info-menu-target)
+    (calendar-month vertico-buffer-frame--calendar-month-target)
+    (color vertico-buffer-frame--color-target)
+    (custom-theme vertico-buffer-frame--custom-theme-target)
+    (theme vertico-buffer-frame--custom-theme-target)
+    (input-method vertico-buffer-frame--input-method-target)
+    (coding-system vertico-buffer-frame--coding-system-target)
+    (charset vertico-buffer-frame--charset-target)
+    (library vertico-buffer-frame--library-target)
+    (package vertico-buffer-frame--package-target)
+    (register vertico-buffer-frame--register-target)
+    (email vertico-buffer-frame--email-target)
+    (ecomplete vertico-buffer-frame--email-target)
+    (dabbrev vertico-buffer-frame--dabbrev-target)
+    (imenu vertico-buffer-frame--imenu-target :raw-candidate)
+    (bibtex-key vertico-buffer-frame--bibtex-target nil)
+    (bibtex-string vertico-buffer-frame--bibtex-target t)
+    (kill-ring vertico-buffer-frame--simple-text-target "Kill Ring"))
+  "Built-in preview target resolvers keyed by completion category.")
+
+(defun vertico-buffer-frame--preview-target-argument
+    (argument raw-candidate)
+  "Return ARGUMENT resolved for RAW-CANDIDATE."
+  (if (eq argument :raw-candidate)
+      raw-candidate
+    argument))
+
+(defun vertico-buffer-frame--builtin-preview-target
+    (category candidate raw-candidate)
+  "Return a built-in preview target for CATEGORY, CANDIDATE and RAW-CANDIDATE."
+  (when-let* ((resolver (assq category
+                              vertico-buffer-frame--preview-target-resolvers)))
+    (apply (cadr resolver)
+           candidate
+           (mapcar (lambda (argument)
+                     (vertico-buffer-frame--preview-target-argument
+                      argument raw-candidate))
+                   (cddr resolver)))))
+
 (defun vertico-buffer-frame--preview-target (&optional raw-candidate category)
   "Return the current preview target.
 When RAW-CANDIDATE or CATEGORY are non-nil, use them instead of reading the
@@ -944,60 +1007,8 @@ current minibuffer state."
       (or (run-hook-with-args-until-success
            'vertico-buffer-frame-preview-target-functions
            category candidate raw-candidate)
-          (pcase category
-            ('file
-             (vertico-buffer-frame--file-target candidate))
-            ('project-file
-             (vertico-buffer-frame--project-file-target candidate))
-            ('buffer
-             (vertico-buffer-frame--buffer-target candidate))
-            ('xref-location
-             (vertico-buffer-frame--xref-location-target candidate raw-candidate))
-            ('bookmark
-             (vertico-buffer-frame--bookmark-target candidate))
-            ((or 'symbol-help 'command 'function 'variable 'face 'symbol
-                 'minor-mode 'customization-group 'custom-variable
-                 'apropos-symbol)
-             (vertico-buffer-frame--symbol-preview-target candidate))
-            ('unicode-name
-             (vertico-buffer-frame--unicode-name-target candidate))
-            ('info-menu
-             (vertico-buffer-frame--info-menu-target candidate))
-            ('calendar-month
-             (vertico-buffer-frame--calendar-month-target candidate))
-            ('color
-             (vertico-buffer-frame--color-target candidate))
-            ('custom-theme
-             (vertico-buffer-frame--custom-theme-target candidate))
-            ('theme
-             (vertico-buffer-frame--custom-theme-target candidate))
-            ('input-method
-             (vertico-buffer-frame--input-method-target candidate))
-            ('coding-system
-             (vertico-buffer-frame--coding-system-target candidate))
-            ('charset
-             (vertico-buffer-frame--charset-target candidate))
-            ('library
-             (vertico-buffer-frame--library-target candidate))
-            ('package
-             (vertico-buffer-frame--package-target candidate))
-            ('register
-             (vertico-buffer-frame--register-target candidate))
-            ((or 'email 'ecomplete)
-             (vertico-buffer-frame--email-target candidate))
-            ('dabbrev
-             (vertico-buffer-frame--dabbrev-target candidate))
-            ('imenu
-             (vertico-buffer-frame--imenu-target candidate raw-candidate))
-            ('bibtex-key
-             (vertico-buffer-frame--bibtex-target candidate nil))
-            ('bibtex-string
-             (vertico-buffer-frame--bibtex-target candidate t))
-            ('kill-ring
-             (list 'text
-                   "Kill Ring"
-                   (lambda ()
-                     (insert candidate "\n")))))))))
+          (vertico-buffer-frame--builtin-preview-target
+           category candidate raw-candidate)))))
 
 (defun vertico-buffer-frame--preview-parent-frame ()
   "Return the parent frame for the preview child frame."
@@ -1278,7 +1289,6 @@ SIZE is the file size in bytes, or nil if it is unknown."
              (frame (window-frame window)))
         (set-window-parameter window 'no-other-window t)
         (set-window-parameter window 'no-delete-other-windows t)
-        (vertico-buffer-frame--prepare-window window)
         (setq-local vertico-buffer-frame--preview-frame frame
                     vertico-buffer-frame--preview-window window)
         (vertico-buffer-frame--place-preview-frame frame parent)
@@ -1329,68 +1339,61 @@ WINDOW."
       (forward-line (1- line))
       (vertico-buffer-frame--center-window-point window))))
 
+(defun vertico-buffer-frame--show-preview-buffer
+    (buffer-function &optional location external-buffer)
+  "Show the preview buffer returned by BUFFER-FUNCTION.
+LOCATION may be (line . LINE), (position . POSITION), or nil.  When
+EXTERNAL-BUFFER is non-nil, do not treat the displayed buffer as an owned
+temporary preview buffer."
+  (let ((old-preview-buffer vertico-buffer-frame--preview-buffer)
+        (window (vertico-buffer-frame--preview-window)))
+    (vertico-buffer-frame--set-preview-window-buffer
+     window
+     (funcall buffer-function)
+     old-preview-buffer)
+    (when external-buffer
+      (setq-local vertico-buffer-frame--preview-buffer nil))
+    (pcase location
+      (`(line . ,line)
+       (vertico-buffer-frame--set-window-line window line))
+      (`(position . ,position)
+       (vertico-buffer-frame--set-window-position window position)))
+    (vertico-buffer-frame--show-frame
+     vertico-buffer-frame--preview-frame)))
+
 (defun vertico-buffer-frame--show-preview (target)
   "Show preview TARGET."
   (pcase target
     (`(file ,file)
-     (let ((old-preview-buffer vertico-buffer-frame--preview-buffer)
-           (window (vertico-buffer-frame--preview-window)))
-       (vertico-buffer-frame--set-preview-window-buffer
-        window
-        (vertico-buffer-frame--file-preview-buffer file)
-        old-preview-buffer)
-       (vertico-buffer-frame--show-frame
-        vertico-buffer-frame--preview-frame)))
+     (vertico-buffer-frame--show-preview-buffer
+      (lambda ()
+        (vertico-buffer-frame--file-preview-buffer file))))
     (`(file-line ,file ,line)
-     (let ((old-preview-buffer vertico-buffer-frame--preview-buffer)
-           (window (vertico-buffer-frame--preview-window)))
-       (vertico-buffer-frame--set-preview-window-buffer
-        window
-        (vertico-buffer-frame--file-preview-buffer file)
-        old-preview-buffer)
-       (vertico-buffer-frame--set-window-line window line)
-       (vertico-buffer-frame--show-frame
-        vertico-buffer-frame--preview-frame)))
+     (vertico-buffer-frame--show-preview-buffer
+      (lambda ()
+        (vertico-buffer-frame--file-preview-buffer file))
+      (cons 'line line)))
     (`(file-position ,file ,position)
-     (let ((old-preview-buffer vertico-buffer-frame--preview-buffer)
-           (window (vertico-buffer-frame--preview-window)))
-       (vertico-buffer-frame--set-preview-window-buffer
-        window
-        (vertico-buffer-frame--file-preview-buffer file)
-        old-preview-buffer)
-       (vertico-buffer-frame--set-window-position window position)
-       (vertico-buffer-frame--show-frame
-        vertico-buffer-frame--preview-frame)))
+     (vertico-buffer-frame--show-preview-buffer
+      (lambda ()
+        (vertico-buffer-frame--file-preview-buffer file))
+      (cons 'position position)))
     (`(buffer ,name)
-     (let ((old-preview-buffer vertico-buffer-frame--preview-buffer)
-           (window (vertico-buffer-frame--preview-window)))
-       (vertico-buffer-frame--set-preview-window-buffer
-        window
-        (get-buffer name)
-        old-preview-buffer)
-       (setq-local vertico-buffer-frame--preview-buffer nil)
-       (vertico-buffer-frame--show-frame
-        vertico-buffer-frame--preview-frame)))
+     (vertico-buffer-frame--show-preview-buffer
+      (lambda ()
+        (get-buffer name))
+      nil
+      t))
     (`(buffer-position ,buffer ,position)
-     (let ((old-preview-buffer vertico-buffer-frame--preview-buffer)
-           (window (vertico-buffer-frame--preview-window)))
-       (vertico-buffer-frame--set-preview-window-buffer
-        window
-        buffer
-        old-preview-buffer)
-       (setq-local vertico-buffer-frame--preview-buffer nil)
-       (vertico-buffer-frame--set-window-position window position)
-       (vertico-buffer-frame--show-frame
-        vertico-buffer-frame--preview-frame)))
+     (vertico-buffer-frame--show-preview-buffer
+      (lambda ()
+        buffer)
+      (cons 'position position)
+      t))
     (`(text ,name ,inserter)
-     (let ((old-preview-buffer vertico-buffer-frame--preview-buffer)
-           (window (vertico-buffer-frame--preview-window)))
-       (vertico-buffer-frame--set-preview-window-buffer
-        window
-        (vertico-buffer-frame--text-preview-buffer name inserter)
-        old-preview-buffer)
-       (vertico-buffer-frame--show-frame
-        vertico-buffer-frame--preview-frame)))))
+     (vertico-buffer-frame--show-preview-buffer
+      (lambda ()
+        (vertico-buffer-frame--text-preview-buffer name inserter))))))
 
 (defun vertico-buffer-frame--report-preview-error (error)
   "Hide the preview and optionally report ERROR."

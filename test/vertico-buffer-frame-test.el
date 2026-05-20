@@ -58,28 +58,23 @@
          (old-saved-action vertico-buffer-frame--saved-display-action)
          (old-saved-buffer-mode vertico-buffer-frame--saved-buffer-mode)
          (old-saved-state vertico-buffer-frame--saved-state)
-         (old-display-buffer-alist display-buffer-alist)
-         (old-warm-up-done vertico-buffer-frame--warm-up-done))
+         (old-display-buffer-alist display-buffer-alist))
      (unwind-protect
          (progn
            (when vertico-buffer-frame-mode
              (vertico-buffer-frame-mode -1))
-           (vertico-buffer-frame--cancel-warm-up)
            (setq vertico-buffer-frame--saved-display-action nil
                  vertico-buffer-frame--saved-buffer-mode nil
-                 vertico-buffer-frame--saved-state nil
-                 vertico-buffer-frame--warm-up-done nil)
+                 vertico-buffer-frame--saved-state nil)
            ,@body)
        (when vertico-buffer-frame-mode
          (vertico-buffer-frame-mode -1))
-       (vertico-buffer-frame--cancel-warm-up)
        (vertico-buffer-frame-cleanup)
        (setq vertico-buffer-display-action old-action
              vertico-buffer-frame--saved-display-action old-saved-action
              vertico-buffer-frame--saved-buffer-mode old-saved-buffer-mode
              vertico-buffer-frame--saved-state old-saved-state
-             display-buffer-alist old-display-buffer-alist
-             vertico-buffer-frame--warm-up-done old-warm-up-done)
+             display-buffer-alist old-display-buffer-alist)
        (if old-buffer-mode
            (vertico-buffer-mode 1)
          (vertico-buffer-mode -1))
@@ -98,33 +93,6 @@
    (should-not vertico-buffer-mode)
    (should (equal vertico-buffer-display-action
                   '(display-buffer-at-bottom)))))
-
-(ert-deftest vertico-buffer-frame-mode-schedules-warm-up ()
-  (vertico-buffer-frame-test--with-clean-state
-   (let ((vertico-buffer-frame-warm-up t)
-         scheduled canceled)
-     (cl-letf (((symbol-function #'run-with-idle-timer)
-                (lambda (delay repeat function &rest args)
-                  (setq scheduled (list delay repeat function args))
-                  'warm-up-timer))
-               ((symbol-function #'timerp)
-                (lambda (timer)
-                  (eq timer 'warm-up-timer)))
-               ((symbol-function #'cancel-timer)
-                (lambda (timer)
-                  (push timer canceled))))
-       (vertico-buffer-frame-mode 1)
-       (should (equal scheduled
-                      (list 0.2
-                            nil
-                            #'vertico-buffer-frame--warm-up
-                            nil)))
-       (should (memq #'vertico-buffer-frame--after-make-frame
-                     after-make-frame-functions))
-       (vertico-buffer-frame-mode -1)
-       (should (equal canceled '(warm-up-timer)))
-       (should-not (memq #'vertico-buffer-frame--after-make-frame
-                         after-make-frame-functions))))))
 
 (ert-deftest vertico-buffer-frame-mode-registers-embark-display-action ()
   (vertico-buffer-frame-test--with-clean-state
@@ -178,51 +146,6 @@
       (setq minibuffer-exit-hook old-hook)
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
-
-(ert-deftest vertico-buffer-frame-mode-does-not-warm-up-by-default ()
-  (vertico-buffer-frame-test--with-clean-state
-   (let (scheduled)
-     (cl-letf (((symbol-function #'run-with-idle-timer)
-                (lambda (&rest _args)
-                  (setq scheduled t)
-                  'warm-up-timer)))
-       (vertico-buffer-frame-mode 1)
-       (should-not scheduled)))))
-
-(ert-deftest vertico-buffer-frame-warm-up-creates-child-frame-once ()
-  (let (created deleted)
-    (cl-letf (((symbol-function #'display-graphic-p)
-               (lambda (_frame)
-                 t))
-              ((symbol-function #'selected-frame)
-               (lambda ()
-                 'parent))
-              ((symbol-function #'vertico-buffer-frame--display-buffer-in-child-frame)
-               (lambda (buffer parent name size role)
-                 (setq created (list buffer parent name size role))
-                 'warm-window))
-              ((symbol-function #'window-frame)
-               (lambda (window)
-                 (and (eq window 'warm-window) 'warm-frame)))
-              ((symbol-function #'vertico-buffer-frame--delete-frame)
-               (lambda (frame)
-                 (push frame deleted))))
-      (let ((vertico-buffer-frame-mode t)
-            (vertico-buffer-frame-warm-up t)
-            (vertico-buffer-frame--warm-up-done nil)
-            (vertico-buffer-frame--warm-up-timer 'warm-up-timer))
-        (vertico-buffer-frame--warm-up)
-        (should (equal (cdr created)
-                       '(parent "Vertico Warm Up" (1 . 1) warm-up)))
-        (should (buffer-live-p (car created)))
-        (should (equal deleted '(warm-frame)))
-        (should vertico-buffer-frame--warm-up-done)
-        (should-not vertico-buffer-frame--warm-up-timer)
-        (setq created nil
-              deleted nil)
-        (vertico-buffer-frame--warm-up)
-        (should-not created)
-        (should-not deleted)))))
 
 (ert-deftest vertico-buffer-frame-display-action-is-simple ()
   (should (equal (vertico-buffer-frame-display-action)
@@ -287,11 +210,11 @@
         (should (equal (alist-get 'height created-parameters) 10))
         (should (equal (alist-get 'title created-parameters) ""))
         (should (equal (alist-get 'child-frame-border-width created-parameters)
-                     vertico-buffer-frame-border-width))
+                       vertico-buffer-frame-border-width))
         (should (equal (alist-get 'background-color created-parameters)
-                     "background"))
+                       "background"))
         (should (equal (alist-get 'foreground-color created-parameters)
-                     "foreground"))
+                       "foreground"))
         (should (equal (alist-get 'alpha created-parameters) 100))
         (should (equal (alist-get 'alpha-background created-parameters) 100))
         (should (equal (alist-get 'vertico-buffer-frame-owner
@@ -488,8 +411,6 @@
                 ((symbol-function #'set-window-buffer)
                  (lambda (window buffer)
                    (push (list window buffer) buffers)))
-                ((symbol-function #'vertico-buffer-frame--prepare-window)
-                 (lambda (_window)))
                 ((symbol-function #'vertico-buffer-frame--install-cleanup)
                  (lambda ()))
                 ((symbol-function #'vertico-buffer-frame--place-candidate-frame)
@@ -503,6 +424,30 @@
         (should (equal buffers
                        '((window-1 buffer-b)
                          (window-1 buffer-a))))))))
+
+(ert-deftest vertico-buffer-frame-display-buffer-reports-fallback-error ()
+  (let ((vertico-buffer-frame-report-display-errors t)
+        (vertico-buffer-frame--last-display-error-message nil)
+        fallback
+        reported)
+    (cl-letf (((symbol-function #'vertico-buffer-frame--parent-frame)
+               (lambda ()
+                 (error "boom")))
+              ((symbol-function #'display-buffer-use-least-recent-window)
+               (lambda (buffer alist)
+                 (setq fallback (list buffer alist))
+                 'fallback-window))
+              ((symbol-function #'message)
+               (lambda (format-string &rest args)
+                 (setq reported (apply #'format format-string args)))))
+      (should (eq (vertico-buffer-frame--display-buffer
+                   'buffer
+                   '((inhibit-same-window . t)))
+                  'fallback-window))
+      (should (equal fallback
+                     '(buffer ((inhibit-same-window . t)))))
+      (should (equal reported
+                     "vertico-buffer-frame display error: boom")))))
 
 (ert-deftest vertico-buffer-frame-reveal-candidate-frame-after-render ()
   (with-temp-buffer
@@ -1017,8 +962,6 @@
                    (and (eq window 'new-window) 'new-frame)))
                 ((symbol-function #'set-window-parameter)
                  (lambda (&rest _args)))
-                ((symbol-function #'vertico-buffer-frame--prepare-window)
-                 (lambda (_window)))
                 ((symbol-function #'vertico-buffer-frame--place-preview-frame)
                  (lambda (frame parent)
                    (setq placed (list frame parent))))
