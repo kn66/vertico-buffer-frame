@@ -46,21 +46,6 @@
   "Idle delay in seconds before showing the preview frame."
   :type 'number)
 
-(defcustom vertico-buffer-frame-preview-during-input nil
-  "Non-nil means update previews after minibuffer input changes.
-When nil, commands that change the minibuffer input hide the current preview and
-defer the next preview until `vertico-buffer-frame-preview-input-delay'.
-Commands that leave the input unchanged, such as candidate navigation, still
-refresh the preview after `vertico-buffer-frame-preview-delay'."
-  :type 'boolean)
-
-(defcustom vertico-buffer-frame-preview-input-delay 0.2
-  "Idle delay in seconds before previewing after minibuffer input changes.
-This delay is used when `vertico-buffer-frame-preview-during-input' is nil.  A
-larger value avoids preview work while typing.  Candidate navigation uses
-`vertico-buffer-frame-preview-delay' instead."
-  :type 'number)
-
 (defcustom vertico-buffer-frame-preview-width nil
   "Maximum width of the preview child frame in characters.
 When nil, derive the width from the candidate frame."
@@ -173,7 +158,6 @@ candidate."
 (defvar-local vertico-buffer-frame--preview-timer nil)
 (defvar-local vertico-buffer-frame--preview-last-error-message nil)
 (defvar-local vertico-buffer-frame--preview-scheduled-state nil)
-(defvar-local vertico-buffer-frame--preview-last-input nil)
 (defvar-local vertico-buffer-frame--project-root-cache nil)
 (defvar-local vertico-buffer-frame--file-preview-cache nil)
 (defvar-local vertico-buffer-frame--imenu-cache nil)
@@ -212,6 +196,7 @@ candidate."
 (declare-function vertico-buffer-frame--parent-frame "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--frame-layout-state
                   "vertico-buffer-frame")
+(declare-function vertico-buffer-frame--hide-frame "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--pixels-to-chars "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--place-preview-frame "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--resize-frame-to-size
@@ -1449,24 +1434,24 @@ temporary preview buffer."
         (point)
         (vertico-buffer-frame--candidate)))
 
-(defun vertico-buffer-frame--preview-input-changed-p ()
-  "Return non-nil if the minibuffer input changed since the last check."
-  (let ((input (vertico-buffer-frame--minibuffer-input)))
-    (prog1 (and vertico-buffer-frame--preview-last-input
-                (not (equal input
-                            vertico-buffer-frame--preview-last-input)))
-      (setq-local vertico-buffer-frame--preview-last-input input))))
-
 (defun vertico-buffer-frame--hide-preview ()
   "Hide the preview child frame."
   (vertico-buffer-frame--cancel-preview-timer)
-  (vertico-buffer-frame--delete-frame
+  (vertico-buffer-frame--hide-frame
    vertico-buffer-frame--preview-frame)
-  (vertico-buffer-frame--kill-preview-buffer)
-  (setq-local vertico-buffer-frame--preview-frame nil
-              vertico-buffer-frame--preview-window nil
-              vertico-buffer-frame--preview-layout-state nil
-              vertico-buffer-frame--preview-scheduled-state nil))
+  (setq-local vertico-buffer-frame--preview-scheduled-state nil))
+
+(defun vertico-buffer-frame--refresh-preview ()
+  "Refresh the preview for the current minibuffer buffer."
+  (if (and vertico-buffer-frame-mode
+           vertico-buffer-frame-preview
+           (vertico-buffer-frame--completion-active-p))
+      (if-let* ((target (vertico-buffer-frame--preview-target)))
+          (progn
+            (vertico-buffer-frame--show-preview target)
+            (setq-local vertico-buffer-frame--preview-last-error-message nil))
+        (vertico-buffer-frame--hide-preview))
+    (vertico-buffer-frame--hide-preview)))
 
 (defun vertico-buffer-frame--show-preview-later (buffer)
   "Show preview for minibuffer BUFFER after the configured delay."
@@ -1475,24 +1460,14 @@ temporary preview buffer."
       (setq-local vertico-buffer-frame--preview-timer nil
                   vertico-buffer-frame--preview-scheduled-state nil)
       (condition-case-unless-debug error
-          (if (and vertico-buffer-frame-mode
-                   vertico-buffer-frame-preview
-                   (vertico-buffer-frame--completion-active-p))
-              (if-let* ((target (vertico-buffer-frame--preview-target)))
-                  (progn
-                    (vertico-buffer-frame--show-preview target)
-                    (setq-local
-                     vertico-buffer-frame--preview-last-error-message nil))
-                (vertico-buffer-frame--hide-preview))
-            (vertico-buffer-frame--hide-preview))
+          (while-no-input
+            (vertico-buffer-frame--refresh-preview))
         (error
          (vertico-buffer-frame--report-preview-error error))))))
 
-(defun vertico-buffer-frame--schedule-preview (&optional state delay)
+(defun vertico-buffer-frame--schedule-preview (&optional state)
   "Schedule preview display for the current minibuffer buffer.
-When STATE matches the pending timer state, keep the existing timer.
-When DELAY is non-nil, use it instead of
-`vertico-buffer-frame-preview-delay'."
+When STATE matches the pending timer state, keep the existing timer."
   (unless (and state
                (timerp vertico-buffer-frame--preview-timer)
                (equal state vertico-buffer-frame--preview-scheduled-state))
@@ -1500,29 +1475,19 @@ When DELAY is non-nil, use it instead of
     (setq-local vertico-buffer-frame--preview-scheduled-state state
                 vertico-buffer-frame--preview-timer
                 (run-with-idle-timer
-                 (max 0 (float (or delay
-                                   vertico-buffer-frame-preview-delay)))
+                 (max 0 (float vertico-buffer-frame-preview-delay))
                  nil
                  #'vertico-buffer-frame--show-preview-later
                  (current-buffer)))))
 
 (defun vertico-buffer-frame--preview-post-command ()
   "Schedule a delayed preview refresh after Vertico candidate refresh."
-  (let ((input-changed (vertico-buffer-frame--preview-input-changed-p)))
-    (cond
-     ((not (and vertico-buffer-frame-mode
-                vertico-buffer-frame-preview
-                (vertico-buffer-frame--completion-active-p)))
-      (vertico-buffer-frame--hide-preview))
-     ((and input-changed
-           (not vertico-buffer-frame-preview-during-input))
-      (vertico-buffer-frame--hide-preview)
+  (if (and vertico-buffer-frame-mode
+           vertico-buffer-frame-preview
+           (vertico-buffer-frame--completion-active-p))
       (vertico-buffer-frame--schedule-preview
-       (vertico-buffer-frame--preview-state)
-       vertico-buffer-frame-preview-input-delay))
-     (t
-      (vertico-buffer-frame--schedule-preview
-       (vertico-buffer-frame--preview-state))))))
+       (vertico-buffer-frame--preview-state))
+    (vertico-buffer-frame--hide-preview)))
 
 (provide 'vertico-buffer-frame-preview)
 ;;; vertico-buffer-frame-preview.el ends here
