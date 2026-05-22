@@ -48,6 +48,13 @@
         nil t))
 
 (defvar consult-imenu-config)
+(defvar Info-complete-menu-buffer)
+
+(declare-function calendar-generate-month "calendar")
+(declare-function calendar-make-alist "calendar")
+(declare-function bookmark-get-bookmark "bookmark")
+(declare-function bookmark-get-filename "bookmark")
+(declare-function bookmark-get-position "bookmark")
 
 (defmacro vertico-buffer-frame-test--with-clean-state (&rest body)
   "Run BODY with global mode state restored afterwards."
@@ -57,15 +64,21 @@
          (old-action vertico-buffer-display-action)
          (old-saved-action vertico-buffer-frame--saved-display-action)
          (old-saved-buffer-mode vertico-buffer-frame--saved-buffer-mode)
+         (old-saved-embark-present
+          vertico-buffer-frame--saved-embark-display-action-present)
          (old-saved-state vertico-buffer-frame--saved-state)
          (old-candidate-frame-pool vertico-buffer-frame--candidate-frame-pool)
-         (old-display-buffer-alist display-buffer-alist))
+         (old-display-buffer-alist display-buffer-alist)
+         (old-minibuffer-setup-hook minibuffer-setup-hook)
+         (old-minibuffer-exit-hook minibuffer-exit-hook))
      (unwind-protect
          (progn
            (when vertico-buffer-frame-mode
              (vertico-buffer-frame-mode -1))
            (setq vertico-buffer-frame--saved-display-action nil
                  vertico-buffer-frame--saved-buffer-mode nil
+                 vertico-buffer-frame--saved-embark-display-action-present
+                 nil
                  vertico-buffer-frame--saved-state nil)
            ,@body)
        (when vertico-buffer-frame-mode
@@ -74,9 +87,13 @@
        (setq vertico-buffer-display-action old-action
              vertico-buffer-frame--saved-display-action old-saved-action
              vertico-buffer-frame--saved-buffer-mode old-saved-buffer-mode
+             vertico-buffer-frame--saved-embark-display-action-present
+             old-saved-embark-present
              vertico-buffer-frame--saved-state old-saved-state
              vertico-buffer-frame--candidate-frame-pool old-candidate-frame-pool
-             display-buffer-alist old-display-buffer-alist)
+             display-buffer-alist old-display-buffer-alist
+             minibuffer-setup-hook old-minibuffer-setup-hook
+             minibuffer-exit-hook old-minibuffer-exit-hook)
        (if old-buffer-mode
            (vertico-buffer-mode 1)
          (vertico-buffer-mode -1))
@@ -96,6 +113,25 @@
    (should (equal vertico-buffer-display-action
                   '(display-buffer-at-bottom)))))
 
+(ert-deftest vertico-buffer-frame-mode-preserves-display-action-change ()
+  (vertico-buffer-frame-test--with-clean-state
+   (vertico-buffer-mode -1)
+   (setq vertico-buffer-display-action '(display-buffer-at-bottom))
+   (vertico-buffer-frame-mode 1)
+   (setq vertico-buffer-display-action '(display-buffer-pop-up-window))
+   (vertico-buffer-frame-mode -1)
+   (should (equal vertico-buffer-display-action
+                  '(display-buffer-pop-up-window)))))
+
+(ert-deftest vertico-buffer-frame-mode-preserves-buffer-mode-on-action-change ()
+  (vertico-buffer-frame-test--with-clean-state
+   (vertico-buffer-mode -1)
+   (setq vertico-buffer-display-action '(display-buffer-at-bottom))
+   (vertico-buffer-frame-mode 1)
+   (setq vertico-buffer-display-action '(display-buffer-pop-up-window))
+   (vertico-buffer-frame-mode -1)
+   (should vertico-buffer-mode)))
+
 (ert-deftest vertico-buffer-frame-mode-registers-embark-display-action ()
   (vertico-buffer-frame-test--with-clean-state
    (setq display-buffer-alist nil)
@@ -105,6 +141,55 @@
    (vertico-buffer-frame-mode -1)
    (should-not (member vertico-buffer-frame--embark-display-action
                        display-buffer-alist))))
+
+(ert-deftest vertico-buffer-frame-mode-preserves-user-embark-display-action ()
+  (vertico-buffer-frame-test--with-clean-state
+   (setq display-buffer-alist
+         (list vertico-buffer-frame--embark-display-action))
+   (vertico-buffer-frame-mode 1)
+   (should (equal display-buffer-alist
+                  (list vertico-buffer-frame--embark-display-action)))
+   (vertico-buffer-frame-mode -1)
+   (should (equal display-buffer-alist
+                  (list vertico-buffer-frame--embark-display-action)))))
+
+(ert-deftest vertico-buffer-frame-mode-preserves-user-embark-action-copy ()
+  (vertico-buffer-frame-test--with-clean-state
+   (setq display-buffer-alist nil)
+   (vertico-buffer-frame-mode 1)
+   (let ((user-action (copy-tree vertico-buffer-frame--embark-display-action)))
+     (push user-action display-buffer-alist)
+     (vertico-buffer-frame-mode -1)
+     (should (equal display-buffer-alist
+                    (list user-action)))
+     (should (not (eq (car display-buffer-alist)
+                      vertico-buffer-frame--embark-display-action))))))
+
+(ert-deftest vertico-buffer-frame-mode-tolerates-improper-display-buffer-alist ()
+  (vertico-buffer-frame-test--with-clean-state
+   (vertico-buffer-mode -1)
+   (setq display-buffer-alist '(user-rule . bad))
+   (vertico-buffer-frame-mode 1)
+   (should vertico-buffer-mode)
+   (should (equal display-buffer-alist '(user-rule . bad)))
+   (vertico-buffer-frame-mode -1)
+   (should-not vertico-buffer-mode)
+   (should (equal display-buffer-alist '(user-rule . bad)))))
+
+(ert-deftest vertico-buffer-frame-mode-tolerates-improper-minibuffer-setup-hook ()
+  (vertico-buffer-frame-test--with-clean-state
+   (vertico-buffer-mode -1)
+   (setq minibuffer-setup-hook '(ignore . bad))
+   (vertico-buffer-frame-mode 1)
+   (should (proper-list-p minibuffer-setup-hook))
+   (should (memq #'ignore minibuffer-setup-hook))
+   (should (memq #'vertico-buffer-frame--minibuffer-setup
+                 minibuffer-setup-hook))
+   (vertico-buffer-frame-mode -1)
+   (should (proper-list-p minibuffer-setup-hook))
+   (should (memq #'ignore minibuffer-setup-hook))
+   (should-not (memq #'vertico-buffer-frame--minibuffer-setup
+                     minibuffer-setup-hook))))
 
 (ert-deftest vertico-buffer-frame-embark-display-uses-minibuffer-origin-window ()
   (let ((old-hook minibuffer-exit-hook)
@@ -149,6 +234,124 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest vertico-buffer-frame-embark-display-skips-dead-origin-window ()
+  (let ((old-hook minibuffer-exit-hook)
+        display-called)
+    (unwind-protect
+        (progn
+          (setq minibuffer-exit-hook nil)
+          (cl-letf (((symbol-function #'minibufferp)
+                     (lambda (&optional _buffer)
+                       t))
+                    ((symbol-function #'minibuffer-selected-window)
+                     (lambda ()
+                       'dead-window))
+                    ((symbol-function #'window-live-p)
+                     (lambda (_window)
+                       nil))
+                    ((symbol-function #'display-buffer-same-window)
+                     (lambda (&rest _args)
+                       (setq display-called t))))
+            (should-not
+             (vertico-buffer-frame--display-minibuffer-selected-window
+              (current-buffer)
+              nil))
+            (should-not display-called)
+            (should-not minibuffer-exit-hook)))
+      (setq minibuffer-exit-hook old-hook))))
+
+(ert-deftest vertico-buffer-frame-embark-display-ignores-immediate-window-error ()
+  (let ((old-hook minibuffer-exit-hook)
+        (buffer (generate-new-buffer " *vbf-embark-error*"))
+        (origin (selected-window)))
+    (unwind-protect
+        (progn
+          (setq minibuffer-exit-hook nil)
+          (cl-letf (((symbol-function #'minibufferp)
+                     (lambda (&optional _buffer)
+                       t))
+                    ((symbol-function #'minibuffer-selected-window)
+                     (lambda ()
+                       origin))
+                    ((symbol-function #'display-buffer-same-window)
+                     (lambda (&rest _args)
+                       (error "stale origin"))))
+            (should-not
+             (vertico-buffer-frame--display-minibuffer-selected-window
+              buffer
+              nil))
+            (should-not minibuffer-exit-hook)))
+      (setq minibuffer-exit-hook old-hook)
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest vertico-buffer-frame-embark-display-ignores-deferred-window-error ()
+  (let ((old-hook minibuffer-exit-hook)
+        (buffer (generate-new-buffer " *vbf-embark-deferred-error*"))
+        (origin (selected-window))
+        popped)
+    (unwind-protect
+        (progn
+          (setq minibuffer-exit-hook nil)
+          (cl-letf (((symbol-function #'minibufferp)
+                     (lambda (&optional _buffer)
+                       t))
+                    ((symbol-function #'minibuffer-selected-window)
+                     (lambda ()
+                       origin))
+                    ((symbol-function #'display-buffer-same-window)
+                     (lambda (_buffer _alist)
+                       origin))
+                    ((symbol-function #'run-at-time)
+                     (lambda (_time _repeat function)
+                       (funcall function)
+                       'timer))
+                    ((symbol-function #'pop-to-buffer)
+                     (lambda (&rest _args)
+                       (setq popped t)
+                       (error "stale origin"))))
+            (should
+             (eq (vertico-buffer-frame--display-minibuffer-selected-window
+                  buffer
+                  nil)
+                 origin))
+            (run-hooks 'minibuffer-exit-hook)
+            (should popped)
+            (should-not minibuffer-exit-hook)))
+      (setq minibuffer-exit-hook old-hook)
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest vertico-buffer-frame-embark-display-ignores-deferred-timer-error ()
+  (let ((old-hook minibuffer-exit-hook)
+        (buffer (generate-new-buffer " *vbf-embark-timer-error*"))
+        (origin (selected-window)))
+    (unwind-protect
+        (progn
+          (setq minibuffer-exit-hook nil)
+          (cl-letf (((symbol-function #'minibufferp)
+                     (lambda (&optional _buffer)
+                       t))
+                    ((symbol-function #'minibuffer-selected-window)
+                     (lambda ()
+                       origin))
+                    ((symbol-function #'display-buffer-same-window)
+                     (lambda (_buffer _alist)
+                       origin))
+                    ((symbol-function #'run-at-time)
+                     (lambda (&rest _args)
+                       (error "timer failed"))))
+            (should
+             (eq (vertico-buffer-frame--display-minibuffer-selected-window
+                  buffer
+                  nil)
+                 origin))
+            (run-hooks 'minibuffer-exit-hook)
+            (should-not minibuffer-exit-hook)))
+      (setq minibuffer-exit-hook old-hook)
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest vertico-buffer-frame-display-action-is-simple ()
   (should (equal (vertico-buffer-frame-display-action)
                  '(vertico-buffer-frame--display-buffer))))
@@ -176,6 +379,168 @@
         (should (equal (alist-get 'bottom-divider-width parameters) 0))
         (should (equal (alist-get 'alpha parameters) 100))
         (should (equal (alist-get 'alpha-background parameters) 100))))))
+
+(ert-deftest vertico-buffer-frame-base-parameters-uses-extra-parameters ()
+  (let ((vertico-buffer-frame-parameters '((user-parameter . value))))
+    (cl-letf (((symbol-function #'vertico-buffer-frame--default-background)
+               (lambda (_frame)
+                 nil))
+              ((symbol-function #'vertico-buffer-frame--default-foreground)
+               (lambda (_frame)
+                 nil)))
+      (let ((parameters (vertico-buffer-frame--base-parameters
+                         'parent "name" 80 10)))
+        (should (eq (alist-get 'user-parameter parameters) 'value))))))
+
+(ert-deftest vertico-buffer-frame-base-parameters-sanitize-invalid-options ()
+  (let ((vertico-buffer-frame-border-width 'bad)
+        (vertico-buffer-frame-parameters 'bad))
+    (cl-letf (((symbol-function #'vertico-buffer-frame--default-background)
+               (lambda (_frame)
+                 nil))
+              ((symbol-function #'vertico-buffer-frame--default-foreground)
+               (lambda (_frame)
+                 nil)))
+      (let ((parameters (vertico-buffer-frame--base-parameters
+                         'parent "name" 80 10)))
+        (should (equal (alist-get 'child-frame-border-width parameters)
+                       vertico-buffer-frame--default-border-width))
+        (should (null (cdr (last parameters))))))))
+
+(ert-deftest vertico-buffer-frame-base-parameters-ignore-improper-extra-parameters ()
+  (let ((vertico-buffer-frame-parameters '((user-parameter . value) . bad)))
+    (cl-letf (((symbol-function #'vertico-buffer-frame--default-background)
+               (lambda (_frame)
+                 nil))
+              ((symbol-function #'vertico-buffer-frame--default-foreground)
+               (lambda (_frame)
+                 nil)))
+      (let ((parameters (vertico-buffer-frame--base-parameters
+                         'parent "name" 80 10)))
+        (should-not (alist-get 'user-parameter parameters))
+        (should (null (cdr (last parameters))))))))
+
+(ert-deftest vertico-buffer-frame-base-parameters-filter-malformed-extra-parameters ()
+  (dolist (case '(((bad) . nil)
+                  (((42 . value)) . nil)
+                  (((user-parameter . value) bad) . value)))
+    (let ((vertico-buffer-frame-parameters (car case))
+          (expected (cdr case)))
+      (cl-letf (((symbol-function #'vertico-buffer-frame--default-background)
+                 (lambda (_frame)
+                   nil))
+                ((symbol-function #'vertico-buffer-frame--default-foreground)
+                 (lambda (_frame)
+                   nil)))
+        (let ((parameters (vertico-buffer-frame--base-parameters
+                           'parent "name" 80 10)))
+          (should (eq (alist-get 'user-parameter parameters)
+                      expected))
+          (should (proper-list-p parameters)))))))
+
+(ert-deftest vertico-buffer-frame-border-width-allows-zero ()
+  (let ((vertico-buffer-frame-border-width 0))
+    (should (= (vertico-buffer-frame--border-width) 0))))
+
+(ert-deftest vertico-buffer-frame-reuse-key-uses-effective-parameters ()
+  (let ((vertico-buffer-frame-border-width 'bad)
+        (vertico-buffer-frame-parameters 'bad))
+    (should (equal (nth 3 (vertico-buffer-frame--frame-reuse-key
+                           'parent "name" 'candidate))
+                   vertico-buffer-frame--default-border-width))
+    (should-not (nth 4 (vertico-buffer-frame--frame-reuse-key
+                        'parent "name" 'candidate)))))
+
+(ert-deftest vertico-buffer-frame-default-colors-ignore-unspecified-values ()
+  (should-not
+   (vertico-buffer-frame--specified-color "unspecified-bg"))
+  (should-not
+   (vertico-buffer-frame--specified-color "unspecified-fg"))
+  (should (equal (vertico-buffer-frame--specified-color "#112233")
+                 "#112233"))
+  (cl-letf (((symbol-function #'face-background)
+             (lambda (&rest _args)
+               "unspecified-bg"))
+            ((symbol-function #'face-foreground)
+             (lambda (&rest _args)
+               "unspecified-fg")))
+    (should-not (vertico-buffer-frame--default-background 'frame))
+    (should-not (vertico-buffer-frame--default-foreground 'frame))))
+
+(ert-deftest vertico-buffer-frame-default-colors-ignore-face-errors ()
+  (cl-letf (((symbol-function #'face-background)
+             (lambda (&rest _args)
+               (error "background failed")))
+            ((symbol-function #'face-foreground)
+             (lambda (&rest _args)
+               (error "foreground failed"))))
+    (should-not (vertico-buffer-frame--default-background 'frame))
+    (should-not (vertico-buffer-frame--default-foreground 'frame))))
+
+(ert-deftest vertico-buffer-frame-apply-border-face-ignores-face-errors ()
+  (let (colors)
+    (cl-letf (((symbol-function #'vertico-buffer-frame--default-foreground)
+               (lambda (_frame)
+                 "foreground"))
+              ((symbol-function #'set-face-background)
+               (lambda (face color frame)
+                 (push (list face color frame) colors)
+                 (error "face failed"))))
+      (should (eq (vertico-buffer-frame--apply-border-face 'frame)
+                  'frame))
+      (should (equal colors
+                     '((child-frame-border "foreground" frame)))))))
+
+(ert-deftest vertico-buffer-frame-parent-frame-falls-back-on-window-error ()
+  (cl-letf (((symbol-function #'minibuffer-selected-window)
+             (lambda ()
+               (error "no minibuffer window")))
+            ((symbol-function #'selected-window)
+             (lambda ()
+               'selected-window))
+            ((symbol-function #'window-live-p)
+             (lambda (window)
+               (eq window 'selected-window)))
+            ((symbol-function #'window-frame)
+             (lambda (window)
+               (and (eq window 'selected-window) 'selected-frame))))
+    (should (eq (vertico-buffer-frame--parent-frame)
+                'selected-frame))))
+
+(ert-deftest vertico-buffer-frame-window-frame-ignores-stale-window ()
+  (cl-letf (((symbol-function #'window-live-p)
+             (lambda (window)
+               (eq window 'stale-window)))
+            ((symbol-function #'window-frame)
+             (lambda (_window)
+               (error "stale window"))))
+    (should-not (vertico-buffer-frame--window-frame 'stale-window))))
+
+(ert-deftest vertico-buffer-frame-parent-frame-falls-back-on-window-frame-error ()
+  (cl-letf (((symbol-function #'minibuffer-selected-window)
+             (lambda ()
+               'stale-window))
+            ((symbol-function #'window-live-p)
+             (lambda (window)
+               (eq window 'stale-window)))
+            ((symbol-function #'window-frame)
+             (lambda (_window)
+               (error "stale window")))
+            ((symbol-function #'selected-frame)
+             (lambda ()
+               'fallback-frame)))
+    (should (eq (vertico-buffer-frame--parent-frame)
+                'fallback-frame))))
+
+(ert-deftest vertico-buffer-frame-live-checks-ignore-errors ()
+  (cl-letf (((symbol-function #'frame-live-p)
+             (lambda (_frame)
+               (error "stale frame")))
+            ((symbol-function #'window-live-p)
+             (lambda (_window)
+               (error "stale window"))))
+    (should-not (vertico-buffer-frame--frame-live-p 'stale-frame))
+    (should-not (vertico-buffer-frame--window-live-p 'stale-window))))
 
 (ert-deftest vertico-buffer-frame-display-child-frame-uses-opaque-default-colors ()
   (let (display-alist face-background prepared)
@@ -231,6 +596,333 @@
       (should (equal face-background
                      '(child-frame-border "foreground" frame))))))
 
+(ert-deftest vertico-buffer-frame-display-child-frame-sanitizes-extra-parameters ()
+  (let ((vertico-buffer-frame-parameters '((user-parameter . value)))
+        display-alist)
+    (cl-letf (((symbol-function #'display-buffer-in-child-frame)
+               (lambda (_buffer alist)
+                 (setq display-alist alist)
+                 'window))
+              ((symbol-function #'window-live-p)
+               (lambda (window)
+                 (eq window 'window)))
+              ((symbol-function #'window-frame)
+               (lambda (window)
+                 (and (eq window 'window) 'frame)))
+              ((symbol-function #'vertico-buffer-frame--default-background)
+               (lambda (_frame)
+                 nil))
+              ((symbol-function #'vertico-buffer-frame--default-foreground)
+               (lambda (_frame)
+                 nil))
+              ((symbol-function #'vertico-buffer-frame--prepare-window)
+               (lambda (_window)))
+              ((symbol-function #'vertico-buffer-frame--apply-border-face)
+               (lambda (_frame))))
+      (vertico-buffer-frame--display-buffer-in-child-frame
+       'buffer 'parent "name" '(80 . 10) 'candidate)
+      (let ((created-parameters
+             (alist-get 'child-frame-parameters display-alist)))
+        (should (proper-list-p created-parameters))
+        (should (equal (alist-get 'user-parameter created-parameters)
+                       'value))
+        (should (= (cl-count 'user-parameter created-parameters
+                             :key #'car)
+                   1))))))
+
+(ert-deftest vertico-buffer-frame-display-child-frame-ignores-improper-extra-parameters ()
+  (let ((vertico-buffer-frame-parameters '((user-parameter . value) . bad))
+        display-alist)
+    (cl-letf (((symbol-function #'display-buffer-in-child-frame)
+               (lambda (_buffer alist)
+                 (setq display-alist alist)
+                 'window))
+              ((symbol-function #'window-live-p)
+               (lambda (window)
+                 (eq window 'window)))
+              ((symbol-function #'window-frame)
+               (lambda (window)
+                 (and (eq window 'window) 'frame)))
+              ((symbol-function #'vertico-buffer-frame--default-background)
+               (lambda (_frame)
+                 nil))
+              ((symbol-function #'vertico-buffer-frame--default-foreground)
+               (lambda (_frame)
+                 nil))
+              ((symbol-function #'vertico-buffer-frame--prepare-window)
+               (lambda (_window)))
+              ((symbol-function #'vertico-buffer-frame--apply-border-face)
+               (lambda (_frame))))
+      (vertico-buffer-frame--display-buffer-in-child-frame
+       'buffer 'parent "name" '(80 . 10) 'candidate)
+      (let ((created-parameters
+             (alist-get 'child-frame-parameters display-alist)))
+        (should (proper-list-p created-parameters))
+        (should-not (alist-get 'user-parameter created-parameters))))))
+
+(ert-deftest vertico-buffer-frame-display-child-frame-filters-malformed-extra-parameters ()
+  (let ((vertico-buffer-frame-parameters '((user-parameter . value) bad))
+        display-alist)
+    (cl-letf (((symbol-function #'display-buffer-in-child-frame)
+               (lambda (_buffer alist)
+                 (setq display-alist alist)
+                 'window))
+              ((symbol-function #'window-live-p)
+               (lambda (window)
+                 (eq window 'window)))
+              ((symbol-function #'window-frame)
+               (lambda (window)
+                 (and (eq window 'window) 'frame)))
+              ((symbol-function #'vertico-buffer-frame--default-background)
+               (lambda (_frame)
+                 nil))
+              ((symbol-function #'vertico-buffer-frame--default-foreground)
+               (lambda (_frame)
+                 nil))
+              ((symbol-function #'vertico-buffer-frame--prepare-window)
+               (lambda (_window)))
+              ((symbol-function #'vertico-buffer-frame--apply-border-face)
+               (lambda (_frame))))
+      (vertico-buffer-frame--display-buffer-in-child-frame
+       'buffer 'parent "name" '(80 . 10) 'candidate)
+      (let ((created-parameters
+             (alist-get 'child-frame-parameters display-alist)))
+        (should (proper-list-p created-parameters))
+        (should (equal (alist-get 'user-parameter created-parameters)
+                       'value))
+        (should (= (cl-count 'user-parameter created-parameters
+                             :key #'car)
+                   1))))))
+
+(ert-deftest vertico-buffer-frame-display-child-frame-tags-owner-buffer ()
+  (with-temp-buffer
+    (let (owner)
+      (cl-letf (((symbol-function #'display-buffer-in-child-frame)
+                 (lambda (&rest _args)
+                   'window))
+                ((symbol-function #'window-live-p)
+                 (lambda (window)
+                   (eq window 'window)))
+                ((symbol-function #'window-frame)
+                 (lambda (window)
+                   (and (eq window 'window) 'frame)))
+                ((symbol-function #'frame-live-p)
+                 (lambda (frame)
+                   (eq frame 'frame)))
+                ((symbol-function #'set-frame-parameter)
+                 (lambda (frame parameter value)
+                   (setq owner (list frame parameter value))))
+                ((symbol-function #'vertico-buffer-frame--default-background)
+                 (lambda (_frame)
+                   nil))
+                ((symbol-function #'vertico-buffer-frame--default-foreground)
+                 (lambda (_frame)
+                   nil))
+                ((symbol-function #'vertico-buffer-frame--prepare-window)
+                 (lambda (_window)))
+                ((symbol-function #'vertico-buffer-frame--apply-border-face)
+                 (lambda (_frame))))
+        (should (eq (vertico-buffer-frame--display-buffer-in-child-frame
+                     'buffer 'parent "name" '(80 . 10))
+                    'window))
+        (should (equal owner
+                       (list 'frame
+                             vertico-buffer-frame--owner-buffer-parameter
+                             (current-buffer))))))))
+
+(ert-deftest vertico-buffer-frame-display-child-frame-deletes-on-setup-error ()
+  (let (deleted)
+    (cl-letf (((symbol-function #'display-buffer-in-child-frame)
+               (lambda (&rest _args)
+                 'window))
+              ((symbol-function #'window-live-p)
+               (lambda (window)
+                 (eq window 'window)))
+              ((symbol-function #'window-frame)
+               (lambda (window)
+                 (and (eq window 'window) 'frame)))
+              ((symbol-function #'frame-live-p)
+               (lambda (frame)
+                 (eq frame 'frame)))
+              ((symbol-function #'delete-frame)
+               (lambda (frame force)
+                 (push (list frame force) deleted)))
+              ((symbol-function #'vertico-buffer-frame--default-background)
+               (lambda (_frame)
+                 nil))
+              ((symbol-function #'vertico-buffer-frame--default-foreground)
+               (lambda (_frame)
+                 nil))
+              ((symbol-function #'vertico-buffer-frame--prepare-window)
+               (lambda (_window)
+                 (error "setup failed"))))
+      (should-error
+        (vertico-buffer-frame--display-buffer-in-child-frame
+         'buffer 'parent "name" '(80 . 10)))
+      (should (equal deleted '((frame t)))))))
+
+(ert-deftest vertico-buffer-frame-display-child-frame-errors-on-stale-window-frame ()
+  (let (prepared)
+    (cl-letf (((symbol-function #'display-buffer-in-child-frame)
+               (lambda (&rest _args)
+                 'window))
+              ((symbol-function #'window-live-p)
+               (lambda (window)
+                 (eq window 'window)))
+              ((symbol-function #'window-frame)
+               (lambda (_window)
+                 (error "stale window")))
+              ((symbol-function #'vertico-buffer-frame--default-background)
+               (lambda (_frame)
+                 nil))
+              ((symbol-function #'vertico-buffer-frame--default-foreground)
+               (lambda (_frame)
+                 nil))
+              ((symbol-function #'vertico-buffer-frame--prepare-window)
+               (lambda (_window)
+                 (setq prepared t))))
+      (should-error
+       (vertico-buffer-frame--display-buffer-in-child-frame
+        'buffer 'parent "name" '(80 . 10)))
+      (should-not prepared))))
+
+(ert-deftest vertico-buffer-frame-display-buffer-falls-back-on-nil-window ()
+  (let (fallback)
+    (cl-letf (((symbol-function #'vertico-buffer-frame--parent-frame)
+               (lambda ()
+                 'parent))
+              ((symbol-function #'vertico-buffer-frame--candidate-frame-size)
+               (lambda (_parent)
+                 '(80 . 10)))
+              ((symbol-function #'vertico-buffer-frame--default-background)
+               (lambda (_frame)
+                 nil))
+              ((symbol-function #'vertico-buffer-frame--default-foreground)
+               (lambda (_frame)
+                 nil))
+              ((symbol-function #'display-buffer-in-child-frame)
+               (lambda (&rest _args)
+                 nil))
+              ((symbol-function #'display-buffer-use-least-recent-window)
+               (lambda (buffer alist)
+                 (setq fallback (list buffer alist))
+                 'fallback-window)))
+      (should (eq (vertico-buffer-frame--display-buffer
+                   'buffer
+                   '((inhibit-same-window . t)))
+                  'fallback-window))
+      (should (equal fallback
+                     '(buffer ((inhibit-same-window . t))))))))
+
+(ert-deftest vertico-buffer-frame-display-buffer-falls-back-on-stale-window-frame ()
+  (let (fallback prepared)
+    (cl-letf (((symbol-function #'vertico-buffer-frame--parent-frame)
+               (lambda ()
+                 'parent))
+              ((symbol-function #'vertico-buffer-frame--candidate-frame-size)
+               (lambda (_parent)
+                 '(80 . 10)))
+              ((symbol-function
+                #'vertico-buffer-frame--display-buffer-in-child-frame)
+               (lambda (&rest _args)
+                 'candidate-window))
+              ((symbol-function #'window-live-p)
+               (lambda (window)
+                 (eq window 'candidate-window)))
+              ((symbol-function #'window-frame)
+               (lambda (_window)
+                 (error "stale window")))
+              ((symbol-function #'set-window-buffer)
+               (lambda (&rest _args)
+                 (setq prepared t)))
+              ((symbol-function #'display-buffer-use-least-recent-window)
+               (lambda (buffer alist)
+                 (setq fallback (list buffer alist))
+                 'fallback-window)))
+      (should (eq (vertico-buffer-frame--display-buffer
+                   'buffer
+                   '((inhibit-same-window . t)))
+                  'fallback-window))
+      (should (equal fallback
+                     '(buffer ((inhibit-same-window . t)))))
+      (should-not prepared))))
+
+(ert-deftest vertico-buffer-frame-display-buffer-cleans-up-on-late-error ()
+  (with-temp-buffer
+    (let (deleted
+          fallback
+          killed
+          orphan-cleanup
+          timer-cancelled)
+      (setq-local vertico-buffer-frame--file-preview-cache '(key . buffer)
+                  vertico-buffer-frame--imenu-cache '(key . entries)
+                  vertico-buffer-frame--consult-imenu-entry-table-cache
+                  '(key . table))
+      (cl-letf (((symbol-function #'vertico-buffer-frame--parent-frame)
+                 (lambda ()
+                   'parent))
+                ((symbol-function #'vertico-buffer-frame--candidate-frame-size)
+                 (lambda (_parent)
+                   '(80 . 10)))
+                ((symbol-function
+                  #'vertico-buffer-frame--display-buffer-in-child-frame)
+                 (lambda (&rest _args)
+                   'candidate-window))
+                ((symbol-function #'window-live-p)
+                 (lambda (window)
+                   (eq window 'candidate-window)))
+                ((symbol-function #'frame-live-p)
+                 (lambda (frame)
+                   (eq frame 'candidate-frame)))
+                ((symbol-function #'window-frame)
+                 (lambda (window)
+                   (and (eq window 'candidate-window)
+                        'candidate-frame)))
+                ((symbol-function #'window-buffer)
+                 (lambda (window)
+                   (and (eq window 'candidate-window)
+                        'old-buffer)))
+                ((symbol-function #'set-window-dedicated-p)
+                 (lambda (&rest _args)))
+                ((symbol-function #'set-window-buffer)
+                 (lambda (&rest _args)
+                   (error "late display failure")))
+                ((symbol-function #'vertico-buffer-frame--delete-frame)
+                 (lambda (frame)
+                   (when frame
+                     (push frame deleted))))
+                ((symbol-function
+                  #'vertico-buffer-frame--delete-frames-owned-by-buffer)
+                 (lambda (owner)
+                   (setq orphan-cleanup owner)))
+                ((symbol-function #'vertico-buffer-frame--cancel-preview-timer)
+                 (lambda ()
+                   (setq timer-cancelled t)))
+                ((symbol-function #'vertico-buffer-frame--kill-preview-buffer)
+                 (lambda (&optional _keep-buffer)
+                   (setq killed t)))
+                ((symbol-function #'display-buffer-use-least-recent-window)
+                 (lambda (buffer alist)
+                   (setq fallback (list buffer alist))
+                   'fallback-window)))
+        (should (eq (vertico-buffer-frame--display-buffer
+                     'target-buffer
+                     '((inhibit-same-window . t)))
+                    'fallback-window))
+        (should (equal fallback
+                       '(target-buffer ((inhibit-same-window . t)))))
+        (should (equal deleted '(candidate-frame)))
+        (should (eq orphan-cleanup (current-buffer)))
+        (should killed)
+        (should timer-cancelled)
+        (should-not vertico-buffer-frame--candidate-frame)
+        (should-not vertico-buffer-frame--candidate-window)
+        (should-not vertico-buffer-frame--candidate-needs-update)
+        (should-not vertico-buffer-frame--file-preview-cache)
+        (should-not vertico-buffer-frame--imenu-cache)
+        (should-not
+         vertico-buffer-frame--consult-imenu-entry-table-cache)))))
+
 (ert-deftest vertico-buffer-frame-prepare-window-strips-window-chrome ()
   (let (parameters margins fringes scroll-bars)
     (cl-letf (((symbol-function #'set-window-parameter)
@@ -258,6 +950,15 @@
 
 (ert-deftest vertico-buffer-frame-golden-size-uses-parent-frame-pixels ()
   (let ((vertico-buffer-frame-golden-ratio-scale 1.0))
+    (cl-letf (((symbol-function #'frame-pixel-width)
+               (lambda (_frame) 1920))
+              ((symbol-function #'frame-pixel-height)
+               (lambda (_frame) 1080)))
+      (should (equal (vertico-buffer-frame--golden-pixel-size 'parent)
+                     '(1080 . 667))))))
+
+(ert-deftest vertico-buffer-frame-golden-size-tolerates-invalid-scale ()
+  (let ((vertico-buffer-frame-golden-ratio-scale "bad"))
     (cl-letf (((symbol-function #'frame-pixel-width)
                (lambda (_frame) 1920))
               ((symbol-function #'frame-pixel-height)
@@ -313,6 +1014,19 @@
       (should (equal (vertico-buffer-frame--preview-frame-size 'candidate)
                      '(42 . 11))))))
 
+(ert-deftest vertico-buffer-frame-resize-frame-to-size-ignores-frame-errors ()
+  (let (resized)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (frame)
+                 (eq frame 'frame)))
+              ((symbol-function #'set-frame-size)
+               (lambda (frame width height)
+                 (setq resized (list frame width height))
+                 (error "resize failed"))))
+      (should-not
+       (vertico-buffer-frame--resize-frame-to-size 'frame '(42 . 11)))
+      (should (equal resized '(frame 42 11))))))
+
 (ert-deftest vertico-buffer-frame-place-candidate-frame-centers-both-axes ()
   (let (position)
     (cl-letf (((symbol-function #'frame-pixel-width)
@@ -330,6 +1044,19 @@
                  (setq position (list frame left top)))))
       (vertico-buffer-frame--place-candidate-frame 'child 'parent)
       (should (equal position '(child 400 300))))))
+
+(ert-deftest vertico-buffer-frame-place-candidate-frame-ignores-errors ()
+  (cl-letf (((symbol-function #'frame-pixel-width)
+             (lambda (_frame)
+               100))
+            ((symbol-function #'frame-pixel-height)
+             (lambda (_frame)
+               50))
+            ((symbol-function #'set-frame-position)
+             (lambda (&rest _args)
+               (error "place failed"))))
+    (should-not
+     (vertico-buffer-frame--place-candidate-frame 'child 'parent))))
 
 (ert-deftest vertico-buffer-frame-place-preview-frame-overlays-bottom-right ()
   (let (position)
@@ -349,6 +1076,19 @@
       (vertico-buffer-frame--place-preview-frame 'preview 'parent)
       (should (equal position '(preview 632 392))))))
 
+(ert-deftest vertico-buffer-frame-place-preview-frame-ignores-errors ()
+  (cl-letf (((symbol-function #'frame-pixel-width)
+             (lambda (_frame)
+               100))
+            ((symbol-function #'frame-pixel-height)
+             (lambda (_frame)
+               50))
+            ((symbol-function #'set-frame-position)
+             (lambda (&rest _args)
+               (error "place failed"))))
+    (should-not
+     (vertico-buffer-frame--place-preview-frame 'preview 'parent))))
+
 (ert-deftest vertico-buffer-frame-minibuffer-setup-strips-buffer-chrome ()
   (with-temp-buffer
     (setq-local mode-line-format '("mode")
@@ -363,6 +1103,111 @@
                     pre-redisplay-functions))
       (should (memq #'vertico-buffer-frame--preview-post-command
                     post-command-hook)))))
+
+(ert-deftest vertico-buffer-frame-minibuffer-setup-tolerates-improper-local-hooks ()
+  (with-temp-buffer
+    (setq-local pre-redisplay-functions '(ignore . bad)
+                post-command-hook '(ignore . bad))
+    (let ((vertico-buffer-frame-mode t))
+      (vertico-buffer-frame--minibuffer-setup)
+      (should (proper-list-p pre-redisplay-functions))
+      (should (proper-list-p post-command-hook))
+      (should (memq #'ignore pre-redisplay-functions))
+      (should (memq #'ignore post-command-hook))
+      (should (memq #'vertico-buffer-frame--pre-redisplay
+                    pre-redisplay-functions))
+      (should (memq #'vertico-buffer-frame--preview-post-command
+                    post-command-hook)))))
+
+(ert-deftest vertico-buffer-frame-minibuffer-setup-installs-cleanup ()
+  (let ((buffer (generate-new-buffer " *vbf-setup-cleanup*"))
+        (old-hook minibuffer-exit-hook))
+    (unwind-protect
+        (progn
+          (setq minibuffer-exit-hook nil
+                vertico-buffer-frame--minibuffers nil)
+          (cl-letf (((symbol-function #'minibufferp)
+                     (lambda (&optional _buffer)
+                       t)))
+            (with-current-buffer buffer
+              (let ((vertico-buffer-frame-mode t))
+                (vertico-buffer-frame--minibuffer-setup)
+                (should vertico-buffer-frame--cleanup-function)
+                (should (memq buffer vertico-buffer-frame--minibuffers))
+                (should (memq vertico-buffer-frame--cleanup-function
+                              minibuffer-exit-hook))
+                (run-hooks 'minibuffer-exit-hook)
+                (should-not vertico-buffer-frame--cleanup-function)
+                (should-not (memq buffer
+                                  vertico-buffer-frame--minibuffers))))))
+      (setq minibuffer-exit-hook old-hook
+            vertico-buffer-frame--minibuffers nil)
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest vertico-buffer-frame-install-cleanup-tolerates-improper-exit-hook ()
+  (let ((buffer (generate-new-buffer " *vbf-setup-improper-cleanup*"))
+        (old-hook minibuffer-exit-hook))
+    (unwind-protect
+        (progn
+          (setq minibuffer-exit-hook '(ignore . bad)
+                vertico-buffer-frame--minibuffers nil)
+          (with-current-buffer buffer
+            (vertico-buffer-frame--install-cleanup)
+            (should (proper-list-p minibuffer-exit-hook))
+            (should (memq #'ignore minibuffer-exit-hook))
+            (should (memq vertico-buffer-frame--cleanup-function
+                          minibuffer-exit-hook))))
+      (setq minibuffer-exit-hook old-hook
+            vertico-buffer-frame--minibuffers nil)
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest vertico-buffer-frame-remove-hook-tolerates-improper-hook-list ()
+  (let ((old-hook minibuffer-setup-hook))
+    (unwind-protect
+        (progn
+          (setq minibuffer-setup-hook
+                '(vertico-buffer-frame--minibuffer-setup . bad))
+          (vertico-buffer-frame--remove-hook
+           'minibuffer-setup-hook
+           #'vertico-buffer-frame--minibuffer-setup)
+          (should (proper-list-p minibuffer-setup-hook))
+          (should-not minibuffer-setup-hook))
+      (setq minibuffer-setup-hook old-hook))))
+
+(ert-deftest vertico-buffer-frame-proper-list-prefix-handles-malformed-lists ()
+  (let ((hook (list #'ignore #'identity)))
+    (should (equal (vertico-buffer-frame--proper-list-prefix
+                    '(ignore identity . bad))
+                   '(ignore identity)))
+    (setcdr (cdr hook) hook)
+    (should (equal (vertico-buffer-frame--proper-list-prefix hook)
+                   (list #'ignore #'identity)))))
+
+(ert-deftest vertico-buffer-frame-add-hook-tolerates-circular-hook-list ()
+  (let ((old-hook minibuffer-setup-hook)
+        (hook (list #'ignore)))
+    (unwind-protect
+        (progn
+          (setcdr hook hook)
+          (setq minibuffer-setup-hook hook)
+          (vertico-buffer-frame--add-hook
+           'minibuffer-setup-hook
+           #'vertico-buffer-frame--minibuffer-setup)
+          (should (proper-list-p minibuffer-setup-hook))
+          (should (memq #'ignore minibuffer-setup-hook))
+          (should (memq #'vertico-buffer-frame--minibuffer-setup
+                        minibuffer-setup-hook)))
+      (setq minibuffer-setup-hook old-hook))))
+
+(ert-deftest vertico-buffer-frame-add-hook-tolerates-unbound-local-hook ()
+  (with-temp-buffer
+    (let ((hook 'vertico-buffer-frame-test-unbound-hook))
+      (when (boundp hook)
+        (makunbound hook))
+      (vertico-buffer-frame--add-hook hook #'ignore nil t)
+      (should (equal (symbol-value hook) '(ignore t))))))
 
 (ert-deftest vertico-buffer-frame-display-buffer-reuses-live-window ()
   (with-temp-buffer
@@ -627,6 +1472,118 @@
         (should-not forced)
         (should refreshed)))))
 
+(ert-deftest vertico-buffer-frame-show-frame-ignores-frame-errors ()
+  (let (shown)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (frame)
+                 (eq frame 'frame)))
+              ((symbol-function #'frame-visible-p)
+               (lambda (_frame)
+                 nil))
+              ((symbol-function #'make-frame-visible)
+               (lambda (frame)
+                 (push frame shown)
+                 (error "show failed"))))
+      (should-not (vertico-buffer-frame--show-frame 'frame))
+      (should (equal shown '(frame))))))
+
+(ert-deftest vertico-buffer-frame-hide-frame-ignores-frame-errors ()
+  (let (hidden)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (frame)
+                 (eq frame 'frame)))
+              ((symbol-function #'frame-visible-p)
+               (lambda (_frame)
+                 t))
+              ((symbol-function #'make-frame-invisible)
+               (lambda (frame)
+                 (push frame hidden)
+                 (error "hide failed"))))
+      (should-not (vertico-buffer-frame--hide-frame 'frame))
+      (should (equal hidden '(frame))))))
+
+(ert-deftest vertico-buffer-frame-sync-layout-keeps-state-on-place-error ()
+  (with-temp-buffer
+    (setq-local vertico-buffer-frame--candidate-frame 'frame
+                vertico-buffer-frame--candidate-window 'window
+                vertico-buffer-frame--candidate-layout-state nil)
+    (let (resized placed)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame)
+                   (eq frame 'frame)))
+                ((symbol-function #'window-live-p)
+                 (lambda (window)
+                   (eq window 'window)))
+                ((symbol-function #'frame-pixel-width)
+                 (lambda (frame)
+                   (pcase frame
+                     ('parent 100)
+                     ('frame 80))))
+                ((symbol-function #'frame-pixel-height)
+                 (lambda (frame)
+                   (pcase frame
+                     ('parent 50)
+                     ('frame 20))))
+                ((symbol-function #'vertico-buffer-frame--resize-frame-to-size)
+                 (lambda (frame size)
+                   (push (list frame size) resized)
+                   t))
+                ((symbol-function #'vertico-buffer-frame--place-candidate-frame)
+                 (lambda (frame parent)
+                   (push (list frame parent) placed)
+                   nil)))
+        (should-not
+         (vertico-buffer-frame--sync-candidate-frame-layout 'parent 'size))
+        (should (equal resized '((frame size))))
+        (should (equal placed '((frame parent))))
+        (should-not vertico-buffer-frame--candidate-layout-state)))))
+
+(ert-deftest vertico-buffer-frame-reveal-keeps-update-flag-on-force-error ()
+  (with-temp-buffer
+    (setq-local vertico-buffer-frame--candidate-frame 'frame
+                vertico-buffer-frame--candidate-window 'window
+                vertico-buffer-frame--candidate-layout-state
+                (list 'parent 100 50 80 20 'size)
+                vertico-buffer-frame--candidate-needs-update t)
+    (let (forced)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame)
+                   (eq frame 'frame)))
+                ((symbol-function #'window-live-p)
+                 (lambda (window)
+                   (eq window 'window)))
+                ((symbol-function #'frame-visible-p)
+                 (lambda (_frame)
+                   t))
+                ((symbol-function #'window-buffer)
+                 (lambda (window)
+                   (and (eq window 'window) 'buffer)))
+                ((symbol-function #'force-window-update)
+                 (lambda (buffer)
+                   (push buffer forced)
+                   (error "force failed")))
+                ((symbol-function #'frame-pixel-width)
+                 (lambda (frame)
+                   (pcase frame
+                     ('parent 100)
+                     ('frame 80))))
+                ((symbol-function #'frame-pixel-height)
+                 (lambda (frame)
+                   (pcase frame
+                     ('parent 50)
+                     ('frame 20))))
+                ((symbol-function #'vertico-buffer-frame--parent-frame)
+                 (lambda ()
+                   'parent))
+                ((symbol-function #'vertico-buffer-frame--candidate-frame-size)
+                 (lambda (_parent)
+                   'size))
+                ((symbol-function #'vertico-buffer-frame--refresh-preview-frame)
+                 (lambda ())))
+        (should-not (vertico-buffer-frame--reveal-candidate-frame))
+        (should (equal forced '(buffer)))
+        (should vertico-buffer-frame--candidate-needs-update)))))
+
 (ert-deftest vertico-buffer-frame-delete-owned-frames-deletes-package-frames ()
   (let (deleted)
     (cl-letf (((symbol-function #'frame-live-p)
@@ -649,7 +1606,302 @@
 
 (ert-deftest vertico-buffer-frame-stash-candidate-frame-hides-and-pools ()
   (let ((vertico-buffer-frame--candidate-frame-pool nil)
-        hidden)
+        (visible t)
+        hidden
+        owner)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (frame)
+                 (eq frame 'candidate-frame)))
+              ((symbol-function #'frame-visible-p)
+               (lambda (_frame)
+                 visible))
+              ((symbol-function #'make-frame-invisible)
+               (lambda (frame)
+                 (setq visible nil)
+                 (push frame hidden)))
+              ((symbol-function #'frame-root-window)
+               (lambda (frame)
+                 (and (eq frame 'candidate-frame)
+                      'candidate-window)))
+              ((symbol-function #'window-live-p)
+               (lambda (window)
+                 (eq window 'candidate-window)))
+              ((symbol-function #'set-frame-parameter)
+               (lambda (frame parameter value)
+                 (setq owner (list frame parameter value))))
+              ((symbol-function #'frame-parameter)
+               (lambda (frame parameter)
+                 (and (eq frame 'candidate-frame)
+                      (pcase parameter
+                        ('vertico-buffer-frame-role 'candidate)
+                        ('vertico-buffer-frame-reuse-key 'reuse-key))))))
+      (vertico-buffer-frame--stash-candidate-frame 'candidate-frame)
+      (should (equal hidden '(candidate-frame)))
+      (should (equal owner
+                     (list 'candidate-frame
+                           vertico-buffer-frame--owner-buffer-parameter
+                           nil)))
+      (should (equal vertico-buffer-frame--candidate-frame-pool
+                     '(candidate-frame))))))
+
+(ert-deftest vertico-buffer-frame-candidate-frame-pool-limit-deletes-oldest ()
+  (let ((vertico-buffer-frame--candidate-frame-pool
+         '(new-frame middle-frame old-frame))
+        (vertico-buffer-frame-candidate-frame-pool-limit 2)
+        deleted)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (frame)
+                 (memq frame '(new-frame middle-frame old-frame))))
+              ((symbol-function #'delete-frame)
+               (lambda (frame force)
+                 (push (list frame force) deleted))))
+      (vertico-buffer-frame--trim-candidate-frame-pool)
+      (should (equal vertico-buffer-frame--candidate-frame-pool
+                     '(new-frame middle-frame)))
+      (should (equal deleted '((old-frame t)))))))
+
+(ert-deftest vertico-buffer-frame-candidate-frame-pool-limit-zero-disables-pool ()
+  (let ((vertico-buffer-frame--candidate-frame-pool '(new-frame old-frame))
+        (vertico-buffer-frame-candidate-frame-pool-limit 0)
+        deleted)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (frame)
+                 (memq frame '(new-frame old-frame))))
+              ((symbol-function #'delete-frame)
+               (lambda (frame force)
+                 (push (list frame force) deleted))))
+      (vertico-buffer-frame--trim-candidate-frame-pool)
+      (should-not vertico-buffer-frame--candidate-frame-pool)
+      (should (equal deleted
+                     '((old-frame t)
+                       (new-frame t)))))))
+
+(ert-deftest vertico-buffer-frame-candidate-frame-pool-limit-invalid-uses-default ()
+  (let* ((frames '(frame-1 frame-2 frame-3 frame-4 frame-5
+                           frame-6 frame-7 frame-8 frame-9))
+         (vertico-buffer-frame--candidate-frame-pool frames)
+         (vertico-buffer-frame-candidate-frame-pool-limit 'bad)
+         deleted)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (frame)
+                 (memq frame '(frame-1 frame-2 frame-3 frame-4 frame-5
+                                       frame-6 frame-7 frame-8 frame-9))))
+              ((symbol-function #'delete-frame)
+               (lambda (frame force)
+                 (push (list frame force) deleted))))
+      (vertico-buffer-frame--trim-candidate-frame-pool)
+      (should (equal vertico-buffer-frame--candidate-frame-pool
+                     '(frame-1 frame-2 frame-3 frame-4
+                       frame-5 frame-6 frame-7 frame-8)))
+      (should (equal deleted '((frame-9 t)))))))
+
+(ert-deftest vertico-buffer-frame-candidate-frame-pool-clears-improper-list ()
+  (let ((vertico-buffer-frame--candidate-frame-pool '(frame . bad)))
+    (should-not (vertico-buffer-frame--candidate-frame-pool))
+    (should-not vertico-buffer-frame--candidate-frame-pool)))
+
+(ert-deftest vertico-buffer-frame-delete-frame-ignores-delete-errors ()
+  (let ((vertico-buffer-frame--candidate-frame-pool '(bad-frame other-frame))
+        deleted)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (frame)
+                 (eq frame 'bad-frame)))
+              ((symbol-function #'delete-frame)
+               (lambda (frame force)
+                 (push (list frame force) deleted)
+                 (error "cannot delete frame"))))
+      (should-not (vertico-buffer-frame--delete-frame 'bad-frame))
+      (should (equal deleted '((bad-frame t))))
+      (should (equal vertico-buffer-frame--candidate-frame-pool
+                     '(other-frame))))))
+
+(ert-deftest vertico-buffer-frame-delete-frame-clears-improper-pool ()
+  (let ((vertico-buffer-frame--candidate-frame-pool '(bad-frame . bad)))
+    (should-not (vertico-buffer-frame--delete-frame 'bad-frame))
+    (should-not vertico-buffer-frame--candidate-frame-pool)))
+
+(ert-deftest vertico-buffer-frame-delete-owned-frames-uses-owner-buffer ()
+  (let (deleted)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (frame)
+                 (memq frame '(candidate-frame preview-frame))))
+              ((symbol-function #'frame-list)
+               (lambda ()
+                 '(candidate-frame other-frame preview-frame)))
+              ((symbol-function #'frame-parameter)
+               (lambda (frame parameter)
+                 (and (eq parameter
+                          vertico-buffer-frame--owner-buffer-parameter)
+                      (memq frame '(candidate-frame preview-frame)))))
+              ((symbol-function #'delete-frame)
+               (lambda (frame force)
+                 (push (list frame force) deleted))))
+      (vertico-buffer-frame--delete-owned-frames)
+      (should (equal deleted
+                     '((preview-frame t)
+                       (candidate-frame t)))))))
+
+(ert-deftest vertico-buffer-frame-delete-owned-frames-ignores-stale-frames ()
+  (let (deleted)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (frame)
+                 (memq frame '(stale-frame owned-frame))))
+              ((symbol-function #'frame-list)
+               (lambda ()
+                 '(stale-frame owned-frame)))
+              ((symbol-function #'frame-parameter)
+               (lambda (frame parameter)
+                 (cond
+                  ((eq frame 'stale-frame)
+                   (error "stale frame"))
+                  ((and (eq frame 'owned-frame)
+                        (eq parameter
+                            vertico-buffer-frame--owner-buffer-parameter))
+                   'owner))))
+              ((symbol-function #'delete-frame)
+               (lambda (frame force)
+                 (push (list frame force) deleted))))
+      (vertico-buffer-frame--delete-owned-frames)
+      (should (equal deleted '((owned-frame t)))))))
+
+(ert-deftest vertico-buffer-frame-reusable-candidate-ignores-stale-parameters ()
+  (cl-letf (((symbol-function #'frame-live-p)
+             (lambda (frame)
+               (eq frame 'stale-frame)))
+            ((symbol-function #'frame-parameter)
+             (lambda (&rest _args)
+               (error "stale frame"))))
+    (should-not
+     (vertico-buffer-frame--candidate-frame-reusable-p
+      'stale-frame 'reuse-key))))
+
+(ert-deftest vertico-buffer-frame-candidate-window-live-p-ignores-live-check-errors ()
+  (with-temp-buffer
+    (setq-local vertico-buffer-frame--candidate-frame 'stale-frame
+                vertico-buffer-frame--candidate-window 'stale-window)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (_frame)
+                 (error "stale frame")))
+              ((symbol-function #'window-live-p)
+               (lambda (_window)
+                 (error "stale window"))))
+      (should-not (vertico-buffer-frame--candidate-window-live-p)))))
+
+(ert-deftest vertico-buffer-frame-pooled-candidate-skips-stale-root-window ()
+  (cl-letf (((symbol-function #'frame-live-p)
+             (lambda (frame)
+               (eq frame 'candidate-frame)))
+            ((symbol-function #'frame-visible-p)
+             (lambda (_frame)
+               nil))
+            ((symbol-function #'frame-parameter)
+             (lambda (frame parameter)
+               (and (eq frame 'candidate-frame)
+                    (pcase parameter
+                      ('vertico-buffer-frame-role 'candidate)
+                      ('vertico-buffer-frame-reuse-key 'reuse-key)))))
+            ((symbol-function #'frame-root-window)
+             (lambda (_frame)
+               (error "stale root window"))))
+    (should-not
+     (vertico-buffer-frame--pooled-candidate-frame-p 'candidate-frame))))
+
+(ert-deftest vertico-buffer-frame-pooled-candidate-skips-window-live-errors ()
+  (cl-letf (((symbol-function #'frame-live-p)
+             (lambda (frame)
+               (eq frame 'candidate-frame)))
+            ((symbol-function #'frame-visible-p)
+             (lambda (_frame)
+               nil))
+            ((symbol-function #'frame-parameter)
+             (lambda (frame parameter)
+               (and (eq frame 'candidate-frame)
+                    (pcase parameter
+                      ('vertico-buffer-frame-role 'candidate)
+                      ('vertico-buffer-frame-reuse-key 'reuse-key)))))
+            ((symbol-function #'frame-root-window)
+             (lambda (_frame)
+               'stale-window))
+            ((symbol-function #'window-live-p)
+             (lambda (_window)
+               (error "stale window"))))
+    (should-not
+     (vertico-buffer-frame--pooled-candidate-frame-p 'candidate-frame))))
+
+(ert-deftest vertico-buffer-frame-stash-candidate-frame-deletes-wrong-role ()
+  (let ((vertico-buffer-frame--candidate-frame-pool nil)
+        (visible t)
+        hidden
+        deleted
+        owner)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (frame)
+                 (eq frame 'candidate-frame)))
+              ((symbol-function #'frame-visible-p)
+               (lambda (_frame)
+                 visible))
+              ((symbol-function #'make-frame-invisible)
+               (lambda (frame)
+                 (setq visible nil)
+                 (push frame hidden)))
+              ((symbol-function #'frame-root-window)
+               (lambda (frame)
+                 (and (eq frame 'candidate-frame)
+                      'candidate-window)))
+              ((symbol-function #'window-live-p)
+               (lambda (window)
+                 (eq window 'candidate-window)))
+              ((symbol-function #'delete-frame)
+               (lambda (frame force)
+                 (push (list frame force) deleted)))
+              ((symbol-function #'set-frame-parameter)
+               (lambda (frame parameter value)
+                 (setq owner (list frame parameter value))))
+              ((symbol-function #'frame-parameter)
+               (lambda (frame parameter)
+                 (and (eq frame 'candidate-frame)
+                      (pcase parameter
+                        ('vertico-buffer-frame-role 'preview)
+                        ('vertico-buffer-frame-reuse-key 'reuse-key))))))
+      (vertico-buffer-frame--stash-candidate-frame 'candidate-frame)
+      (should (equal hidden '(candidate-frame)))
+      (should (equal deleted '((candidate-frame t))))
+      (should-not owner)
+      (should-not vertico-buffer-frame--candidate-frame-pool))))
+
+(ert-deftest vertico-buffer-frame-stash-candidate-frame-deletes-on-window-live-error ()
+  (let ((vertico-buffer-frame--candidate-frame-pool nil)
+        deleted)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (frame)
+                 (eq frame 'candidate-frame)))
+              ((symbol-function #'frame-visible-p)
+               (lambda (_frame)
+                 nil))
+              ((symbol-function #'frame-root-window)
+               (lambda (_frame)
+                 'stale-window))
+              ((symbol-function #'window-live-p)
+               (lambda (_window)
+                 (error "stale window")))
+              ((symbol-function #'delete-frame)
+               (lambda (frame force)
+                 (push (list frame force) deleted)))
+              ((symbol-function #'frame-parameter)
+               (lambda (frame parameter)
+                 (and (eq frame 'candidate-frame)
+                      (pcase parameter
+                        ('vertico-buffer-frame-role 'candidate)
+                        ('vertico-buffer-frame-reuse-key 'reuse-key))))))
+      (vertico-buffer-frame--stash-candidate-frame 'candidate-frame)
+      (should (equal deleted '((candidate-frame t))))
+      (should-not vertico-buffer-frame--candidate-frame-pool))))
+
+(ert-deftest vertico-buffer-frame-stash-candidate-frame-deletes-visible-frame ()
+  (let ((vertico-buffer-frame--candidate-frame-pool nil)
+        hidden
+        deleted
+        owner)
     (cl-letf (((symbol-function #'frame-live-p)
                (lambda (frame)
                  (eq frame 'candidate-frame)))
@@ -659,6 +1911,12 @@
               ((symbol-function #'make-frame-invisible)
                (lambda (frame)
                  (push frame hidden)))
+              ((symbol-function #'delete-frame)
+               (lambda (frame force)
+                 (push (list frame force) deleted)))
+              ((symbol-function #'set-frame-parameter)
+               (lambda (frame parameter value)
+                 (setq owner (list frame parameter value))))
               ((symbol-function #'frame-parameter)
                (lambda (frame parameter)
                  (and (eq frame 'candidate-frame)
@@ -666,15 +1924,20 @@
                       'reuse-key))))
       (vertico-buffer-frame--stash-candidate-frame 'candidate-frame)
       (should (equal hidden '(candidate-frame)))
-      (should (equal vertico-buffer-frame--candidate-frame-pool
-                     '(candidate-frame))))))
+      (should (equal deleted '((candidate-frame t))))
+      (should-not owner)
+      (should-not vertico-buffer-frame--candidate-frame-pool))))
 
 (ert-deftest vertico-buffer-frame-reusable-candidate-window-matches-key ()
   (let ((vertico-buffer-frame--candidate-frame-pool
-         '(dead-frame other-frame candidate-frame)))
+         '(dead-frame other-frame candidate-frame))
+        deleted)
     (cl-letf (((symbol-function #'frame-live-p)
                (lambda (frame)
                  (not (eq frame 'dead-frame))))
+              ((symbol-function #'delete-frame)
+               (lambda (frame force)
+                 (push (list frame force) deleted)))
               ((symbol-function #'frame-parameter)
                (lambda (frame parameter)
                  (pcase (list frame parameter)
@@ -682,10 +1945,14 @@
                     'candidate)
                    (`(candidate-frame vertico-buffer-frame-reuse-key)
                     'reuse-key)
+                   (`(candidate-frame ,vertico-buffer-frame--owner-buffer-parameter)
+                    nil)
                    (`(other-frame vertico-buffer-frame-role)
                     'candidate)
                    (`(other-frame vertico-buffer-frame-reuse-key)
-                    'other-key))))
+                    'other-key)
+                   (`(other-frame ,vertico-buffer-frame--owner-buffer-parameter)
+                    nil))))
               ((symbol-function #'frame-root-window)
                (lambda (frame)
                  (pcase frame
@@ -693,19 +1960,64 @@
                    ('other-frame 'other-window))))
               ((symbol-function #'window-live-p)
                (lambda (window)
-                 (memq window '(candidate-window other-window)))))
+                 (memq window '(candidate-window other-window))))
+              ((symbol-function #'frame-visible-p)
+               (lambda (_frame)
+                 nil)))
       (should (eq (vertico-buffer-frame--reusable-candidate-window
                    'reuse-key)
                   'candidate-window))
       (should (equal vertico-buffer-frame--candidate-frame-pool
-                     '(other-frame))))))
+                     '(other-frame)))
+      (should-not deleted))))
+
+(ert-deftest vertico-buffer-frame-reusable-candidate-window-skips-visible-or-owned ()
+  (let ((vertico-buffer-frame--candidate-frame-pool
+         '(visible-frame owned-frame candidate-frame))
+        deleted)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (frame)
+                 (memq frame '(visible-frame owned-frame candidate-frame))))
+              ((symbol-function #'delete-frame)
+               (lambda (frame force)
+                 (push (list frame force) deleted)))
+              ((symbol-function #'frame-parameter)
+               (lambda (frame parameter)
+                 (pcase parameter
+                   ('vertico-buffer-frame-role 'candidate)
+                   ('vertico-buffer-frame-reuse-key 'reuse-key)
+                   ((guard (eq parameter
+                               vertico-buffer-frame--owner-buffer-parameter))
+                    (and (eq frame 'owned-frame)
+                         'owner)))))
+              ((symbol-function #'frame-root-window)
+               (lambda (frame)
+                 (and (memq frame '(visible-frame owned-frame candidate-frame))
+                      'candidate-window)))
+              ((symbol-function #'window-live-p)
+               (lambda (window)
+                 (eq window 'candidate-window)))
+              ((symbol-function #'frame-visible-p)
+               (lambda (frame)
+                 (eq frame 'visible-frame))))
+      (should (eq (vertico-buffer-frame--reusable-candidate-window
+                   'reuse-key)
+                  'candidate-window))
+      (should-not vertico-buffer-frame--candidate-frame-pool)
+      (should (equal deleted
+                     '((owned-frame t)
+                       (visible-frame t)))))))
 
 (ert-deftest vertico-buffer-frame-reusable-candidate-window-skips-dead-window ()
   (let ((vertico-buffer-frame--candidate-frame-pool
-         '(bad-frame candidate-frame)))
+         '(bad-frame candidate-frame))
+        deleted)
     (cl-letf (((symbol-function #'frame-live-p)
                (lambda (frame)
                  (memq frame '(bad-frame candidate-frame))))
+              ((symbol-function #'delete-frame)
+               (lambda (frame force)
+                 (push (list frame force) deleted)))
               ((symbol-function #'frame-parameter)
                (lambda (frame parameter)
                  (and (memq frame '(bad-frame candidate-frame))
@@ -719,12 +2031,49 @@
                    ('candidate-frame 'candidate-window))))
               ((symbol-function #'window-live-p)
                (lambda (window)
-                 (eq window 'candidate-window))))
+                 (eq window 'candidate-window)))
+              ((symbol-function #'frame-visible-p)
+               (lambda (_frame)
+                 nil)))
       (should (eq (vertico-buffer-frame--reusable-candidate-window
                    'reuse-key)
                   'candidate-window))
       (should (equal vertico-buffer-frame--candidate-frame-pool
-                     nil)))))
+                     nil))
+      (should (equal deleted '((bad-frame t)))))))
+
+(ert-deftest vertico-buffer-frame-reusable-candidate-window-handles-root-race ()
+  (let ((vertico-buffer-frame--candidate-frame-pool '(candidate-frame))
+        (root-calls 0)
+        deleted)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (frame)
+                 (eq frame 'candidate-frame)))
+              ((symbol-function #'delete-frame)
+               (lambda (frame force)
+                 (push (list frame force) deleted)))
+              ((symbol-function #'frame-parameter)
+               (lambda (frame parameter)
+                 (and (eq frame 'candidate-frame)
+                      (pcase parameter
+                        ('vertico-buffer-frame-role 'candidate)
+                        ('vertico-buffer-frame-reuse-key 'reuse-key)))))
+              ((symbol-function #'frame-root-window)
+               (lambda (_frame)
+                 (cl-incf root-calls)
+                 (if (< root-calls 3)
+                     'candidate-window
+                   (error "root window changed"))))
+              ((symbol-function #'window-live-p)
+               (lambda (window)
+                 (eq window 'candidate-window)))
+              ((symbol-function #'frame-visible-p)
+               (lambda (_frame)
+                 nil)))
+      (should-not
+       (vertico-buffer-frame--reusable-candidate-window 'reuse-key))
+      (should-not vertico-buffer-frame--candidate-frame-pool)
+      (should (equal deleted '((candidate-frame t)))))))
 
 (ert-deftest vertico-buffer-frame-reuses-stashed-candidate-on-next-minibuffer ()
   "Regression: a frame hidden at minibuffer exit is shown on the next session."
@@ -944,6 +2293,9 @@
           (cl-letf (((symbol-function #'active-minibuffer-window)
                      (lambda ()
                        'active-minibuffer-window))
+                    ((symbol-function #'window-live-p)
+                     (lambda (window)
+                       (eq window 'active-minibuffer-window)))
                     ((symbol-function #'window-buffer)
                      (lambda (window)
                        (and (eq window 'active-minibuffer-window)
@@ -979,6 +2331,21 @@
                 (kill-buffer buffer)))
             (list outer inner)))))
 
+(ert-deftest vertico-buffer-frame-active-minibuffer-buffer-skips-dead-window ()
+  (let (window-buffer-called)
+    (cl-letf (((symbol-function #'active-minibuffer-window)
+               (lambda ()
+                 'dead-window))
+              ((symbol-function #'window-live-p)
+               (lambda (_window)
+                 nil))
+              ((symbol-function #'window-buffer)
+               (lambda (_window)
+                 (setq window-buffer-called t)
+                 'buffer)))
+      (should-not (vertico-buffer-frame--active-minibuffer-buffer))
+      (should-not window-buffer-called))))
+
 (ert-deftest vertico-buffer-frame-cleanup-hook-drops-dead-minibuffer ()
   "Dead minibuffer buffers must not remain in the tracked buffer list."
   (let ((buffer (generate-new-buffer " *vbf-dead-minibuffer*"))
@@ -996,6 +2363,82 @@
           (should-not (memq buffer vertico-buffer-frame--minibuffers)))
       (setq minibuffer-exit-hook old-hook
             vertico-buffer-frame--minibuffers nil)
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest vertico-buffer-frame-cleanup-dead-minibuffer-deletes-owned-frames ()
+  "Dead minibuffer buffers can still have live child frames to reclaim."
+  (let ((buffer (generate-new-buffer " *vbf-dead-owner*"))
+        (preview-buffer (generate-new-buffer " *vbf-dead-owner-preview*"))
+        (vertico-buffer-frame--candidate-frame-pool
+         '(owned-candidate other-frame))
+        deleted)
+    (unwind-protect
+        (progn
+          (setq vertico-buffer-frame--minibuffers (list buffer))
+          (with-current-buffer preview-buffer
+            (setq-local vertico-buffer-frame--temporary-preview-buffer t
+                        vertico-buffer-frame--preview-owner-buffer buffer)
+            (set-buffer-modified-p nil))
+          (kill-buffer buffer)
+          (cl-letf (((symbol-function #'frame-list)
+                     (lambda ()
+                       '(owned-candidate owned-preview other-frame)))
+                    ((symbol-function #'frame-parameter)
+                     (lambda (frame parameter)
+                       (and (memq frame '(owned-candidate owned-preview))
+                            (eq parameter
+                                vertico-buffer-frame--owner-buffer-parameter)
+                            buffer)))
+                    ((symbol-function #'frame-live-p)
+                     (lambda (frame)
+                       (memq frame '(owned-candidate owned-preview
+                                     other-frame))))
+                    ((symbol-function #'delete-frame)
+                     (lambda (frame force)
+                       (push (list frame force) deleted))))
+            (vertico-buffer-frame--cleanup-minibuffer buffer)
+            (should (equal deleted
+                           '((owned-preview t)
+                             (owned-candidate t))))
+            (should-not (memq 'owned-candidate
+                              vertico-buffer-frame--candidate-frame-pool))
+            (should (equal vertico-buffer-frame--candidate-frame-pool
+                           '(other-frame)))
+            (should-not (buffer-live-p preview-buffer))
+            (should-not (memq buffer vertico-buffer-frame--minibuffers))))
+      (setq vertico-buffer-frame--minibuffers nil)
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer))
+      (when (buffer-live-p preview-buffer)
+        (kill-buffer preview-buffer)))))
+
+(ert-deftest vertico-buffer-frame-cleanup-live-minibuffer-deletes-owned-orphans ()
+  "Live minibuffer cleanup also reclaims owner-tagged orphan frames."
+  (let ((buffer (generate-new-buffer " *vbf-live-owner*"))
+        deleted)
+    (unwind-protect
+        (progn
+          (setq vertico-buffer-frame--minibuffers (list buffer))
+          (cl-letf (((symbol-function #'frame-list)
+                     (lambda ()
+                       '(stray-frame other-frame)))
+                    ((symbol-function #'frame-parameter)
+                     (lambda (frame parameter)
+                       (and (eq frame 'stray-frame)
+                            (eq parameter
+                                vertico-buffer-frame--owner-buffer-parameter)
+                            buffer)))
+                    ((symbol-function #'frame-live-p)
+                     (lambda (frame)
+                       (eq frame 'stray-frame)))
+                    ((symbol-function #'delete-frame)
+                     (lambda (frame force)
+                       (push (list frame force) deleted))))
+            (vertico-buffer-frame--cleanup-minibuffer buffer)
+            (should (equal deleted '((stray-frame t))))
+            (should-not (memq buffer vertico-buffer-frame--minibuffers))))
+      (setq vertico-buffer-frame--minibuffers nil)
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
@@ -1036,6 +2479,26 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest vertico-buffer-frame-cleanup-clears-improper-minibuffer-list ()
+  (let ((vertico-buffer-frame--minibuffers '(minibuffer . bad))
+        cleaned-pool)
+    (cl-letf (((symbol-function #'vertico-buffer-frame--delete-candidate-frame-pool)
+               (lambda ()
+                 (setq cleaned-pool t))))
+      (vertico-buffer-frame-cleanup)
+      (should cleaned-pool)
+      (should-not vertico-buffer-frame--minibuffers))))
+
+(ert-deftest vertico-buffer-frame-cleanup-minibuffer-clears-improper-minibuffer-list ()
+  (let ((buffer (generate-new-buffer " *vbf-direct-cleanup*"))
+        (vertico-buffer-frame--minibuffers '(minibuffer . bad)))
+    (unwind-protect
+        (progn
+          (vertico-buffer-frame--cleanup-minibuffer buffer)
+          (should-not vertico-buffer-frame--minibuffers))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest vertico-buffer-frame-file-preview-buffer-contains-full-file ()
   (let ((file (make-temp-file "vbf-preview")))
     (unwind-protect
@@ -1045,6 +2508,7 @@
             (insert "abcdef"))
           (let ((preview (vertico-buffer-frame--file-preview-buffer file)))
             (with-current-buffer preview
+              (should-not (buffer-modified-p))
               (should (equal (buffer-string) "abcdef"))))
           (when (buffer-live-p vertico-buffer-frame--preview-buffer)
             (kill-buffer vertico-buffer-frame--preview-buffer)))
@@ -1068,6 +2532,33 @@
             (kill-buffer vertico-buffer-frame--preview-buffer)))
       (delete-file file))))
 
+(ert-deftest vertico-buffer-frame-preview-limits-preserve-nil-and-sanitize-invalid ()
+  (let ((vertico-buffer-frame-preview-max-file-size nil)
+        (vertico-buffer-frame-preview-directory-entry-limit nil)
+        (vertico-buffer-frame-preview-search-buffer-limit nil))
+    (should-not (vertico-buffer-frame--preview-max-file-size))
+    (should-not (vertico-buffer-frame--preview-directory-entry-limit))
+    (should-not (vertico-buffer-frame--preview-search-buffer-limit))
+    (should-not (vertico-buffer-frame--file-preview-limit 100)))
+  (let ((vertico-buffer-frame-preview-max-file-size -1)
+        (vertico-buffer-frame-preview-directory-entry-limit -2)
+        (vertico-buffer-frame-preview-search-buffer-limit -3))
+    (should (= (vertico-buffer-frame--preview-max-file-size) 0))
+    (should (= (vertico-buffer-frame--preview-directory-entry-limit) 0))
+    (should (= (vertico-buffer-frame--preview-search-buffer-limit) 0))
+    (should (= (vertico-buffer-frame--file-preview-limit 100) 0)))
+  (let ((vertico-buffer-frame-preview-max-file-size 'bad)
+        (vertico-buffer-frame-preview-directory-entry-limit 'bad)
+        (vertico-buffer-frame-preview-search-buffer-limit 'bad))
+    (should (= (vertico-buffer-frame--preview-max-file-size)
+               vertico-buffer-frame--default-preview-max-file-size))
+    (should (= (vertico-buffer-frame--preview-directory-entry-limit)
+               vertico-buffer-frame--default-preview-directory-entry-limit))
+    (should (= (vertico-buffer-frame--preview-search-buffer-limit)
+               vertico-buffer-frame--default-preview-search-buffer-limit))
+    (should (= (vertico-buffer-frame--file-preview-limit 2000000)
+               vertico-buffer-frame--default-preview-max-file-size))))
+
 (ert-deftest vertico-buffer-frame-file-preview-buffer-skips-binary-file ()
   (let ((file (make-temp-file "vbf-preview")))
     (unwind-protect
@@ -1084,6 +2575,67 @@
             (kill-buffer vertico-buffer-frame--preview-buffer)))
       (delete-file file))))
 
+(ert-deftest vertico-buffer-frame-file-preview-buffer-reports-read-error ()
+  (let ((file (make-temp-file "vbf-preview"))
+        preview)
+    (unwind-protect
+        (with-temp-buffer
+          (setq-local vertico-buffer-frame--preview-buffer nil)
+          (with-temp-file file
+            (insert "abcdef"))
+          (cl-letf (((symbol-function #'insert-file-contents)
+                     (lambda (&rest _args)
+                       (error "read failed"))))
+            (setq preview (vertico-buffer-frame--file-preview-buffer file))
+            (with-current-buffer preview
+              (should (string-match-p "File preview failed"
+                                      (buffer-string)))
+              (should (string-match-p "read failed"
+                                      (buffer-string))))))
+      (when (buffer-live-p preview)
+        (kill-buffer preview))
+      (delete-file file))))
+
+(ert-deftest vertico-buffer-frame-file-preview-buffer-does-not-cache-read-error ()
+  (let ((file (make-temp-file "vbf-preview"))
+        first
+        second
+        fail
+        (original-insert-file-contents
+         (symbol-function #'insert-file-contents)))
+    (unwind-protect
+        (with-temp-buffer
+          (with-temp-file file
+            (insert "abcdef"))
+          (cl-letf (((symbol-function #'insert-file-contents)
+                     (lambda (&rest args)
+                       (if fail
+                           (error "read failed")
+                         (apply original-insert-file-contents args)))))
+            (setq fail t
+                  first (vertico-buffer-frame--file-preview-buffer file))
+            (with-current-buffer first
+              (should (string-match-p "File preview failed"
+                                      (buffer-string))))
+            (should-not vertico-buffer-frame--file-preview-cache)
+            (setq fail nil
+                  second (vertico-buffer-frame--file-preview-buffer file))
+            (should (buffer-live-p second))
+            (with-current-buffer second
+              (should (equal (buffer-string) "abcdef")))
+            (should vertico-buffer-frame--file-preview-cache)))
+      (dolist (buffer (list first second))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer)))
+      (delete-file file))))
+
+(ert-deftest vertico-buffer-frame-file-preview-cache-key-ignores-attribute-errors ()
+  (cl-letf (((symbol-function #'file-attributes)
+             (lambda (&rest _args)
+               'bad-attributes)))
+    (should-not
+     (vertico-buffer-frame--file-preview-cache-key "/tmp/vbf-bad"))))
+
 (ert-deftest vertico-buffer-frame-file-preview-buffer-reuses-unchanged-file ()
   (let ((file (make-temp-file "vbf-preview")))
     (unwind-protect
@@ -1097,6 +2649,38 @@
                     (when (buffer-live-p buffer)
                       (kill-buffer buffer)))
                   (list first second))))
+      (delete-file file))))
+
+(ert-deftest vertico-buffer-frame-file-preview-buffer-skips-foreign-cache ()
+  (let ((file (make-temp-file "vbf-preview"))
+        (foreign-owner (generate-new-buffer " *vbf-foreign-owner*"))
+        (foreign (generate-new-buffer " *vbf-foreign-file-preview*"))
+        new)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((owner (current-buffer)))
+            (with-temp-file file
+              (insert "abcdef"))
+            (with-current-buffer foreign
+              (setq-local vertico-buffer-frame--temporary-preview-buffer t
+                          vertico-buffer-frame--preview-owner-buffer
+                          foreign-owner)
+              (set-buffer-modified-p nil))
+            (setq-local vertico-buffer-frame--file-preview-cache
+                        (cons (vertico-buffer-frame--file-preview-cache-key
+                               file)
+                              foreign))
+            (setq new (vertico-buffer-frame--file-preview-buffer file))
+            (should-not (eq new foreign))
+            (should (buffer-live-p foreign))
+            (should (eq vertico-buffer-frame--preview-buffer new))
+            (with-current-buffer new
+              (should (eq vertico-buffer-frame--preview-owner-buffer
+                          owner))
+              (should (equal (buffer-string) "abcdef")))))
+      (dolist (buffer (list foreign-owner foreign new))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer)))
       (delete-file file))))
 
 (ert-deftest vertico-buffer-frame-file-preview-buffer-refreshes-changed-file ()
@@ -1151,6 +2735,27 @@
         (should-not canceled)
         (should-not scheduled)))))
 
+(ert-deftest vertico-buffer-frame-preview-post-command-tolerates-invalid-delay ()
+  (with-temp-buffer
+    (let ((vertico-buffer-frame-mode t)
+          (vertico-buffer-frame-preview t)
+          (vertico-buffer-frame-preview-delay "bad")
+          scheduled)
+      (cl-letf (((symbol-function #'run-with-idle-timer)
+                 (lambda (delay repeat function &rest args)
+                   (setq scheduled (list delay repeat function args))
+                   'preview-timer))
+                ((symbol-function
+                  #'vertico-buffer-frame--completion-active-p)
+                 (lambda ()
+                   t)))
+        (vertico-buffer-frame--preview-post-command)
+        (should (equal scheduled
+                       (list 0.0
+                             nil
+                             #'vertico-buffer-frame--show-preview-later
+                             (list (current-buffer)))))))))
+
 (ert-deftest vertico-buffer-frame-preview-post-command-schedules-input-changes ()
   (with-temp-buffer
     (let ((vertico-buffer-frame-mode t)
@@ -1182,6 +2787,115 @@
                              nil
                              #'vertico-buffer-frame--show-preview-later
                              (list (current-buffer)))))))))
+
+(ert-deftest vertico-buffer-frame-cancel-preview-timer-ignores-timer-errors ()
+  (with-temp-buffer
+    (setq-local vertico-buffer-frame--preview-timer 'bad-timer
+                vertico-buffer-frame--preview-scheduled-state 'state)
+    (cl-letf (((symbol-function #'timerp)
+               (lambda (&rest _args)
+                 (error "timerp failed"))))
+      (vertico-buffer-frame--cancel-preview-timer))
+    (should-not vertico-buffer-frame--preview-timer)
+    (should-not vertico-buffer-frame--preview-scheduled-state))
+  (with-temp-buffer
+    (setq-local vertico-buffer-frame--preview-timer 'bad-timer
+                vertico-buffer-frame--preview-scheduled-state 'state)
+    (cl-letf (((symbol-function #'timerp)
+               (lambda (_timer)
+                 t))
+              ((symbol-function #'cancel-timer)
+               (lambda (&rest _args)
+                 (error "cancel failed"))))
+      (vertico-buffer-frame--cancel-preview-timer))
+    (should-not vertico-buffer-frame--preview-timer)
+    (should-not vertico-buffer-frame--preview-scheduled-state)))
+
+(ert-deftest vertico-buffer-frame-schedule-preview-reports-timer-errors ()
+  (with-temp-buffer
+    (let ((vertico-buffer-frame-preview-report-errors t)
+          messages
+          hidden)
+      (cl-letf (((symbol-function #'run-with-idle-timer)
+                 (lambda (&rest _args)
+                   (error "timer failed")))
+                ((symbol-function #'vertico-buffer-frame--hide-preview)
+                 (lambda ()
+                   (setq hidden t)))
+                ((symbol-function #'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) messages))))
+        (vertico-buffer-frame--schedule-preview 'state)
+        (should hidden)
+        (should-not vertico-buffer-frame--preview-timer)
+        (should-not vertico-buffer-frame--preview-scheduled-state)
+        (should (equal messages
+                       '("vertico-buffer-frame preview error: timer failed")))))))
+
+(ert-deftest vertico-buffer-frame-schedule-preview-ignores-timerp-errors ()
+  (with-temp-buffer
+    (setq-local vertico-buffer-frame--preview-timer 'bad-timer
+                vertico-buffer-frame--preview-scheduled-state 'state)
+    (let ((vertico-buffer-frame-preview-delay "bad")
+          scheduled)
+      (cl-letf (((symbol-function #'timerp)
+                 (lambda (&rest _args)
+                   (error "timerp failed")))
+                ((symbol-function #'run-with-idle-timer)
+                 (lambda (delay repeat function &rest args)
+                   (setq scheduled (list delay repeat function args))
+                   'new-timer)))
+        (vertico-buffer-frame--schedule-preview 'state)
+        (should (equal scheduled
+                       (list 0.0
+                             nil
+                             #'vertico-buffer-frame--show-preview-later
+                             (list (current-buffer)))))
+        (should (eq vertico-buffer-frame--preview-timer 'new-timer))
+        (should (eq vertico-buffer-frame--preview-scheduled-state 'state))))))
+
+(ert-deftest vertico-buffer-frame-completion-state-helpers-ignore-errors ()
+  (cl-letf (((symbol-function #'minibufferp)
+             (lambda (&rest _args)
+               (error "minibuffer failed"))))
+    (should-not (vertico-buffer-frame--completion-active-p))
+    (should-not (vertico-buffer-frame--minibuffer-input)))
+  (with-temp-buffer
+    (let ((minibuffer-completion-table 'table)
+          (minibuffer-completion-predicate nil))
+      (cl-letf (((symbol-function
+                  #'vertico-buffer-frame--completion-active-p)
+                 (lambda ()
+                   t))
+                ((symbol-function #'completion-metadata)
+                 (lambda (&rest _args)
+                   (error "metadata failed"))))
+        (should-not (vertico-buffer-frame--category))))))
+
+(ert-deftest vertico-buffer-frame-preview-post-command-reports-state-errors ()
+  (with-temp-buffer
+    (let ((vertico-buffer-frame-mode t)
+          (vertico-buffer-frame-preview t)
+          (vertico-buffer-frame-preview-report-errors t)
+          messages
+          hidden)
+      (cl-letf (((symbol-function
+                  #'vertico-buffer-frame--completion-active-p)
+                 (lambda ()
+                   t))
+                ((symbol-function #'vertico-buffer-frame--preview-state)
+                 (lambda ()
+                   (error "state failed")))
+                ((symbol-function #'vertico-buffer-frame--hide-preview)
+                 (lambda ()
+                   (setq hidden t)))
+                ((symbol-function #'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) messages))))
+        (vertico-buffer-frame--preview-post-command)
+        (should hidden)
+        (should (equal messages
+                       '("vertico-buffer-frame preview error: state failed")))))))
 
 (ert-deftest vertico-buffer-frame-preview-state-is-cheap ()
   (with-temp-buffer
@@ -1273,6 +2987,20 @@
         (should (eq vertico-buffer-frame--preview-layout-state 'layout))
         (should (eq vertico-buffer-frame--preview-buffer 'preview-buffer))))))
 
+(ert-deftest vertico-buffer-frame-preview-parent-frame-ignores-stale-candidate-frame ()
+  (with-temp-buffer
+    (setq-local vertico-buffer-frame--candidate-frame 'stale-frame)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (frame)
+                 (when (eq frame 'stale-frame)
+                   (error "stale frame"))
+                 nil))
+              ((symbol-function #'vertico-buffer-frame--parent-frame)
+               (lambda ()
+                 'parent-frame)))
+      (should (eq (vertico-buffer-frame--preview-parent-frame)
+                  'parent-frame)))))
+
 (ert-deftest vertico-buffer-frame-preview-window-reuses-live-frame ()
   (with-temp-buffer
     (setq-local vertico-buffer-frame--preview-frame 'frame
@@ -1337,8 +3065,10 @@
                  (lambda (frame)
                    (push frame deleted)))
                 ((symbol-function #'vertico-buffer-frame--kill-preview-buffer)
-                 (lambda ()
-                   (push vertico-buffer-frame--preview-buffer killed)
+                 (lambda (&optional keep-buffer)
+                   (push (list vertico-buffer-frame--preview-buffer
+                               keep-buffer)
+                         killed)
                    (setq-local vertico-buffer-frame--preview-buffer nil)))
                 ((symbol-function #'vertico-buffer-frame--preview-frame-size)
                  (lambda (parent)
@@ -1364,13 +3094,285 @@
                    (setq refreshed t))))
         (should (eq (vertico-buffer-frame--preview-window) 'new-window))
         (should (equal deleted '(old-frame)))
-        (should (equal killed '(old-buffer)))
+        (should (equal killed '((old-buffer nil))))
         (should (buffer-live-p (car created)))
         (should (equal (cdr created) '(new-parent (42 . 11) preview)))
         (should (equal placed '(new-frame new-parent)))
         (should (equal vertico-buffer-frame--preview-layout-state
                        '(new-frame new-parent (42 . 11))))
         (should refreshed)))))
+
+(ert-deftest vertico-buffer-frame-preview-window-keeps-layout-open-on-place-error ()
+  (with-temp-buffer
+    (let (placed refreshed)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame)
+                   (eq frame 'new-frame)))
+                ((symbol-function #'window-live-p)
+                 (lambda (window)
+                   (eq window 'new-window)))
+                ((symbol-function #'vertico-buffer-frame--preview-parent-frame)
+                 (lambda ()
+                   'parent))
+                ((symbol-function #'vertico-buffer-frame--delete-frame)
+                 (lambda (&rest _args)))
+                ((symbol-function #'vertico-buffer-frame--kill-preview-buffer)
+                 (lambda (&optional _keep-buffer)))
+                ((symbol-function #'vertico-buffer-frame--preview-frame-size)
+                 (lambda (_parent)
+                   '(42 . 11)))
+                ((symbol-function #'vertico-buffer-frame--display-buffer-in-child-frame)
+                 (lambda (_buffer _parent _name _size _role)
+                   'new-window))
+                ((symbol-function #'window-frame)
+                 (lambda (window)
+                   (and (eq window 'new-window) 'new-frame)))
+                ((symbol-function #'set-window-parameter)
+                 (lambda (&rest _args)))
+                ((symbol-function #'vertico-buffer-frame--place-preview-frame)
+                 (lambda (frame parent)
+                   (setq placed (list frame parent))
+                   nil))
+                ((symbol-function #'vertico-buffer-frame--frame-layout-state)
+                 (lambda (&rest _args)
+                   (error "layout state should not be recorded")))
+                ((symbol-function #'vertico-buffer-frame--refresh-preview-frame)
+                 (lambda ()
+                   (setq refreshed t))))
+        (should (eq (vertico-buffer-frame--preview-window) 'new-window))
+        (should (equal placed '(new-frame parent)))
+        (should-not vertico-buffer-frame--preview-layout-state)
+        (should refreshed)))))
+
+(ert-deftest vertico-buffer-frame-preview-window-recreates-on-stale-parent ()
+  (with-temp-buffer
+    (setq-local vertico-buffer-frame--preview-frame 'old-frame
+                vertico-buffer-frame--preview-window 'old-window)
+    (let (deleted killed created refreshed)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame)
+                   (memq frame '(old-frame new-frame))))
+                ((symbol-function #'window-live-p)
+                 (lambda (window)
+                   (memq window '(old-window new-window))))
+                ((symbol-function #'frame-parameter)
+                 (lambda (frame _parameter)
+                   (when (eq frame 'old-frame)
+                     (error "stale frame"))))
+                ((symbol-function #'vertico-buffer-frame--preview-parent-frame)
+                 (lambda ()
+                   'parent))
+                ((symbol-function #'vertico-buffer-frame--delete-frame)
+                 (lambda (frame)
+                   (push frame deleted)))
+                ((symbol-function #'vertico-buffer-frame--kill-preview-buffer)
+                 (lambda (&optional keep-buffer)
+                   (push keep-buffer killed)
+                   (setq-local vertico-buffer-frame--preview-buffer nil)))
+                ((symbol-function #'vertico-buffer-frame--preview-frame-size)
+                 (lambda (parent)
+                   (should (eq parent 'parent))
+                   '(42 . 11)))
+                ((symbol-function #'vertico-buffer-frame--display-buffer-in-child-frame)
+                 (lambda (buffer parent _name size role)
+                   (setq created (list buffer parent size role))
+                   'new-window))
+                ((symbol-function #'window-frame)
+                 (lambda (window)
+                   (and (eq window 'new-window) 'new-frame)))
+                ((symbol-function #'set-window-parameter)
+                 (lambda (&rest _args)))
+                ((symbol-function #'vertico-buffer-frame--place-preview-frame)
+                 (lambda (&rest _args)
+                   t))
+                ((symbol-function #'vertico-buffer-frame--frame-layout-state)
+                 (lambda (frame parent size)
+                   (list frame parent size)))
+                ((symbol-function #'vertico-buffer-frame--refresh-preview-frame)
+                 (lambda ()
+                   (setq refreshed t))))
+        (should (eq (vertico-buffer-frame--preview-window) 'new-window))
+        (should (equal deleted '(old-frame)))
+        (should (equal killed '(nil)))
+        (should (buffer-live-p (car created)))
+        (should (equal (cdr created) '(parent (42 . 11) preview)))
+        (should refreshed)))))
+
+(ert-deftest vertico-buffer-frame-preview-window-recreates-on-stale-live-check ()
+  (with-temp-buffer
+    (setq-local vertico-buffer-frame--preview-frame 'old-frame
+                vertico-buffer-frame--preview-window 'old-window)
+    (let (deleted killed created refreshed)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame)
+                   (memq frame '(old-frame new-frame))))
+                ((symbol-function #'window-live-p)
+                 (lambda (window)
+                   (cond
+                    ((eq window 'old-window)
+                     (error "stale window"))
+                    ((eq window 'new-window)
+                     t))))
+                ((symbol-function #'vertico-buffer-frame--preview-parent-frame)
+                 (lambda ()
+                   'parent))
+                ((symbol-function #'vertico-buffer-frame--delete-frame)
+                 (lambda (frame)
+                   (push frame deleted)))
+                ((symbol-function #'vertico-buffer-frame--kill-preview-buffer)
+                 (lambda (&optional keep-buffer)
+                   (push keep-buffer killed)
+                   (setq-local vertico-buffer-frame--preview-buffer nil)))
+                ((symbol-function #'vertico-buffer-frame--preview-frame-size)
+                 (lambda (_parent)
+                   '(42 . 11)))
+                ((symbol-function #'vertico-buffer-frame--display-buffer-in-child-frame)
+                 (lambda (buffer parent _name size role)
+                   (setq created (list buffer parent size role))
+                   'new-window))
+                ((symbol-function #'window-frame)
+                 (lambda (window)
+                   (and (eq window 'new-window) 'new-frame)))
+                ((symbol-function #'set-window-parameter)
+                 (lambda (&rest _args)))
+                ((symbol-function #'vertico-buffer-frame--place-preview-frame)
+                 (lambda (&rest _args)
+                   t))
+                ((symbol-function #'vertico-buffer-frame--frame-layout-state)
+                 (lambda (frame parent size)
+                   (list frame parent size)))
+                ((symbol-function #'vertico-buffer-frame--refresh-preview-frame)
+                 (lambda ()
+                   (setq refreshed t))))
+        (should (eq (vertico-buffer-frame--preview-window) 'new-window))
+        (should (equal deleted '(old-frame)))
+        (should (equal killed '(nil)))
+        (should (buffer-live-p (car created)))
+        (should (equal (cdr created) '(parent (42 . 11) preview)))
+        (should refreshed)))))
+
+(ert-deftest vertico-buffer-frame-preview-window-clears-layout-on-size-error ()
+  (with-temp-buffer
+    (setq-local vertico-buffer-frame--preview-frame 'old-frame
+                vertico-buffer-frame--preview-window 'old-window
+                vertico-buffer-frame--preview-layout-state 'old-layout)
+    (let (deleted killed)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame)
+                   (eq frame 'old-frame)))
+                ((symbol-function #'window-live-p)
+                 (lambda (window)
+                   (eq window 'old-window)))
+                ((symbol-function #'frame-parameter)
+                 (lambda (_frame _parameter)
+                   'old-parent))
+                ((symbol-function #'vertico-buffer-frame--preview-parent-frame)
+                 (lambda ()
+                   'new-parent))
+                ((symbol-function #'vertico-buffer-frame--delete-frame)
+                 (lambda (frame)
+                   (push frame deleted)))
+                ((symbol-function #'vertico-buffer-frame--kill-preview-buffer)
+                 (lambda (&optional keep-buffer)
+                   (push keep-buffer killed)
+                   (setq-local vertico-buffer-frame--preview-buffer nil)))
+                ((symbol-function #'vertico-buffer-frame--preview-frame-size)
+                 (lambda (_parent)
+                   (error "size failed"))))
+        (should-error
+         (vertico-buffer-frame--preview-window)
+         :type 'error)
+        (should (equal deleted '(old-frame)))
+        (should (equal killed '(nil)))
+        (should-not vertico-buffer-frame--preview-frame)
+        (should-not vertico-buffer-frame--preview-window)
+        (should-not vertico-buffer-frame--preview-layout-state)))))
+
+(ert-deftest vertico-buffer-frame-preview-window-deletes-frame-on-setup-error ()
+  (with-temp-buffer
+    (let (deleted)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (_frame)
+                   nil))
+                ((symbol-function #'window-live-p)
+                 (lambda (window)
+                   (eq window 'new-window)))
+                ((symbol-function #'vertico-buffer-frame--preview-parent-frame)
+                 (lambda ()
+                   'parent))
+                ((symbol-function #'vertico-buffer-frame--delete-frame)
+                 (lambda (frame)
+                   (when frame
+                     (push frame deleted))))
+                ((symbol-function #'vertico-buffer-frame--kill-preview-buffer)
+                 (lambda (&optional _keep-buffer)
+                   (setq-local vertico-buffer-frame--preview-buffer nil)))
+                ((symbol-function #'vertico-buffer-frame--preview-frame-size)
+                 (lambda (parent)
+                   (should (eq parent 'parent))
+                   '(42 . 11)))
+                ((symbol-function #'vertico-buffer-frame--display-buffer-in-child-frame)
+                 (lambda (_buffer _parent _name _size _role)
+                   'new-window))
+                ((symbol-function #'window-frame)
+                 (lambda (window)
+                   (and (eq window 'new-window) 'new-frame)))
+                ((symbol-function #'set-window-parameter)
+                 (lambda (&rest _args)
+                   (error "parameter failed")))
+                ((symbol-function #'vertico-buffer-frame--refresh-preview-frame)
+                 (lambda ()
+                   (error "refresh should not run"))))
+        (should-error
+         (vertico-buffer-frame--preview-window)
+         :type 'error)
+        (should (equal deleted '(new-frame)))
+        (should-not vertico-buffer-frame--preview-frame)
+        (should-not vertico-buffer-frame--preview-window)
+        (should-not vertico-buffer-frame--preview-layout-state)))))
+
+(ert-deftest vertico-buffer-frame-preview-window-errors-on-stale-window-frame ()
+  (with-temp-buffer
+    (let (deleted parameterized)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (_frame)
+                   nil))
+                ((symbol-function #'window-live-p)
+                 (lambda (window)
+                   (eq window 'new-window)))
+                ((symbol-function #'vertico-buffer-frame--preview-parent-frame)
+                 (lambda ()
+                   'parent))
+                ((symbol-function #'vertico-buffer-frame--delete-frame)
+                 (lambda (frame)
+                   (when frame
+                     (push frame deleted))))
+                ((symbol-function #'vertico-buffer-frame--kill-preview-buffer)
+                 (lambda (&optional _keep-buffer)
+                   (setq-local vertico-buffer-frame--preview-buffer nil)))
+                ((symbol-function #'vertico-buffer-frame--preview-frame-size)
+                 (lambda (_parent)
+                   '(42 . 11)))
+                ((symbol-function #'vertico-buffer-frame--display-buffer-in-child-frame)
+                 (lambda (_buffer _parent _name _size _role)
+                   'new-window))
+                ((symbol-function #'window-frame)
+                 (lambda (_window)
+                   (error "stale window")))
+                ((symbol-function #'set-window-parameter)
+                 (lambda (&rest _args)
+                   (setq parameterized t)))
+                ((symbol-function #'vertico-buffer-frame--refresh-preview-frame)
+                 (lambda ()
+                   (error "refresh should not run"))))
+        (should-error
+         (vertico-buffer-frame--preview-window)
+         :type 'error)
+        (should-not deleted)
+        (should-not parameterized)
+        (should-not vertico-buffer-frame--preview-frame)
+        (should-not vertico-buffer-frame--preview-window)
+        (should-not vertico-buffer-frame--preview-layout-state)))))
 
 (ert-deftest vertico-buffer-frame-refresh-preview-frame-updates-changed-layout ()
   (with-temp-buffer
@@ -1416,6 +3418,54 @@
         (should (equal forced '(buffer)))
         (should (equal resized '((frame size))))
         (should (equal placed '((frame parent))))))))
+
+(ert-deftest vertico-buffer-frame-refresh-preview-keeps-state-on-place-error ()
+  (with-temp-buffer
+    (setq-local vertico-buffer-frame--preview-frame 'frame
+                vertico-buffer-frame--preview-window 'window
+                vertico-buffer-frame--preview-layout-state nil)
+    (let (forced placed resized)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame)
+                   (eq frame 'frame)))
+                ((symbol-function #'window-live-p)
+                 (lambda (window)
+                   (eq window 'window)))
+                ((symbol-function #'window-buffer)
+                 (lambda (window)
+                   (and (eq window 'window) 'buffer)))
+                ((symbol-function #'force-window-update)
+                 (lambda (buffer)
+                   (push buffer forced)))
+                ((symbol-function #'frame-pixel-width)
+                 (lambda (frame)
+                   (pcase frame
+                     ('parent 100)
+                     ('frame 80))))
+                ((symbol-function #'frame-pixel-height)
+                 (lambda (frame)
+                   (pcase frame
+                     ('parent 50)
+                     ('frame 20))))
+                ((symbol-function #'vertico-buffer-frame--preview-parent-frame)
+                 (lambda ()
+                   'parent))
+                ((symbol-function #'vertico-buffer-frame--preview-frame-size)
+                 (lambda (_parent)
+                   'size))
+                ((symbol-function #'vertico-buffer-frame--resize-frame-to-size)
+                 (lambda (frame size)
+                   (push (list frame size) resized)
+                   t))
+                ((symbol-function #'vertico-buffer-frame--place-preview-frame)
+                 (lambda (frame parent)
+                   (push (list frame parent) placed)
+                   nil)))
+        (should-not (vertico-buffer-frame--refresh-preview-frame))
+        (should-not forced)
+        (should (equal resized '((frame size))))
+        (should (equal placed '((frame parent))))
+        (should-not vertico-buffer-frame--preview-layout-state)))))
 
 (ert-deftest vertico-buffer-frame-refresh-preview-frame-skips-unchanged-layout ()
   (with-temp-buffer
@@ -1488,6 +3538,48 @@
                 (kill-buffer buffer)))
             (list first second)))))
 
+(ert-deftest vertico-buffer-frame-find-buffer-position-skips-empty-candidate ()
+  (let ((buffer (generate-new-buffer " *vbf-search-empty*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (insert "content"))
+          (should-not
+           (vertico-buffer-frame--find-buffer-position "" (list buffer))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest vertico-buffer-frame-find-buffer-position-ignores-improper-buffer-list ()
+  (should-not
+   (vertico-buffer-frame--find-buffer-position
+    "needle"
+    '(not-a-buffer . bad))))
+
+(ert-deftest vertico-buffer-frame-find-buffer-position-continues-after-buffer-error ()
+  (let ((first (generate-new-buffer " *vbf-search-error*"))
+        (second (generate-new-buffer " *vbf-search-after-error*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer first
+            (insert "needle"))
+          (with-current-buffer second
+            (insert "needle"))
+          (let ((original-widen (symbol-function #'widen)))
+            (cl-letf (((symbol-function #'widen)
+                       (lambda ()
+                         (if (eq (current-buffer) first)
+                             (error "widen failed")
+                           (funcall original-widen)))))
+              (should (equal
+                       (vertico-buffer-frame--find-buffer-position
+                        "needle"
+                        (list first second))
+                       (list 'buffer-position second 1))))))
+      (mapc (lambda (buffer)
+              (when (buffer-live-p buffer)
+                (kill-buffer buffer)))
+            (list first second)))))
+
 (ert-deftest vertico-buffer-frame-directory-preview-limits-entry-output ()
   (let ((directory (make-temp-file "vbf-directory" t)))
     (unwind-protect
@@ -1504,6 +3596,17 @@
                                       (buffer-string))))))
       (delete-directory directory t))))
 
+(ert-deftest vertico-buffer-frame-directory-preview-reports-directory-error ()
+  (with-temp-buffer
+    (cl-letf (((symbol-function #'directory-files)
+               (lambda (&rest _args)
+                 (error "directory failed"))))
+      (vertico-buffer-frame--insert-directory-preview "/tmp/vbf-directory")
+      (should (string-match-p "Directory preview failed"
+                              (buffer-string)))
+      (should (string-match-p "directory failed"
+                              (buffer-string))))))
+
 (ert-deftest vertico-buffer-frame-buffer-target-detects-existing-buffer ()
   (let ((candidate-buffer (generate-new-buffer "vbf-target"))
         (minibuffer (generate-new-buffer " *vbf-minibuffer*")))
@@ -1517,6 +3620,15 @@
               (when (buffer-live-p buffer)
                 (kill-buffer buffer)))
             (list candidate-buffer minibuffer)))))
+
+(ert-deftest vertico-buffer-frame-text-property-value-ignores-property-errors ()
+  (cl-letf (((symbol-function #'text-property-not-all)
+             (lambda (&rest _args)
+               (error "property failed"))))
+    (should-not
+     (vertico-buffer-frame--text-property-value
+      'multi-category
+      "candidate"))))
 
 (ert-deftest vertico-buffer-frame-multi-category-buffer-target-uses-real-value ()
   (let ((candidate-buffer (generate-new-buffer "vbf-target"))
@@ -1606,6 +3718,14 @@
                      'file))
         (should-not readable-called)))))
 
+(ert-deftest vertico-buffer-frame-file-target-ignores-file-api-errors ()
+  (with-temp-buffer
+    (cl-letf (((symbol-function #'expand-file-name)
+               (lambda (&rest _args)
+                 (error "expand failed"))))
+      (should-not
+       (vertico-buffer-frame--preview-target "broken" 'file)))))
+
 (ert-deftest vertico-buffer-frame-file-target-allows-remote-files-when-enabled ()
   (with-temp-buffer
     (let ((vertico-buffer-frame-preview-remote-files t))
@@ -1616,6 +3736,154 @@
                         "/ssh:example:/tmp/file"
                         'file)
                        '(file "/ssh:example:/tmp/file")))))))
+
+(ert-deftest vertico-buffer-frame-preview-target-skips-failing-hook ()
+  (let ((candidate-buffer (generate-new-buffer "vbf-hook-target"))
+        messages)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((vertico-buffer-frame-preview-target-functions
+                 (list (lambda (&rest _args)
+                         (error "hook failed")))))
+            (cl-letf (((symbol-function #'message)
+                       (lambda (format-string &rest args)
+                         (push (apply #'format format-string args)
+                               messages))))
+              (should (equal (vertico-buffer-frame--preview-target
+                              (buffer-name candidate-buffer)
+                              'buffer)
+                             (list 'buffer
+                                   (buffer-name candidate-buffer))))
+              (should (equal messages
+                             '("vertico-buffer-frame preview target error: hook failed"))))))
+      (when (buffer-live-p candidate-buffer)
+        (kill-buffer candidate-buffer)))))
+
+(ert-deftest vertico-buffer-frame-preview-target-continues-after-hook-error ()
+  (with-temp-buffer
+    (let ((vertico-buffer-frame-preview-target-functions
+           (list (lambda (&rest _args)
+                   (error "hook failed"))
+                 (lambda (_category _candidate _raw-candidate)
+                   '(text "Hook" ignore))))
+          messages)
+      (cl-letf (((symbol-function #'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args)
+                         messages))))
+        (should (equal (vertico-buffer-frame--preview-target
+                        "candidate"
+                        'buffer)
+                       '(text "Hook" ignore)))
+        (should (equal messages
+                       '("vertico-buffer-frame preview target error: hook failed")))))))
+
+(ert-deftest vertico-buffer-frame-preview-target-reports-repeated-hook-error-once ()
+  (let ((candidate-buffer (generate-new-buffer "vbf-hook-target"))
+        messages)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((vertico-buffer-frame-preview-target-functions
+                 (list (lambda (&rest _args)
+                         (error "hook failed")))))
+            (cl-letf (((symbol-function #'message)
+                       (lambda (format-string &rest args)
+                         (push (apply #'format format-string args)
+                               messages))))
+              (dotimes (_ 2)
+                (should (equal (vertico-buffer-frame--preview-target
+                                (buffer-name candidate-buffer)
+                                'buffer)
+                               (list 'buffer
+                                     (buffer-name candidate-buffer))))
+                (setq-local
+                 vertico-buffer-frame--preview-last-error-message nil))
+              (should (equal messages
+                             '("vertico-buffer-frame preview target error: hook failed"))))))
+      (when (buffer-live-p candidate-buffer)
+        (kill-buffer candidate-buffer)))))
+
+(ert-deftest vertico-buffer-frame-preview-target-accepts-single-hook-function ()
+  (with-temp-buffer
+    (let ((vertico-buffer-frame-preview-target-functions
+           (lambda (_category _candidate _raw-candidate)
+             '(text "Hook" ignore))))
+      (should (equal (vertico-buffer-frame--preview-target
+                      "candidate"
+                      'buffer)
+                     '(text "Hook" ignore))))))
+
+(ert-deftest vertico-buffer-frame-preview-target-skips-non-function-hook-values ()
+  (with-temp-buffer
+    (let ((vertico-buffer-frame-preview-target-functions
+           (list 'not-a-function
+                 (lambda (_category _candidate _raw-candidate)
+                   '(text "Hook" ignore))))
+          messages)
+      (cl-letf (((symbol-function #'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args)
+                         messages))))
+        (should (equal (vertico-buffer-frame--preview-target
+                        "candidate"
+                        'buffer)
+                       '(text "Hook" ignore)))
+        (should-not messages)))))
+
+(ert-deftest vertico-buffer-frame-preview-target-ignores-non-function-hook-values ()
+  (with-temp-buffer
+    (let ((vertico-buffer-frame-preview-target-functions '(not-a-function 42))
+          messages)
+      (cl-letf (((symbol-function #'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args)
+                         messages))))
+        (let ((target (vertico-buffer-frame--preview-target
+                       "candidate"
+                       'kill-ring)))
+          (should (eq (car target) 'text))
+          (should (equal (cadr target) "Kill Ring"))
+          (should (functionp (caddr target))))
+        (should-not messages)))))
+
+(ert-deftest vertico-buffer-frame-preview-target-ignores-invalid-category-list ()
+  (with-temp-buffer
+    (let ((vertico-buffer-frame-preview-categories 'not-a-list))
+      (should-not
+       (vertico-buffer-frame--preview-target "candidate" 'buffer)))))
+
+(ert-deftest vertico-buffer-frame-preview-target-ignores-improper-category-list ()
+  (with-temp-buffer
+    (let ((vertico-buffer-frame-preview-categories '(buffer . bad)))
+      (should-not
+       (vertico-buffer-frame--preview-target "candidate" 'buffer)))))
+
+(ert-deftest vertico-buffer-frame-preview-target-ignores-improper-hook-list ()
+  (with-temp-buffer
+    (let ((vertico-buffer-frame-preview-target-functions
+           (cons (lambda (&rest _args)
+                   '(text "Hook" ignore))
+                 'bad)))
+      (should (equal (vertico-buffer-frame--preview-target
+                      "candidate"
+                      'buffer)
+                     nil)))))
+
+(ert-deftest vertico-buffer-frame-preview-target-reports-builtin-error ()
+  (with-temp-buffer
+    (let ((vertico-buffer-frame-preview-target-functions nil)
+          messages)
+      (cl-letf (((symbol-function #'vertico-buffer-frame--buffer-target)
+                 (lambda (&rest _args)
+                   (error "builtin failed")))
+                ((symbol-function #'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args)
+                         messages))))
+        (should-not
+         (vertico-buffer-frame--preview-target "candidate" 'buffer))
+        (should (equal messages
+                       '("vertico-buffer-frame preview target error: builtin failed")))))))
 
 (ert-deftest vertico-buffer-frame-preview-categories-include-builtins ()
   (dolist (category '(file
@@ -1730,6 +3998,86 @@
                          (list 'file-line file 2))))
       (delete-directory directory t))))
 
+(ert-deftest vertico-buffer-frame-consult-xref-target-ignores-location-errors ()
+  (let ((candidate (propertize "broken"
+                               'consult-xref 'broken-xref)))
+    (cl-letf (((symbol-function #'xref-item-location)
+               (lambda (&rest _args)
+                 (error "xref failed"))))
+      (should-not
+       (vertico-buffer-frame-consult--xref-target candidate)))))
+
+(ert-deftest vertico-buffer-frame-consult-xref-target-falls-back-to-marker ()
+  (let ((buffer (generate-new-buffer " *vbf-consult-xref-marker*"))
+        marker)
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (insert "line 1\nline 2\n")
+            (goto-char (point-min))
+            (forward-line 1)
+            (setq marker (point-marker)))
+          (let ((candidate (propertize "target"
+                                       'consult-xref 'xref)))
+            (cl-letf (((symbol-function #'xref-item-location)
+                       (lambda (_xref)
+                         'location))
+                      ((symbol-function #'xref-location-group)
+                       (lambda (_location)
+                         (error "group failed")))
+                      ((symbol-function #'xref-location-marker)
+                       (lambda (_location)
+                         marker)))
+              (should (equal
+                       (vertico-buffer-frame-consult--xref-target candidate)
+                       (list 'buffer-position buffer marker))))))
+      (when (markerp marker)
+        (set-marker marker nil))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest vertico-buffer-frame-consult-install-preserves-categories ()
+  (let ((vertico-buffer-frame-preview-categories '(file buffer))
+        (vertico-buffer-frame-preview-target-functions nil))
+    (vertico-buffer-frame-consult--install)
+    (should (equal vertico-buffer-frame-preview-categories '(file buffer)))
+    (should (memq #'vertico-buffer-frame-consult-preview-target
+                  vertico-buffer-frame-preview-target-functions))))
+
+(ert-deftest vertico-buffer-frame-consult-install-preserves-user-hook-priority ()
+  (let ((vertico-buffer-frame-preview-target-functions
+         '(vertico-buffer-frame-test-user-preview-target)))
+    (vertico-buffer-frame-consult--install)
+    (should (equal vertico-buffer-frame-preview-target-functions
+                   '(vertico-buffer-frame-test-user-preview-target
+                     vertico-buffer-frame-consult-preview-target)))))
+
+(ert-deftest vertico-buffer-frame-consult-install-tolerates-improper-hook-list ()
+  (let ((vertico-buffer-frame-preview-target-functions
+         '(vertico-buffer-frame-test-user-preview-target . bad)))
+    (vertico-buffer-frame-consult--install)
+    (should (equal vertico-buffer-frame-preview-target-functions
+                   '(vertico-buffer-frame-test-user-preview-target
+                     vertico-buffer-frame-consult-preview-target)))))
+
+(ert-deftest vertico-buffer-frame-consult-install-tolerates-invalid-hook-atom ()
+  (let ((vertico-buffer-frame-preview-target-functions
+         'not-a-function))
+    (vertico-buffer-frame-consult--install)
+    (should (equal vertico-buffer-frame-preview-target-functions
+                   '(not-a-function
+                     vertico-buffer-frame-consult-preview-target)))))
+
+(ert-deftest vertico-buffer-frame-consult-install-tolerates-circular-hook-list ()
+  (let* ((hook (list 'vertico-buffer-frame-test-user-preview-target))
+         (vertico-buffer-frame-preview-target-functions hook))
+    (setcdr hook hook)
+    (vertico-buffer-frame-consult--install)
+    (should (proper-list-p vertico-buffer-frame-preview-target-functions))
+    (should (equal vertico-buffer-frame-preview-target-functions
+                   '(vertico-buffer-frame-test-user-preview-target
+                     vertico-buffer-frame-consult-preview-target)))))
+
 (ert-deftest vertico-buffer-frame-project-file-target-resolves-readable-file ()
   (let ((directory (make-temp-file "vbf-project" t)))
     (unwind-protect
@@ -1741,6 +4089,21 @@
                          (list 'file
                                (expand-file-name "project-file.el"
                                                  directory)))))
+      (delete-directory directory t))))
+
+(ert-deftest vertico-buffer-frame-project-root-ignores-project-api-errors ()
+  (let ((directory (make-temp-file "vbf-project-error" t)))
+    (unwind-protect
+        (let ((default-directory (file-name-as-directory directory)))
+          (cl-letf (((symbol-function #'project-current)
+                     (lambda (&rest _args)
+                       'project))
+                    ((symbol-function #'project-root)
+                     (lambda (&rest _args)
+                       (error "project failed"))))
+            (should-not (vertico-buffer-frame--project-root))
+            (should (equal (car vertico-buffer-frame--project-root-cache)
+                           default-directory))))
       (delete-directory directory t))))
 
 (ert-deftest vertico-buffer-frame-xref-target-uses-candidate-location ()
@@ -1773,7 +4136,8 @@
 
 (ert-deftest vertico-buffer-frame-text-preview-buffer-is-owned-and-read-only ()
   (with-temp-buffer
-    (let ((preview (vertico-buffer-frame--text-preview-buffer
+    (let ((owner (current-buffer))
+          (preview (vertico-buffer-frame--text-preview-buffer
                     "test"
                     (lambda ()
                       (insert "preview")))))
@@ -1782,9 +4146,173 @@
             (should (eq vertico-buffer-frame--preview-buffer preview))
             (with-current-buffer preview
               (should buffer-read-only)
+              (should-not (buffer-modified-p))
+              (should (eq vertico-buffer-frame--preview-owner-buffer
+                          owner))
               (should (equal (buffer-string) "preview"))))
         (when (buffer-live-p preview)
           (kill-buffer preview))))))
+
+(ert-deftest vertico-buffer-frame-text-preview-buffer-cleans-up-after-error ()
+  (with-temp-buffer
+    (let (preview)
+      (should-error
+       (vertico-buffer-frame--text-preview-buffer
+        "test"
+        (lambda ()
+          (setq preview (current-buffer))
+          (insert "partial")
+          (error "preview failed"))))
+      (should-not vertico-buffer-frame--preview-buffer)
+      (should-not (buffer-live-p preview)))))
+
+(ert-deftest vertico-buffer-frame-kills-preview-buffers-by-owner ()
+  (let ((owner (generate-new-buffer " *vbf-preview-owner*"))
+        (other-owner (generate-new-buffer " *vbf-preview-other-owner*"))
+        (owned (generate-new-buffer " *vbf-owned-preview*"))
+        (other-owned (generate-new-buffer " *vbf-other-owned-preview*"))
+        (unowned (generate-new-buffer " *vbf-unowned-preview*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer owned
+            (setq-local vertico-buffer-frame--temporary-preview-buffer t
+                        vertico-buffer-frame--preview-owner-buffer owner)
+            (set-buffer-modified-p nil))
+          (with-current-buffer other-owned
+            (setq-local vertico-buffer-frame--temporary-preview-buffer t
+                        vertico-buffer-frame--preview-owner-buffer other-owner)
+            (set-buffer-modified-p nil))
+          (with-current-buffer unowned
+            (setq-local vertico-buffer-frame--temporary-preview-buffer t)
+            (set-buffer-modified-p nil))
+          (vertico-buffer-frame--kill-preview-buffers-owned-by-buffer owner)
+          (should-not (buffer-live-p owned))
+          (should (buffer-live-p other-owned))
+          (should (buffer-live-p unowned)))
+      (dolist (buffer (list owner other-owner owned other-owned unowned))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest vertico-buffer-frame-kill-temporary-preview-buffer-skips-user-buffer ()
+  (let ((temporary (generate-new-buffer " *vbf-temporary-preview*"))
+        (user-buffer (generate-new-buffer " *vbf-user-buffer*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer temporary
+            (setq-local vertico-buffer-frame--temporary-preview-buffer t)
+            (set-buffer-modified-p nil))
+          (vertico-buffer-frame--kill-temporary-preview-buffer user-buffer)
+          (should (buffer-live-p user-buffer))
+          (vertico-buffer-frame--kill-temporary-preview-buffer temporary)
+          (should-not (buffer-live-p temporary)))
+      (dolist (buffer (list temporary user-buffer))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest vertico-buffer-frame-kill-temporary-preview-buffer-ignores-local-errors ()
+  (let (killed)
+    (cl-letf (((symbol-function #'buffer-live-p)
+               (lambda (buffer)
+                 (eq buffer 'stale-buffer)))
+              ((symbol-function #'buffer-local-value)
+               (lambda (&rest _args)
+                 (error "stale buffer")))
+              ((symbol-function #'kill-buffer)
+               (lambda (buffer)
+                 (push buffer killed))))
+      (should-not
+       (vertico-buffer-frame--kill-temporary-preview-buffer 'stale-buffer))
+      (should-not killed))))
+
+(ert-deftest vertico-buffer-frame-kill-temporary-preview-buffer-ignores-kill-errors ()
+  (let ((temporary (generate-new-buffer " *vbf-temporary-preview*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer temporary
+            (setq-local vertico-buffer-frame--temporary-preview-buffer t)
+            (set-buffer-modified-p nil))
+          (cl-letf (((symbol-function #'kill-buffer)
+                     (lambda (_buffer)
+                       (error "kill failed"))))
+            (should-not
+             (vertico-buffer-frame--kill-temporary-preview-buffer temporary)))
+          (should (buffer-live-p temporary)))
+      (when (buffer-live-p temporary)
+        (kill-buffer temporary)))))
+
+(ert-deftest vertico-buffer-frame-preview-buffer-owned-by-p-ignores-local-errors ()
+  (cl-letf (((symbol-function #'buffer-live-p)
+             (lambda (buffer)
+               (eq buffer 'stale-buffer)))
+            ((symbol-function #'buffer-local-value)
+             (lambda (&rest _args)
+               (error "stale buffer"))))
+    (should-not
+     (vertico-buffer-frame--preview-buffer-owned-by-p
+      'stale-buffer
+      'owner))))
+
+(ert-deftest vertico-buffer-frame-kill-preview-buffer-skips-foreign-owner ()
+  (let ((owner (generate-new-buffer " *vbf-preview-owner*"))
+        (foreign-owner (generate-new-buffer " *vbf-foreign-owner*"))
+        (foreign (generate-new-buffer " *vbf-foreign-preview*")))
+    (unwind-protect
+        (with-current-buffer owner
+          (setq-local vertico-buffer-frame--preview-buffer foreign)
+          (with-current-buffer foreign
+            (setq-local vertico-buffer-frame--temporary-preview-buffer t
+                        vertico-buffer-frame--preview-owner-buffer
+                        foreign-owner)
+            (set-buffer-modified-p nil))
+          (vertico-buffer-frame--kill-preview-buffer)
+          (should (buffer-live-p foreign))
+          (should-not vertico-buffer-frame--preview-buffer))
+      (dolist (buffer (list owner foreign-owner foreign))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest vertico-buffer-frame-kill-preview-buffer-preserves-keep-buffer ()
+  (let ((owner (generate-new-buffer " *vbf-preview-owner*"))
+        (old (generate-new-buffer " *vbf-old-preview*"))
+        (keep (generate-new-buffer " *vbf-keep-preview*")))
+    (unwind-protect
+        (with-current-buffer owner
+          (setq-local vertico-buffer-frame--preview-buffer old)
+          (dolist (buffer (list old keep))
+            (with-current-buffer buffer
+              (setq-local vertico-buffer-frame--temporary-preview-buffer t
+                          vertico-buffer-frame--preview-owner-buffer
+                          owner)
+              (set-buffer-modified-p nil)))
+          (vertico-buffer-frame--kill-preview-buffer keep)
+          (should-not (buffer-live-p old))
+          (should (buffer-live-p keep))
+          (should-not vertico-buffer-frame--preview-buffer))
+      (dolist (buffer (list owner old keep))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest vertico-buffer-frame-kill-old-preview-buffer-skips-foreign-owner ()
+  (let ((owner (generate-new-buffer " *vbf-preview-owner*"))
+        (foreign-owner (generate-new-buffer " *vbf-foreign-owner*"))
+        (old (generate-new-buffer " *vbf-foreign-preview*"))
+        (new (generate-new-buffer " *vbf-new-preview*")))
+    (unwind-protect
+        (with-current-buffer owner
+          (setq-local vertico-buffer-frame--file-preview-cache
+                      (cons 'key old))
+          (with-current-buffer old
+            (setq-local vertico-buffer-frame--temporary-preview-buffer t
+                        vertico-buffer-frame--preview-owner-buffer
+                        foreign-owner)
+            (set-buffer-modified-p nil))
+          (vertico-buffer-frame--kill-old-preview-buffer old new)
+          (should (buffer-live-p old))
+          (should (buffer-live-p new))
+          (should-not vertico-buffer-frame--file-preview-cache))
+      (dolist (buffer (list owner foreign-owner old new))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
 
 (ert-deftest vertico-buffer-frame-text-preview-buffer-reuses-owned-buffer ()
   (with-temp-buffer
@@ -1810,6 +4338,35 @@
         (when (and (buffer-live-p first)
                    (not (eq first second)))
           (kill-buffer first))))))
+
+(ert-deftest vertico-buffer-frame-text-preview-buffer-skips-foreign-owner ()
+  (let ((owner (generate-new-buffer " *vbf-preview-owner*"))
+        (foreign-owner (generate-new-buffer " *vbf-foreign-owner*"))
+        (foreign (generate-new-buffer " *vbf-foreign-preview*"))
+        new)
+    (unwind-protect
+        (with-current-buffer owner
+          (setq-local vertico-buffer-frame--preview-buffer foreign)
+          (with-current-buffer foreign
+            (setq-local vertico-buffer-frame--temporary-preview-buffer t
+                        vertico-buffer-frame--preview-owner-buffer
+                        foreign-owner)
+            (set-buffer-modified-p nil))
+          (setq new
+                (vertico-buffer-frame--text-preview-buffer
+                 "test"
+                 (lambda ()
+                   (insert "new"))))
+          (should-not (eq new foreign))
+          (should (eq vertico-buffer-frame--preview-buffer new))
+          (should (buffer-live-p foreign))
+          (with-current-buffer new
+            (should (eq vertico-buffer-frame--preview-owner-buffer
+                        owner))
+            (should (equal (buffer-string) "new"))))
+      (dolist (buffer (list owner foreign-owner foreign new))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
 
 (ert-deftest vertico-buffer-frame-preview-window-buffer-set-before-dedication ()
   (let (events)
@@ -1862,43 +4419,199 @@
       (vertico-buffer-frame--set-preview-window-buffer 'window 'buffer)
       (should (equal events '((dedicated window t)))))))
 
+(ert-deftest vertico-buffer-frame-preview-window-buffer-ignores-window-errors ()
+  (let (killed)
+    (cl-letf (((symbol-function #'window-buffer)
+               (lambda (_window)
+                 (error "stale window")))
+              ((symbol-function #'vertico-buffer-frame--kill-old-preview-buffer)
+               (lambda (&rest _args)
+                 (setq killed t))))
+      (should-not
+       (vertico-buffer-frame--set-preview-window-buffer
+        'stale-window 'buffer 'old-buffer))
+      (should-not killed))))
+
+(ert-deftest vertico-buffer-frame-show-preview-buffer-skips-nil-buffer ()
+  (let ((old-buffer (generate-new-buffer " *vbf-old-preview*"))
+        preview-window-called
+        hidden)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((owner (current-buffer)))
+            (setq-local vertico-buffer-frame--preview-buffer old-buffer
+                        vertico-buffer-frame--preview-frame 'frame)
+            (with-current-buffer old-buffer
+              (setq-local vertico-buffer-frame--temporary-preview-buffer t
+                          vertico-buffer-frame--preview-owner-buffer
+                          owner)
+              (set-buffer-modified-p nil))
+            (cl-letf (((symbol-function #'vertico-buffer-frame--preview-window)
+                       (lambda (&optional _keep-buffer)
+                         (setq preview-window-called t)
+                         'window))
+                      ((symbol-function #'vertico-buffer-frame--hide-preview)
+                       (lambda ()
+                         (setq hidden t))))
+              (vertico-buffer-frame--show-preview-buffer
+               (lambda ()
+                 nil))
+              (should-not preview-window-called)
+              (should hidden)
+              (should-not (buffer-live-p old-buffer))
+              (should-not vertico-buffer-frame--preview-buffer))))
+      (when (buffer-live-p old-buffer)
+        (kill-buffer old-buffer)))))
+
+(ert-deftest vertico-buffer-frame-show-preview-buffer-preserves-new-buffer ()
+  (let ((old-buffer (generate-new-buffer " *vbf-old-preview*"))
+        new-buffer
+        preview-buffer-during-window
+        events)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((owner (current-buffer)))
+            (setq-local vertico-buffer-frame--preview-buffer old-buffer
+                        vertico-buffer-frame--file-preview-cache
+                        (cons 'key old-buffer)
+                        vertico-buffer-frame--preview-frame 'frame)
+            (with-current-buffer old-buffer
+              (setq-local vertico-buffer-frame--temporary-preview-buffer t
+                          vertico-buffer-frame--preview-owner-buffer
+                          owner)
+              (set-buffer-modified-p nil))
+            (cl-letf (((symbol-function #'vertico-buffer-frame--preview-window)
+                       (lambda (&optional _keep-buffer)
+                         (setq preview-buffer-during-window
+                               vertico-buffer-frame--preview-buffer)
+                         'window))
+                      ((symbol-function
+                        #'vertico-buffer-frame--set-preview-window-buffer)
+                       (lambda (window buffer old-preview-buffer)
+                         (push (list 'set window buffer old-preview-buffer)
+                               events)))
+                      ((symbol-function #'vertico-buffer-frame--show-frame)
+                       (lambda (frame)
+                         (push (list 'show frame) events))))
+              (vertico-buffer-frame--show-preview-buffer
+               (lambda ()
+                 (vertico-buffer-frame--text-preview-buffer
+                  "test"
+                  (lambda ()
+                    (insert "new")))))
+              (setq new-buffer vertico-buffer-frame--preview-buffer)
+              (should (eq preview-buffer-during-window old-buffer))
+              (should (buffer-live-p new-buffer))
+              (should-not (eq new-buffer old-buffer))
+              (with-current-buffer new-buffer
+                (should (equal (buffer-string) "new")))
+              (should (equal (nreverse events)
+                             (list (list 'set 'window new-buffer old-buffer)
+                                   '(show frame)))))))
+      (dolist (buffer (list old-buffer new-buffer))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest vertico-buffer-frame-show-preview-buffer-kills-new-buffer-on-error ()
+  (let (new-buffer)
+    (unwind-protect
+        (with-temp-buffer
+          (cl-letf (((symbol-function #'vertico-buffer-frame--preview-window)
+                     (lambda (&optional _keep-buffer)
+                       (error "preview window failed")))
+                    ((symbol-function
+                      #'vertico-buffer-frame--set-preview-window-buffer)
+                     (lambda (&rest _args)
+                       (error "set should not run"))))
+            (should-error
+             (vertico-buffer-frame--show-preview-buffer
+              (lambda ()
+                (setq new-buffer
+                      (vertico-buffer-frame--text-preview-buffer
+                       "test"
+                       (lambda ()
+                         (insert "new"))))
+                new-buffer))
+             :type 'error)
+            (should-not (buffer-live-p new-buffer))
+            (should-not vertico-buffer-frame--preview-buffer)))
+      (when (buffer-live-p new-buffer)
+        (kill-buffer new-buffer)))))
+
+(ert-deftest vertico-buffer-frame-show-preview-buffer-kills-new-buffer-on-window-set-error ()
+  (let (new-buffer shown)
+    (unwind-protect
+        (with-temp-buffer
+          (cl-letf (((symbol-function #'vertico-buffer-frame--preview-window)
+                     (lambda (&optional _keep-buffer)
+                       'stale-window))
+                    ((symbol-function #'window-buffer)
+                     (lambda (_window)
+                       (error "stale window")))
+                    ((symbol-function #'vertico-buffer-frame--show-frame)
+                     (lambda (_frame)
+                       (setq shown t))))
+            (should-error
+             (vertico-buffer-frame--show-preview-buffer
+              (lambda ()
+                (setq new-buffer
+                      (vertico-buffer-frame--text-preview-buffer
+                       "test"
+                       (lambda ()
+                         (insert "new"))))
+                new-buffer))
+             :type 'error)
+            (should-not shown)
+            (should-not (buffer-live-p new-buffer))
+            (should-not vertico-buffer-frame--preview-buffer)))
+      (when (buffer-live-p new-buffer)
+        (kill-buffer new-buffer)))))
+
 (ert-deftest vertico-buffer-frame-preview-replaces-buffer-before-kill ()
   (let ((old-buffer (generate-new-buffer " *vbf-old-preview*"))
         new-buffer
         events)
     (unwind-protect
         (with-temp-buffer
-          (setq-local vertico-buffer-frame--preview-buffer old-buffer
-                      vertico-buffer-frame--preview-frame 'frame)
-          (cl-letf (((symbol-function #'vertico-buffer-frame--preview-window)
-                     (lambda ()
-                       'window))
-                    ((symbol-function #'set-window-dedicated-p)
-                     (lambda (window dedicated)
-                       (push (list 'dedicated window dedicated) events)))
-                    ((symbol-function #'set-window-buffer)
-                     (lambda (window buffer)
-                       (setq new-buffer buffer)
-                       (push (list 'buffer window buffer) events)))
-                    ((symbol-function #'window-buffer)
-                     (lambda (_window)
-                       old-buffer))
-                    ((symbol-function #'kill-buffer)
-                     (lambda (buffer)
-                       (push (list 'kill buffer) events)))
-                    ((symbol-function #'vertico-buffer-frame--show-frame)
-                     (lambda (frame)
-                       (push (list 'show frame) events))))
-            (vertico-buffer-frame--show-preview
-             (list 'text "Symbol" (lambda ()
-                                    (insert "preview"))))
-            (should (buffer-live-p new-buffer))
-            (should (equal (nreverse events)
-                           (list '(dedicated window nil)
-                                 (list 'buffer 'window new-buffer)
-                                 '(dedicated window t)
-                                 (list 'kill old-buffer)
-                                 '(show frame))))))
+          (let ((owner (current-buffer)))
+            (setq-local vertico-buffer-frame--preview-buffer old-buffer
+                        vertico-buffer-frame--file-preview-cache
+                        (cons 'file-cache-key old-buffer)
+                        vertico-buffer-frame--preview-frame 'frame)
+            (with-current-buffer old-buffer
+              (setq-local vertico-buffer-frame--temporary-preview-buffer t
+                          vertico-buffer-frame--preview-owner-buffer
+                          owner)
+              (set-buffer-modified-p nil))
+            (cl-letf (((symbol-function #'vertico-buffer-frame--preview-window)
+                       (lambda (&optional _keep-buffer)
+                         'window))
+                      ((symbol-function #'set-window-dedicated-p)
+                       (lambda (window dedicated)
+                         (push (list 'dedicated window dedicated) events)))
+                      ((symbol-function #'set-window-buffer)
+                       (lambda (window buffer)
+                         (setq new-buffer buffer)
+                         (push (list 'buffer window buffer) events)))
+                      ((symbol-function #'window-buffer)
+                       (lambda (_window)
+                         old-buffer))
+                      ((symbol-function #'kill-buffer)
+                       (lambda (buffer)
+                         (push (list 'kill buffer) events)))
+                      ((symbol-function #'vertico-buffer-frame--show-frame)
+                       (lambda (frame)
+                         (push (list 'show frame) events))))
+              (vertico-buffer-frame--show-preview
+               (list 'text "Symbol" (lambda ()
+                                      (insert "preview"))))
+              (should (buffer-live-p new-buffer))
+              (should (equal (nreverse events)
+                             (list '(dedicated window nil)
+                                   (list 'buffer 'window new-buffer)
+                                   '(dedicated window t)
+                                   (list 'kill old-buffer)
+                                   '(show frame)))))))
       (mapc (lambda (buffer)
               (when (buffer-live-p buffer)
                 (kill-buffer buffer)))
@@ -1952,6 +4665,57 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest vertico-buffer-frame-center-window-point-ignores-window-errors ()
+  (cl-letf (((symbol-function #'set-window-point)
+             (lambda (&rest _args)
+               (error "stale window"))))
+    (should-not
+     (vertico-buffer-frame--center-window-point 'stale-window))))
+
+(ert-deftest vertico-buffer-frame-set-window-line-ignores-window-errors ()
+  (cl-letf (((symbol-function #'window-buffer)
+             (lambda (&rest _args)
+               (error "stale window"))))
+    (should-not
+     (vertico-buffer-frame--set-window-line 'stale-window 10))))
+
+(ert-deftest vertico-buffer-frame-set-window-position-ignores-window-errors ()
+  (cl-letf (((symbol-function #'window-buffer)
+             (lambda (&rest _args)
+               (error "stale window"))))
+    (should-not
+     (vertico-buffer-frame--set-window-position 'stale-window 10))))
+
+(ert-deftest vertico-buffer-frame-show-preview-buffer-keeps-preview-on-location-error ()
+  (let ((new-buffer (generate-new-buffer " *vbf-location-preview*"))
+        events)
+    (unwind-protect
+        (with-temp-buffer
+          (cl-letf (((symbol-function #'vertico-buffer-frame--preview-window)
+                     (lambda (&optional _keep-buffer)
+                       'window))
+                    ((symbol-function
+                      #'vertico-buffer-frame--set-preview-window-buffer)
+                     (lambda (window buffer old-preview-buffer)
+                       (push (list 'set window buffer old-preview-buffer)
+                             events)))
+                    ((symbol-function #'vertico-buffer-frame--show-frame)
+                     (lambda (frame)
+                       (push (list 'show frame) events))))
+            (setq-local vertico-buffer-frame--preview-frame 'frame)
+            (vertico-buffer-frame--show-preview-buffer
+             (lambda ()
+               new-buffer)
+             '(line . 10)
+             t)
+            (should-not vertico-buffer-frame--preview-buffer)
+            (should (buffer-live-p new-buffer))
+            (should (equal (nreverse events)
+                           (list (list 'set 'window new-buffer nil)
+                                 '(show frame))))))
+      (when (buffer-live-p new-buffer)
+        (kill-buffer new-buffer)))))
+
 (ert-deftest vertico-buffer-frame-unicode-target-builds-text-preview ()
   (let ((target (vertico-buffer-frame--unicode-name-target "LATIN CAPITAL LETTER A")))
     (should (eq (car target) 'text))
@@ -1967,6 +4731,19 @@
       (should (string-match-p "red" (buffer-string)))
       (should (string-match-p "#FFFF00000000" (buffer-string))))))
 
+(ert-deftest vertico-buffer-frame-color-target-ignores-color-api-errors ()
+  (cl-letf (((symbol-function #'color-defined-p)
+             (lambda (&rest _args)
+               (error "color failed"))))
+    (should-not (vertico-buffer-frame--color-target "red")))
+  (cl-letf (((symbol-function #'color-defined-p)
+             (lambda (&rest _args)
+               t))
+            ((symbol-function #'color-values)
+             (lambda (&rest _args)
+               '(1 2))))
+    (should-not (vertico-buffer-frame--color-target "red"))))
+
 (ert-deftest vertico-buffer-frame-coding-system-target-builds-text-preview ()
   (let ((target (vertico-buffer-frame--coding-system-target "utf-8")))
     (should (eq (car target) 'text))
@@ -1975,12 +4752,37 @@
       (should (string-match-p "utf-8" (buffer-string)))
       (should (string-match-p "Base:" (buffer-string))))))
 
+(ert-deftest vertico-buffer-frame-coding-system-target-ignores-accessor-errors ()
+  (cl-letf (((symbol-function #'coding-system-doc-string)
+             (lambda (&rest _args)
+               (error "doc failed")))
+            ((symbol-function #'coding-system-mnemonic)
+             (lambda (&rest _args)
+               (error "mnemonic failed"))))
+    (let ((target (vertico-buffer-frame--coding-system-target "utf-8")))
+      (with-temp-buffer
+        (funcall (nth 2 target))
+        (should (string-match-p "utf-8" (buffer-string)))
+        (should (string-match-p "EOL:" (buffer-string)))))))
+
 (ert-deftest vertico-buffer-frame-charset-target-builds-text-preview ()
   (let ((target (vertico-buffer-frame--charset-target "unicode")))
     (should (eq (car target) 'text))
     (with-temp-buffer
       (funcall (nth 2 target))
       (should (string-match-p "unicode" (buffer-string))))))
+
+(ert-deftest vertico-buffer-frame-charset-target-ignores-accessor-errors ()
+  (cl-letf (((symbol-function #'charset-description)
+             (lambda (&rest _args)
+               (error "description failed")))
+            ((symbol-function #'get-charset-property)
+             (lambda (&rest _args)
+               (error "property failed"))))
+    (let ((target (vertico-buffer-frame--charset-target "unicode")))
+      (with-temp-buffer
+        (funcall (nth 2 target))
+        (should (equal (buffer-string) "unicode\n\n"))))))
 
 (ert-deftest vertico-buffer-frame-library-target-uses-locate-library ()
   (cl-letf (((symbol-function #'locate-library)
@@ -1989,6 +4791,12 @@
                     "/tmp/simple.el"))))
     (should (equal (vertico-buffer-frame--library-target "simple")
                    '(file "/tmp/simple.el")))))
+
+(ert-deftest vertico-buffer-frame-library-target-ignores-locate-errors ()
+  (cl-letf (((symbol-function #'locate-library)
+             (lambda (&rest _args)
+               (error "locate failed"))))
+    (should-not (vertico-buffer-frame--library-target "simple"))))
 
 (ert-deftest vertico-buffer-frame-custom-theme-target-prefers-theme-file ()
   (cl-letf (((symbol-function #'custom-available-themes)
@@ -2001,6 +4809,28 @@
     (should (equal (vertico-buffer-frame--custom-theme-target "wombat")
                    '(file "/tmp/wombat-theme.el")))))
 
+(ert-deftest vertico-buffer-frame-custom-theme-target-ignores-invalid-theme-lists ()
+  (let* ((theme (intern "vbf-test-theme"))
+         (candidate (symbol-name theme)))
+    (cl-letf (((symbol-function #'custom-available-themes)
+               (lambda ()
+                 'not-a-list)))
+      (should-not
+       (vertico-buffer-frame--custom-theme-target candidate)))
+    (let ((custom-enabled-themes 'not-a-list))
+      (cl-letf (((symbol-function #'custom-available-themes)
+                 (lambda ()
+                   (list theme)))
+                ((symbol-function #'locate-library)
+                 (lambda (&rest _args)
+                   nil)))
+        (let ((target (vertico-buffer-frame--custom-theme-target
+                       candidate)))
+          (should (eq (car target) 'text))
+          (with-temp-buffer
+            (funcall (nth 2 target))
+            (should (string-match-p "Enabled: no" (buffer-string)))))))))
+
 (ert-deftest vertico-buffer-frame-email-target-parses-address ()
   (let ((target (vertico-buffer-frame--email-target
                  "Ada Lovelace <ada@example.invalid>")))
@@ -2009,6 +4839,143 @@
       (funcall (nth 2 target))
       (should (string-match-p "Ada Lovelace" (buffer-string)))
       (should (string-match-p "ada@example.invalid" (buffer-string))))))
+
+(ert-deftest vertico-buffer-frame-email-target-ignores-parser-errors ()
+  (require 'mail-extr)
+  (let ((target (vertico-buffer-frame--email-target
+                 "broken@example.invalid")))
+    (cl-letf (((symbol-function #'mail-extract-address-components)
+               (lambda (&rest _args)
+                 (error "parse failed"))))
+      (with-temp-buffer
+        (funcall (nth 2 target))
+        (should (equal (buffer-string) "broken@example.invalid\n"))))))
+
+(ert-deftest vertico-buffer-frame-package-target-ignores-invalid-metadata ()
+  (require 'package)
+  (let* ((package (intern "vbf-test-package"))
+         (package-alist 'not-a-list)
+         (package-archive-contents '(bad . worse))
+         (target (vertico-buffer-frame--package-target
+                  (symbol-name package))))
+    (should (eq (car target) 'text))
+    (with-temp-buffer
+      (funcall (nth 2 target))
+      (should (string-match-p "Installed: no" (buffer-string)))
+      (should (string-match-p "Built-in: no" (buffer-string))))))
+
+(ert-deftest vertico-buffer-frame-package-requirements-ignore-malformed-entries ()
+  (require 'package)
+  (should (equal
+           (vertico-buffer-frame--package-requirements-string
+            '((emacs (29 1)) bad (foo . "1.0")))
+           "emacs 29.1, foo 1.0"))
+  (should-not
+   (vertico-buffer-frame--package-requirements-string
+    '((emacs (29 1)) . bad))))
+
+(ert-deftest vertico-buffer-frame-input-method-target-uses-existing-alist ()
+  (let* ((input-method-alist
+          '(("test-input-method" "Test Language" nil "TT" "Description")))
+         (target (vertico-buffer-frame--input-method-target
+                  "test-input-method")))
+    (should (eq (car target) 'text))
+    (with-temp-buffer
+      (funcall (nth 2 target))
+      (should (string-match-p "Test Language" (buffer-string)))
+      (should (string-match-p "TT" (buffer-string)))
+      (should (string-match-p "Description" (buffer-string))))))
+
+(ert-deftest vertico-buffer-frame-input-method-target-ignores-improper-alist ()
+  (let ((input-method-alist '(("test-input-method") . bad)))
+    (should-not
+     (vertico-buffer-frame--input-method-target "test-input-method"))))
+
+(ert-deftest vertico-buffer-frame-register-target-ignores-register-errors ()
+  (cl-letf (((symbol-function #'get-register)
+             (lambda (&rest _args)
+               (error "register failed"))))
+    (should-not (vertico-buffer-frame--register-target "a"))))
+
+(ert-deftest vertico-buffer-frame-register-target-ignores-display-errors ()
+  (cl-letf (((symbol-function #'get-register)
+             (lambda (&rest _args)
+               "value"))
+            ((symbol-function #'single-key-description)
+             (lambda (&rest _args)
+               (error "name failed"))))
+    (let ((target (vertico-buffer-frame--register-target "a")))
+      (with-temp-buffer
+        (funcall (nth 2 target))
+        (should (string-match-p "value" (buffer-string)))))))
+
+(ert-deftest vertico-buffer-frame-bookmark-target-ignores-bookmark-errors ()
+  (require 'bookmark)
+  (cl-letf (((symbol-function #'bookmark-get-bookmark)
+             (lambda (&rest _args)
+               (error "bookmark failed"))))
+    (should-not (vertico-buffer-frame--bookmark-target "broken"))))
+
+(ert-deftest vertico-buffer-frame-bookmark-target-uses-text-fallback-safely ()
+  (require 'bookmark)
+  (cl-letf (((symbol-function #'bookmark-get-bookmark)
+             (lambda (&rest _args)
+               'bookmark))
+            ((symbol-function #'bookmark-get-filename)
+             (lambda (&rest _args)
+               "/not/readable"))
+            ((symbol-function #'bookmark-get-position)
+             (lambda (&rest _args)
+               'bad-position))
+            ((symbol-function #'file-readable-p)
+             (lambda (&rest _args)
+               nil)))
+    (let ((target (vertico-buffer-frame--bookmark-target "bookmark")))
+      (should (eq (car target) 'text))
+      (with-temp-buffer
+        (funcall (nth 2 target))
+        (should (string-match-p "bad-position" (buffer-string)))))))
+
+(ert-deftest vertico-buffer-frame-text-targets-ignore-non-strings ()
+  (dolist (function '(vertico-buffer-frame--symbol-preview-target
+                      vertico-buffer-frame--color-target
+                      vertico-buffer-frame--custom-theme-target
+                      vertico-buffer-frame--coding-system-target
+                      vertico-buffer-frame--charset-target
+                      vertico-buffer-frame--library-target
+                      vertico-buffer-frame--package-target
+                      vertico-buffer-frame--email-target
+                      vertico-buffer-frame--dabbrev-target
+                      vertico-buffer-frame--unicode-name-target
+                      vertico-buffer-frame--bookmark-target
+                      vertico-buffer-frame--info-menu-target
+                      vertico-buffer-frame--calendar-month-target))
+    (should-not (funcall function 'not-a-string)))
+  (let ((input-method-alist 'not-a-list))
+    (should-not (vertico-buffer-frame--input-method-target
+                 "test-input-method")))
+  (should-not (vertico-buffer-frame--bibtex-target 'not-a-string nil))
+  (should-not (vertico-buffer-frame--imenu-target
+               'not-a-string
+               'not-a-string))
+  (should-not (vertico-buffer-frame--register-target 'not-a-string))
+  (should-not (vertico-buffer-frame--simple-text-target
+               'not-a-string
+               "Text")))
+
+(ert-deftest vertico-buffer-frame-symbol-preview-ignores-documentation-errors ()
+  (cl-letf (((symbol-function #'where-is-internal)
+             (lambda (&rest _args)
+               (error "keys failed")))
+            ((symbol-function #'documentation-property)
+             (lambda (&rest _args)
+               (error "doc failed")))
+            ((symbol-function #'facep)
+             (lambda (&rest _args)
+               (error "face failed"))))
+    (with-temp-buffer
+      (vertico-buffer-frame--insert-symbol-preview 'ignore)
+      (should (string-match-p "ignore" (buffer-string))))))
 
 (ert-deftest vertico-buffer-frame-imenu-target-uses-text-property ()
   (let* ((source (generate-new-buffer " *vbf-imenu-source*"))
@@ -2072,11 +5039,97 @@
                 (kill-buffer buffer)))
             (list source minibuffer)))))
 
+(ert-deftest vertico-buffer-frame-imenu-cache-key-includes-mode-and-indexer ()
+  (let ((source (generate-new-buffer " *vbf-imenu-key-source*")))
+    (unwind-protect
+        (with-current-buffer source
+          (let ((imenu-create-index-function #'ignore))
+            (fundamental-mode)
+            (let ((first (vertico-buffer-frame--imenu-cache-key source)))
+              (emacs-lisp-mode)
+              (let ((second (vertico-buffer-frame--imenu-cache-key source)))
+                (should-not (equal first second)))
+              (let ((third (let ((imenu-create-index-function #'identity))
+                             (vertico-buffer-frame--imenu-cache-key
+                              source))))
+                (should-not (equal first third))))))
+      (when (buffer-live-p source)
+        (kill-buffer source)))))
+
+(ert-deftest vertico-buffer-frame-imenu-target-ignores-non-list-index ()
+  (let ((source (generate-new-buffer " *vbf-imenu-bad-index-source*"))
+        (minibuffer (generate-new-buffer " *vbf-imenu-bad-index-minibuffer*")))
+    (unwind-protect
+        (progn
+          (require 'imenu)
+          (cl-letf (((symbol-function #'vertico-buffer-frame--origin-buffer)
+                     (lambda ()
+                       source))
+                    ((symbol-function
+                      #'vertico-buffer-frame--imenu-index-entries)
+                     (lambda ()
+                       'not-a-list)))
+            (with-current-buffer minibuffer
+              (should-not
+               (vertico-buffer-frame--imenu-target "target" "target")))))
+      (mapc (lambda (buffer)
+              (when (buffer-live-p buffer)
+                (kill-buffer buffer)))
+            (list source minibuffer)))))
+
+(ert-deftest vertico-buffer-frame-imenu-target-ignores-improper-index ()
+  (let ((source (generate-new-buffer " *vbf-imenu-improper-index-source*"))
+        (minibuffer (generate-new-buffer " *vbf-imenu-improper-index-minibuffer*")))
+    (unwind-protect
+        (progn
+          (require 'imenu)
+          (cl-letf (((symbol-function #'vertico-buffer-frame--origin-buffer)
+                     (lambda ()
+                       source))
+                    ((symbol-function
+                      #'vertico-buffer-frame--imenu-index-entries)
+                     (lambda ()
+                       '(("target" . 7) . bad))))
+            (with-current-buffer minibuffer
+              (should-not
+               (vertico-buffer-frame--imenu-target "target" "target")))))
+      (mapc (lambda (buffer)
+              (when (buffer-live-p buffer)
+                (kill-buffer buffer)))
+            (list source minibuffer)))))
+
+(ert-deftest vertico-buffer-frame-imenu-target-ignores-cache-key-errors ()
+  (let ((source (generate-new-buffer " *vbf-imenu-cache-error-source*"))
+        (minibuffer (generate-new-buffer " *vbf-imenu-cache-error-minibuffer*")))
+    (unwind-protect
+        (progn
+          (require 'imenu)
+          (cl-letf (((symbol-function #'vertico-buffer-frame--origin-buffer)
+                     (lambda ()
+                       source))
+                    ((symbol-function #'vertico-buffer-frame--imenu-cache-key)
+                     (lambda (&rest _args)
+                       (error "cache failed"))))
+            (with-current-buffer minibuffer
+              (should-not
+               (vertico-buffer-frame--imenu-target "target" "target")))))
+      (mapc (lambda (buffer)
+              (when (buffer-live-p buffer)
+                (kill-buffer buffer)))
+            (list source minibuffer)))))
+
+(ert-deftest vertico-buffer-frame-imenu-find-entry-skips-non-string-names ()
+  (should (equal (vertico-buffer-frame--imenu-find-entry
+                  "target"
+                  '((42 . 1)
+                    ("group" ("target" . 7))))
+                 '("target" . 7))))
+
 (ert-deftest vertico-buffer-frame-consult-imenu-target-uses-consult-prefix ()
   (let ((source (generate-new-buffer " *vbf-consult-imenu-source*"))
         (minibuffer (generate-new-buffer " *vbf-consult-imenu-minibuffer*"))
         (consult-imenu-config
-         '((fundamental-mode :toplevel "Functions"))))
+         '((emacs-lisp-mode :toplevel "Functions"))))
     (unwind-protect
         (cl-letf (((symbol-function #'minibuffer-selected-window)
                    (lambda ()
@@ -2092,7 +5145,7 @@
                    (lambda ()
                      (list (cons "target" 7)))))
           (with-current-buffer source
-            (setq-local major-mode 'fundamental-mode))
+            (emacs-lisp-mode))
           (with-current-buffer minibuffer
             (should (equal (vertico-buffer-frame--imenu-target
                             "Functions target"
@@ -2107,7 +5160,7 @@
   (let ((source (generate-new-buffer " *vbf-consult-imenu-dupe-source*"))
         (minibuffer (generate-new-buffer " *vbf-consult-imenu-dupe-minibuffer*"))
         (consult-imenu-config
-         '((fundamental-mode :toplevel "Functions"))))
+         '((emacs-lisp-mode :toplevel "Functions"))))
     (unwind-protect
         (cl-letf (((symbol-function #'minibuffer-selected-window)
                    (lambda ()
@@ -2124,7 +5177,7 @@
                      (list (cons "target" 7)
                            (cons "target" 11)))))
           (with-current-buffer source
-            (setq-local major-mode 'fundamental-mode))
+            (emacs-lisp-mode))
           (with-current-buffer minibuffer
             (should (equal (vertico-buffer-frame--imenu-target
                             "Functions target (1)"
@@ -2142,7 +5195,7 @@
           (calls 0))
       (cl-letf (((symbol-function
                   #'vertico-buffer-frame--consult-imenu-entry-table)
-                 (lambda (entries)
+                 (lambda (entries _buffer)
                    (cl-incf calls)
                    (let ((table (make-hash-table :test #'equal)))
                      (puthash (caar entries) (cdar entries) table)
@@ -2150,20 +5203,72 @@
         (should (equal
                  (gethash "a"
                           (vertico-buffer-frame--consult-imenu-entry-table-cached
-                           entries-a))
+                           entries-a
+                           (current-buffer)))
                  1))
         (should (equal
                  (gethash "a"
                           (vertico-buffer-frame--consult-imenu-entry-table-cached
-                           entries-a))
+                           entries-a
+                           (current-buffer)))
                  1))
         (should (= calls 1))
         (should (equal
                  (gethash "b"
                           (vertico-buffer-frame--consult-imenu-entry-table-cached
-                           entries-b))
+                           entries-b
+                           (current-buffer)))
                  2))
         (should (= calls 2))))))
+
+(ert-deftest vertico-buffer-frame-consult-imenu-config-ignores-invalid-config ()
+  (let ((source (generate-new-buffer " *vbf-consult-imenu-bad-config*"))
+        (consult-imenu-config 'not-a-list))
+    (unwind-protect
+        (with-current-buffer source
+          (emacs-lisp-mode)
+          (should-not
+           (vertico-buffer-frame--consult-imenu-config source)))
+      (when (buffer-live-p source)
+        (kill-buffer source)))))
+
+(ert-deftest vertico-buffer-frame-consult-imenu-config-ignores-improper-config ()
+  (let ((source (generate-new-buffer " *vbf-consult-imenu-improper-config*"))
+        (consult-imenu-config '((emacs-lisp-mode :toplevel "Functions") . bad)))
+    (unwind-protect
+        (with-current-buffer source
+          (emacs-lisp-mode)
+          (should-not
+           (vertico-buffer-frame--consult-imenu-config source)))
+      (when (buffer-live-p source)
+        (kill-buffer source)))))
+
+(ert-deftest vertico-buffer-frame-consult-imenu-config-ignores-malformed-entry ()
+  (let ((source (generate-new-buffer " *vbf-consult-imenu-malformed-config*"))
+        (consult-imenu-config '(("bad-mode" :toplevel "Bad"))))
+    (unwind-protect
+        (with-current-buffer source
+          (emacs-lisp-mode)
+          (should-not
+           (vertico-buffer-frame--consult-imenu-config source)))
+      (when (buffer-live-p source)
+        (kill-buffer source)))))
+
+(ert-deftest vertico-buffer-frame-consult-imenu-items-ignores-atoms ()
+  (with-temp-buffer
+    (let ((consult-imenu-config '((fundamental-mode :toplevel "Top"))))
+      (fundamental-mode)
+      (should (equal
+               (vertico-buffer-frame--consult-imenu-items
+                '(bad ("target" . 1))
+                (current-buffer))
+               '(("Top" ("target" . 1))))))))
+
+(ert-deftest vertico-buffer-frame-consult-imenu-flatten-ignores-improper-entries ()
+  (should-not
+   (vertico-buffer-frame--consult-imenu-flatten
+    nil
+    '(("target" . 1) . bad))))
 
 (ert-deftest vertico-buffer-frame-dabbrev-target-finds-origin-buffer ()
   (let ((source (generate-new-buffer " *vbf-dabbrev-source*")))
@@ -2185,6 +5290,71 @@
       (when (buffer-live-p source)
         (kill-buffer source)))))
 
+(ert-deftest vertico-buffer-frame-info-menu-target-ignores-invalid-buffer ()
+  (let ((Info-complete-menu-buffer 'not-a-buffer))
+    (should-not
+     (vertico-buffer-frame--info-menu-target "Target"))))
+
+(ert-deftest vertico-buffer-frame-info-menu-target-falls-back-after-buffer-death ()
+  (let ((menu-buffer (generate-new-buffer " *vbf-info-menu*")))
+    (unwind-protect
+        (let (target)
+          (with-current-buffer menu-buffer
+            (insert "* Menu:\n\n* Target:: Entry text\n"))
+          (let ((Info-complete-menu-buffer menu-buffer))
+            (setq target (vertico-buffer-frame--info-menu-target "Target")))
+          (kill-buffer menu-buffer)
+          (with-temp-buffer
+            (funcall (nth 2 target))
+            (should (equal (buffer-string) "Target\n"))))
+      (when (buffer-live-p menu-buffer)
+        (kill-buffer menu-buffer)))))
+
+(ert-deftest vertico-buffer-frame-calendar-month-target-ignores-calendar-errors ()
+  (require 'calendar)
+  (cl-letf (((symbol-function #'calendar-make-alist)
+             (lambda (&rest _args)
+               (error "calendar failed"))))
+    (should-not
+     (vertico-buffer-frame--calendar-month-target "January")))
+  (cl-letf (((symbol-function #'calendar-generate-month)
+             (lambda (&rest _args)
+               (error "generate failed"))))
+    (let ((target (vertico-buffer-frame--calendar-month-target "January")))
+      (with-temp-buffer
+        (funcall (nth 2 target))
+        (should (equal (buffer-string) "January\n"))))))
+
+(ert-deftest vertico-buffer-frame-origin-buffer-skips-dead-window ()
+  (let (window-buffer-called)
+    (cl-letf (((symbol-function #'minibuffer-selected-window)
+               (lambda ()
+                 'dead-window))
+              ((symbol-function #'window-live-p)
+               (lambda (_window)
+                 nil))
+              ((symbol-function #'window-buffer)
+               (lambda (_window)
+                 (setq window-buffer-called t)
+                 'buffer)))
+      (should-not (vertico-buffer-frame--origin-buffer))
+      (should-not window-buffer-called))))
+
+(ert-deftest vertico-buffer-frame-origin-buffer-ignores-live-check-errors ()
+  (let (window-buffer-called)
+    (cl-letf (((symbol-function #'minibuffer-selected-window)
+               (lambda ()
+                 'stale-window))
+              ((symbol-function #'window-live-p)
+               (lambda (_window)
+                 (error "stale window")))
+              ((symbol-function #'window-buffer)
+               (lambda (_window)
+                 (setq window-buffer-called t)
+                 'buffer)))
+      (should-not (vertico-buffer-frame--origin-buffer))
+      (should-not window-buffer-called))))
+
 (ert-deftest vertico-buffer-frame-bibtex-target-finds-entry ()
   (let ((source (generate-new-buffer " *vbf-bibtex-source*")))
     (unwind-protect
@@ -2200,12 +5370,26 @@
       (when (buffer-live-p source)
         (kill-buffer source)))))
 
+(ert-deftest vertico-buffer-frame-bibtex-target-ignores-buffer-errors ()
+  (let ((source (generate-new-buffer " *vbf-bibtex-error-source*")))
+    (unwind-protect
+        (cl-letf (((symbol-function #'vertico-buffer-frame--origin-buffer)
+                   (lambda ()
+                     source))
+                  ((symbol-function #'widen)
+                   (lambda ()
+                     (error "widen failed"))))
+          (should-not
+           (vertico-buffer-frame--bibtex-target "knuth1984" nil)))
+      (when (buffer-live-p source)
+        (kill-buffer source)))))
+
 (ert-deftest vertico-buffer-frame-buffer-position-target-displays-buffer ()
   (let ((source (generate-new-buffer " *vbf-position-source*"))
         events)
     (unwind-protect
         (cl-letf (((symbol-function #'vertico-buffer-frame--preview-window)
-                   (lambda ()
+                   (lambda (&optional _keep-buffer)
                      'window))
                   ((symbol-function
                     #'vertico-buffer-frame--set-preview-window-buffer)

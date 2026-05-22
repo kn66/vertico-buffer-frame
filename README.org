@@ -28,7 +28,13 @@ candidate frame instead of being placed side by side with the input area.
 
 * GIF
 
+** normal
+
 [[file:gif/vertico-buffer-frame.gif]]
+
+** with [[https://github.com/kn66/vertico-carousel][vertico-carousel]]
+
+[[file:gif/vertico-buffer-frame2.gif]]
 
 * Usage
 
@@ -39,6 +45,10 @@ Add this directory to ~load-path~, then:
   (vertico-buffer-frame-mode 1)
 #+end_src
 
+When testing a checkout while another copy is installed via ~package.el~, add
+the checkout directory to ~load-path~ after ~package-initialize~, or load the
+checkout file directly, so Emacs does not load the installed copy first.
+
 * Options
 
 - ~vertico-buffer-frame-border-width~
@@ -48,6 +58,7 @@ Add this directory to ~load-path~, then:
 - ~vertico-buffer-frame-golden-ratio-scale~
 - ~vertico-buffer-frame-parameters~
 - ~vertico-buffer-frame-report-display-errors~
+- ~vertico-buffer-frame-candidate-frame-pool-limit~
 - ~vertico-buffer-frame-preview~
 - ~vertico-buffer-frame-preview-delay~
 - ~vertico-buffer-frame-preview-width~
@@ -72,6 +83,11 @@ the child frame.  Set ~vertico-buffer-frame-size-method~ to ~fixed~ to use
 counts.  With the default scale of 1.0, the candidate frame is one
 golden-ratio step smaller than the largest golden rectangle fitting in the
 parent frame.  Values near 1.618 use the full fitting rectangle.
+
+Candidate child frames are hidden after minibuffer exit and reused when their
+parent frame and display parameters still match.  The reuse pool keeps up to
+~vertico-buffer-frame-candidate-frame-pool-limit~ frames by default; set it to
+nil for an unlimited pool, or 0 to disable reuse after minibuffer exit.
 
 The preview frame is sized automatically from the candidate frame so it follows
 parent frame resizing.  The automatic preview size is also rounded to character
@@ -99,6 +115,7 @@ Example:
 #+begin_src elisp
   (setq vertico-buffer-frame-size-method 'golden-ratio
         vertico-buffer-frame-preview t
+        vertico-buffer-frame-candidate-frame-pool-limit 8
         vertico-buffer-frame-preview-delay 0.2
         vertico-buffer-frame-preview-width nil
         vertico-buffer-frame-preview-height nil
@@ -161,10 +178,6 @@ or Consult changes their candidate metadata.
 - The package depends on a display where Emacs can create child frames.  GUI
   child-frame behavior can differ between PGTK, X, NS and other builds, and
   terminal support depends on Emacs' ~tty-child-frames~ support.
-- The global mode temporarily replaces ~vertico-buffer-display-action~ while it
-  is enabled.  If another package or user configuration changes that variable
-  while ~vertico-buffer-frame-mode~ is active, the value restored on disable may
-  not include that later change.
 - Selected candidate lookup uses Vertico's internal ~vertico--candidate~ because
   Vertico does not expose the selected raw candidate as a public API.
 - Consult previews rely on Consult candidate text properties and display
@@ -184,7 +197,7 @@ libraries, packages, registers, email, ecomplete, dabbrev, BibTeX keys and
 strings, and kill-ring entries.
 
 Consult-specific targets live in ~vertico-buffer-frame-consult.el~.  They are
-loaded automatically after Consult is loaded, and add support for
+loaded with ~vertico-buffer-frame~, and add support for
 ~consult-location~, ~consult-grep~ and ~consult-xref~.  Consult imenu candidates
 are resolved by the generic imenu preview target, including Consult's
 configured imenu prefixes and duplicate-name suffixes.
@@ -230,7 +243,14 @@ the extra posframe dependency.
 
 * Tests
 
-Run the non-graphical unit tests with:
+Run the full non-graphical check suite with:
+
+#+begin_src sh
+  make check
+#+end_src
+
+This runs the ERT tests, byte compilation with warnings as errors,
+~package-lint~, ~checkdoc~ and ~check-declare~.  To run only the unit tests:
 
 #+begin_src sh
   emacs --batch -Q \

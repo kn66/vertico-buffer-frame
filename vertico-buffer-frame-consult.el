@@ -30,24 +30,17 @@
 ;;; Code:
 
 (require 'subr-x)
+(require 'vertico-buffer-frame-preview)
+(require 'xref)
 
-(defvar vertico-buffer-frame-preview-categories)
-(defvar vertico-buffer-frame-preview-target-functions)
 (defvar xref-file-name-display)
 
 (declare-function vertico-buffer-frame--buffer-position-target
                   "vertico-buffer-frame-preview")
 (declare-function vertico-buffer-frame--file-target
                   "vertico-buffer-frame-preview")
-(declare-function vertico-buffer-frame--origin-buffer
-                  "vertico-buffer-frame-preview")
 (declare-function vertico-buffer-frame--text-property-value
                   "vertico-buffer-frame-preview")
-(declare-function xref-item-location "xref")
-(declare-function xref-location-group "xref")
-(declare-function xref-location-line "xref")
-(declare-function xref-location-marker "xref")
-
 (defun vertico-buffer-frame-consult--location-value (raw-candidate)
   "Return Consult location metadata from RAW-CANDIDATE."
   (vertico-buffer-frame--text-property-value
@@ -120,21 +113,38 @@
      (car location)
      (cdr location))))
 
+(defun vertico-buffer-frame-consult--xref-location (xref)
+  "Return XREF's location, ignoring malformed xref objects."
+  (condition-case-unless-debug nil
+      (and (fboundp 'xref-item-location)
+           (xref-item-location xref))
+    (error nil)))
+
+(defun vertico-buffer-frame-consult--xref-file-line-target (location)
+  "Return a file-line target for xref LOCATION."
+  (condition-case-unless-debug nil
+      (when-let* ((file (let ((xref-file-name-display 'abs))
+                          (xref-location-group location)))
+                  (line (xref-location-line location)))
+        (vertico-buffer-frame-consult--file-line-target file line))
+    (error nil)))
+
+(defun vertico-buffer-frame-consult--xref-marker-target (location)
+  "Return a buffer-position target for xref LOCATION."
+  (condition-case-unless-debug nil
+      (when-let* ((marker (xref-location-marker location))
+                  ((markerp marker))
+                  (buffer (marker-buffer marker)))
+        (vertico-buffer-frame--buffer-position-target buffer marker))
+    (error nil)))
+
 (defun vertico-buffer-frame-consult--xref-target (raw-candidate)
   "Return a preview target for a Consult Xref RAW-CANDIDATE."
   (when-let* ((xref (vertico-buffer-frame--text-property-value
                      'consult-xref raw-candidate))
-              ((fboundp 'xref-item-location))
-              (location (xref-item-location xref)))
-    (or (when-let* ((file (let ((xref-file-name-display 'abs))
-                            (xref-location-group location)))
-                    (line (xref-location-line location)))
-          (vertico-buffer-frame-consult--file-line-target file line))
-        (when-let* ((marker (ignore-errors
-                              (xref-location-marker location)))
-                    ((markerp marker))
-                    (buffer (marker-buffer marker)))
-          (vertico-buffer-frame--buffer-position-target buffer marker)))))
+              (location (vertico-buffer-frame-consult--xref-location xref)))
+    (or (vertico-buffer-frame-consult--xref-file-line-target location)
+        (vertico-buffer-frame-consult--xref-marker-target location))))
 
 (defun vertico-buffer-frame-consult-preview-target
     (category candidate raw-candidate)
@@ -149,15 +159,12 @@
 
 (defun vertico-buffer-frame-consult--install ()
   "Install Consult preview target support."
-  (dolist (category '(consult-location consult-grep consult-xref))
-    (add-to-list 'vertico-buffer-frame-preview-categories category t))
-  (add-hook 'vertico-buffer-frame-preview-target-functions
-            #'vertico-buffer-frame-consult-preview-target))
+  (vertico-buffer-frame--add-hook
+   'vertico-buffer-frame-preview-target-functions
+   #'vertico-buffer-frame-consult-preview-target
+   t))
 
-(if (boundp 'vertico-buffer-frame-preview-target-functions)
-    (vertico-buffer-frame-consult--install)
-  (with-eval-after-load 'vertico-buffer-frame-preview
-    (vertico-buffer-frame-consult--install)))
+(vertico-buffer-frame-consult--install)
 
 (provide 'vertico-buffer-frame-consult)
 ;;; vertico-buffer-frame-consult.el ends here
