@@ -276,23 +276,38 @@ useful when diagnosing backend-specific child-frame failures."
 
 (defun vertico-buffer-frame--default-background (frame)
   "Return the specified default background color for FRAME."
-  (condition-case-unless-debug nil
-      (vertico-buffer-frame--specified-color
-       (face-background 'default frame 'default))
-    (error nil)))
+  (or (condition-case-unless-debug nil
+          (vertico-buffer-frame--specified-color
+           (face-background 'default frame 'default))
+        (error nil))
+      (condition-case-unless-debug nil
+          (vertico-buffer-frame--specified-color
+           (frame-parameter frame 'background-color))
+        (error nil))))
 
 (defun vertico-buffer-frame--default-foreground (frame)
   "Return the specified default foreground color for FRAME."
-  (condition-case-unless-debug nil
-      (vertico-buffer-frame--specified-color
-       (face-foreground 'default frame 'default))
-    (error nil)))
+  (or (condition-case-unless-debug nil
+          (vertico-buffer-frame--specified-color
+           (face-foreground 'default frame 'default))
+        (error nil))
+      (condition-case-unless-debug nil
+          (vertico-buffer-frame--specified-color
+           (frame-parameter frame 'foreground-color))
+        (error nil))))
 
-(defun vertico-buffer-frame--apply-border-face (frame)
-  "Use FRAME's default foreground color for its child frame border."
-  (ignore-errors
-    (when-let* ((color (vertico-buffer-frame--default-foreground frame)))
-      (set-face-background 'child-frame-border color frame)))
+(defun vertico-buffer-frame--apply-border-face (frame &optional source)
+  "Apply opaque default and border faces to FRAME.
+Use SOURCE's default colors when non-nil, otherwise use FRAME's colors."
+  (let ((source (or source frame)))
+    (when-let* ((background (vertico-buffer-frame--default-background source)))
+      (ignore-errors
+        (set-face-background 'default background frame)))
+    (when-let* ((foreground (vertico-buffer-frame--default-foreground source)))
+      (ignore-errors
+        (set-face-foreground 'default foreground frame))
+      (ignore-errors
+        (set-face-background 'child-frame-border foreground frame))))
   frame)
 
 (defun vertico-buffer-frame--frame-parameter (frame parameter)
@@ -544,7 +559,7 @@ display action used by `display-buffer-in-child-frame'."
           (setq frame (or (vertico-buffer-frame--window-frame window)
                           (error "Child frame window did not have a live frame")))
           (vertico-buffer-frame--prepare-window window)
-          (vertico-buffer-frame--apply-border-face frame)
+          (vertico-buffer-frame--apply-border-face frame parent)
           (vertico-buffer-frame--set-frame-owner-buffer
            frame
            (current-buffer))

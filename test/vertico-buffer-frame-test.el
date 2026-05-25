@@ -490,19 +490,48 @@
     (should-not (vertico-buffer-frame--default-background 'frame))
     (should-not (vertico-buffer-frame--default-foreground 'frame))))
 
+(ert-deftest vertico-buffer-frame-default-colors-fall-back-to-frame-parameters ()
+  (cl-letf (((symbol-function #'face-background)
+             (lambda (&rest _args)
+               "unspecified-bg"))
+            ((symbol-function #'face-foreground)
+             (lambda (&rest _args)
+               "unspecified-fg"))
+            ((symbol-function #'frame-parameter)
+             (lambda (_frame parameter)
+               (pcase parameter
+                 ('background-color "background")
+                 ('foreground-color "foreground")))))
+    (should (equal (vertico-buffer-frame--default-background 'frame)
+                   "background"))
+    (should (equal (vertico-buffer-frame--default-foreground 'frame)
+                   "foreground"))))
+
 (ert-deftest vertico-buffer-frame-apply-border-face-ignores-face-errors ()
-  (let (colors)
-    (cl-letf (((symbol-function #'vertico-buffer-frame--default-foreground)
-               (lambda (_frame)
+  (let (backgrounds foregrounds)
+    (cl-letf (((symbol-function #'vertico-buffer-frame--default-background)
+               (lambda (frame)
+                 (should (eq frame 'source))
+                 "background"))
+              ((symbol-function #'vertico-buffer-frame--default-foreground)
+               (lambda (frame)
+                 (should (eq frame 'source))
                  "foreground"))
               ((symbol-function #'set-face-background)
                (lambda (face color frame)
-                 (push (list face color frame) colors)
+                 (push (list face color frame) backgrounds)
+                 (error "Face failed")))
+              ((symbol-function #'set-face-foreground)
+               (lambda (face color frame)
+                 (push (list face color frame) foregrounds)
                  (error "Face failed"))))
-      (should (eq (vertico-buffer-frame--apply-border-face 'frame)
+      (should (eq (vertico-buffer-frame--apply-border-face 'frame 'source)
                   'frame))
-      (should (equal colors
-                     '((child-frame-border "foreground" frame)))))))
+      (should (equal backgrounds
+                     '((child-frame-border "foreground" frame)
+                       (default "background" frame))))
+      (should (equal foregrounds
+                     '((default "foreground" frame)))))))
 
 (ert-deftest vertico-buffer-frame-parent-frame-falls-back-on-window-error ()
   (cl-letf (((symbol-function #'minibuffer-selected-window)
@@ -556,7 +585,7 @@
     (should-not (vertico-buffer-frame--window-live-p 'stale-window))))
 
 (ert-deftest vertico-buffer-frame-display-child-frame-uses-opaque-default-colors ()
-  (let (display-alist face-background prepared)
+  (let (display-alist face-backgrounds face-foregrounds prepared)
     (cl-letf (((symbol-function #'display-buffer-in-child-frame)
                (lambda (_buffer alist)
                  (setq display-alist alist)
@@ -573,11 +602,14 @@
                  "background"))
               ((symbol-function #'vertico-buffer-frame--default-foreground)
                (lambda (frame)
-                 (should (memq frame '(parent frame)))
+                 (should (eq frame 'parent))
                  "foreground"))
               ((symbol-function #'set-face-background)
                (lambda (face color frame)
-                 (setq face-background (list face color frame))))
+                 (push (list face color frame) face-backgrounds)))
+              ((symbol-function #'set-face-foreground)
+               (lambda (face color frame)
+                 (push (list face color frame) face-foregrounds)))
               ((symbol-function #'vertico-buffer-frame--prepare-window)
                (lambda (window)
                  (push window prepared))))
@@ -607,8 +639,11 @@
           (should (symbolp (car-safe share)))
           (should (equal (cdr share) '(candidate "name")))))
       (should (equal prepared '(window)))
-      (should (equal face-background
-                     '(child-frame-border "foreground" frame))))))
+      (should (equal face-backgrounds
+                     '((child-frame-border "foreground" frame)
+                       (default "background" frame))))
+      (should (equal face-foregrounds
+                     '((default "foreground" frame)))))))
 
 (ert-deftest vertico-buffer-frame-child-frame-session-is-buffer-local ()
   (let ((buffer-a (generate-new-buffer " *vbf-session-a*"))
@@ -649,7 +684,7 @@
               ((symbol-function #'vertico-buffer-frame--prepare-window)
                (lambda (_window)))
               ((symbol-function #'vertico-buffer-frame--apply-border-face)
-               (lambda (_frame))))
+               (lambda (&rest _args))))
       (vertico-buffer-frame--display-buffer-in-child-frame
        'buffer 'parent "name" '(80 . 10) 'candidate)
       (let ((created-parameters
@@ -683,7 +718,7 @@
               ((symbol-function #'vertico-buffer-frame--prepare-window)
                (lambda (_window)))
               ((symbol-function #'vertico-buffer-frame--apply-border-face)
-               (lambda (_frame))))
+               (lambda (&rest _args))))
       (vertico-buffer-frame--display-buffer-in-child-frame
        'buffer 'parent "name" '(80 . 10) 'candidate)
       (let ((created-parameters
@@ -713,7 +748,7 @@
               ((symbol-function #'vertico-buffer-frame--prepare-window)
                (lambda (_window)))
               ((symbol-function #'vertico-buffer-frame--apply-border-face)
-               (lambda (_frame))))
+               (lambda (&rest _args))))
       (vertico-buffer-frame--display-buffer-in-child-frame
        'buffer 'parent "name" '(80 . 10) 'candidate)
       (let ((created-parameters
@@ -752,7 +787,7 @@
                 ((symbol-function #'vertico-buffer-frame--prepare-window)
                  (lambda (_window)))
                 ((symbol-function #'vertico-buffer-frame--apply-border-face)
-                 (lambda (_frame))))
+                 (lambda (&rest _args))))
         (should (eq (vertico-buffer-frame--display-buffer-in-child-frame
                      'buffer 'parent "name" '(80 . 10))
                     'window))
