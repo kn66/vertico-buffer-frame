@@ -78,6 +78,13 @@ When this is `fixed', use `vertico-buffer-frame-width' and
   :type '(choice (const :tag "Golden ratio" golden-ratio)
                  (const :tag "Fixed character size" fixed)))
 
+(defcustom vertico-buffer-frame-resize-to-fit-candidates nil
+  "Non-nil means expand the candidate frame width to fit visible candidates.
+The configured candidate frame width is used as the minimum width.  When a
+visible candidate line is wider, the child frame grows up to the parent frame
+width and is centered again."
+  :type 'boolean)
+
 (defconst vertico-buffer-frame--default-border-width 1
   "Default width of the child frame border in pixels.")
 
@@ -395,6 +402,16 @@ When BUFFER is nil, clear the owner.  Ignore stale frame objects because this
   (max 1 (round (/ (float (max 1 pixels))
                    (max 1 char-size)))))
 
+(defun vertico-buffer-frame--pixels-to-fitting-chars (pixels char-size)
+  "Return character count needed to fit PIXELS using CHAR-SIZE."
+  (max 1 (ceiling (/ (float (max 1 pixels))
+                     (max 1 char-size)))))
+
+(defun vertico-buffer-frame--pixels-to-contained-chars (pixels char-size)
+  "Return character count contained by PIXELS using CHAR-SIZE."
+  (max 1 (floor (/ (float (max 1 pixels))
+                   (max 1 char-size)))))
+
 (defun vertico-buffer-frame--parent-pixel-size (parent)
   "Return PARENT frame size in pixels."
   (cons (max 1 (frame-pixel-width parent))
@@ -453,6 +470,83 @@ When BUFFER is nil, clear the owner.  Ignore stale frame objects because this
      (vertico-buffer-frame--fixed-frame-size))
     (_
      (vertico-buffer-frame--golden-frame-size parent))))
+
+(defun vertico-buffer-frame--candidate-frame-max-width (parent frame)
+  "Return the maximum candidate FRAME width in characters inside PARENT."
+  (vertico-buffer-frame--pixels-to-contained-chars
+   (frame-pixel-width parent)
+   (frame-char-width frame)))
+
+(defun vertico-buffer-frame--candidate-overlay-string (window)
+  "Return Vertico candidate overlay string displayed in WINDOW."
+  (condition-case-unless-debug nil
+      (when (vertico-buffer-frame--window-live-p window)
+        (with-current-buffer (window-buffer window)
+          (when (overlayp vertico--candidates-ov)
+            (let ((string (overlay-get vertico--candidates-ov
+                                       'before-string)))
+              (and (stringp string)
+                   string)))))
+    (error nil)))
+
+(defun vertico-buffer-frame--max-line-pixel-width (string max-pixels)
+  "Return the maximum line width in STRING, capped at MAX-PIXELS."
+  (let ((start 0)
+        (width 0)
+        (length (length string)))
+    (while (< start length)
+      (let* ((end (or (string-search "\n" string start)
+                      length))
+             (line (substring string start end)))
+        (setq width
+              (min max-pixels
+                   (max width (string-pixel-width line))))
+        (setq start (if (< end length)
+                        (1+ end)
+                      length))))
+    width))
+
+(defun vertico-buffer-frame--candidate-overlay-pixel-width
+    (window max-pixels)
+  "Return widest candidate overlay line in WINDOW, capped at MAX-PIXELS."
+  (when-let* ((string
+               (vertico-buffer-frame--candidate-overlay-string window)))
+    (with-selected-window window
+      (vertico-buffer-frame--max-line-pixel-width string max-pixels))))
+
+(defun vertico-buffer-frame--candidate-text-pixel-width (window parent)
+  "Return the widest visible text line in WINDOW, capped by PARENT pixels."
+  (condition-case-unless-debug nil
+      (when (vertico-buffer-frame--window-live-p window)
+        (let ((max-pixels (frame-pixel-width parent)))
+          (or (vertico-buffer-frame--candidate-overlay-pixel-width
+               window max-pixels)
+              (car
+               (window-text-pixel-size
+                window nil nil max-pixels
+                (frame-pixel-height parent))))))
+    (error nil)))
+
+(defun vertico-buffer-frame--candidate-frame-size-to-fit
+    (parent window size)
+  "Return SIZE widened to fit visible candidates in WINDOW under PARENT."
+  (if (and vertico-buffer-frame-resize-to-fit-candidates
+           (vertico-buffer-frame--window-live-p window))
+      (let* ((frame (vertico-buffer-frame--window-frame window))
+             (char-width (and frame (frame-char-width frame)))
+             (text-pixels
+              (vertico-buffer-frame--candidate-text-pixel-width
+               window parent)))
+        (if (and frame
+                 (natnump text-pixels))
+            (cons (max (car size)
+                       (min (vertico-buffer-frame--candidate-frame-max-width
+                             parent frame)
+                            (vertico-buffer-frame--pixels-to-fitting-chars
+                             text-pixels char-width)))
+                  (cdr size))
+          size))
+    size))
 
 (defun vertico-buffer-frame--resize-frame-to-size (frame size)
   "Resize FRAME to character SIZE."
@@ -621,6 +715,25 @@ PARENT is the expected parent frame and SIZE is the target character size."
               t))))
     (error nil)))
 
+(defun vertico-buffer-frame--refresh-candidate-frame-layout ()
+  "Refresh candidate frame layout for the current minibuffer."
+  (condition-case-unless-debug nil
+      (when (vertico-buffer-frame--candidate-window-live-p)
+        (let* ((parent (or (vertico-buffer-frame--frame-parameter
+                            vertico-buffer-frame--candidate-frame
+                            'parent-frame)
+                           (vertico-buffer-frame--parent-frame)))
+               (size (vertico-buffer-frame--candidate-frame-size parent)))
+          (vertico-buffer-frame--sync-candidate-frame-layout
+           parent
+           (vertico-buffer-frame--candidate-frame-size-to-fit
+            parent vertico-buffer-frame--candidate-window size))))
+    (error nil)))
+
+(defun vertico-buffer-frame--candidate-post-command ()
+  "Update candidate frame sizing after Vertico refreshes candidates."
+  (vertico-buffer-frame--refresh-candidate-frame-layout))
+
 (defun vertico-buffer-frame--with-selected-live-window (window function)
   "Call FUNCTION with WINDOW selected, returning nil on stale window errors."
   (condition-case-unless-debug nil
@@ -714,7 +827,10 @@ This function is intended for `vertico-buffer-display-action'."
               (set-window-buffer
                vertico-buffer-frame--candidate-window buffer))
             (vertico-buffer-frame--install-cleanup)
-            (vertico-buffer-frame--sync-candidate-frame-layout parent size)
+            (vertico-buffer-frame--sync-candidate-frame-layout
+             parent
+             (vertico-buffer-frame--candidate-frame-size-to-fit
+              parent vertico-buffer-frame--candidate-window size))
             (setq vertico-buffer-frame--last-display-error-message nil)
             vertico-buffer-frame--candidate-window))
       (error
@@ -796,6 +912,9 @@ of a Vertico child frame."
           (vertico-buffer-frame--remove-hook
            'post-command-hook
            #'vertico-buffer-frame--preview-post-command t)
+          (vertico-buffer-frame--remove-hook
+           'post-command-hook
+           #'vertico-buffer-frame--candidate-post-command t)
           (vertico-buffer-frame--cancel-preview-timer)
           (vertico-buffer-frame--delete-frame
            vertico-buffer-frame--candidate-frame)
@@ -858,6 +977,9 @@ Inside an active minibuffer, the change is buffer-local to that session."
     (setq-local mode-line-format nil
                 header-line-format nil
                 tab-line-format nil)
+    (vertico-buffer-frame--add-hook
+     'post-command-hook
+     #'vertico-buffer-frame--candidate-post-command t t)
     (vertico-buffer-frame--add-hook
      'post-command-hook
      #'vertico-buffer-frame--preview-post-command t t)

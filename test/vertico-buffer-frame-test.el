@@ -1051,6 +1051,81 @@
     (should (equal (vertico-buffer-frame--candidate-frame-size 'parent)
                    '(42 . 7)))))
 
+(ert-deftest vertico-buffer-frame-candidate-size-to-fit-disabled-keeps-size ()
+  (let ((vertico-buffer-frame-resize-to-fit-candidates nil))
+    (should (equal (vertico-buffer-frame--candidate-frame-size-to-fit
+                    'parent 'window '(80 . 10))
+                   '(80 . 10)))))
+
+(ert-deftest vertico-buffer-frame-candidate-size-to-fit-expands-width ()
+  (let ((vertico-buffer-frame-resize-to-fit-candidates t))
+    (cl-letf (((symbol-function #'window-live-p)
+               (lambda (window)
+                 (eq window 'window)))
+              ((symbol-function #'window-frame)
+               (lambda (window)
+                 (and (eq window 'window) 'frame)))
+              ((symbol-function #'frame-char-width)
+               (lambda (_frame)
+                 10))
+              ((symbol-function #'frame-pixel-width)
+               (lambda (_frame)
+                 1200))
+              ((symbol-function
+                #'vertico-buffer-frame--candidate-text-pixel-width)
+               (lambda (window parent)
+                 (should (eq window 'window))
+                 (should (eq parent 'parent))
+                 950)))
+      (should (equal (vertico-buffer-frame--candidate-frame-size-to-fit
+                      'parent 'window '(80 . 10))
+                     '(95 . 10))))))
+
+(ert-deftest vertico-buffer-frame-candidate-size-to-fit-caps-at-parent-width ()
+  (let ((vertico-buffer-frame-resize-to-fit-candidates t))
+    (cl-letf (((symbol-function #'window-live-p)
+               (lambda (window)
+                 (eq window 'window)))
+              ((symbol-function #'window-frame)
+               (lambda (window)
+                 (and (eq window 'window) 'frame)))
+              ((symbol-function #'frame-char-width)
+               (lambda (_frame)
+                 10))
+              ((symbol-function #'frame-pixel-width)
+               (lambda (_frame)
+                 1200))
+              ((symbol-function
+                #'vertico-buffer-frame--candidate-text-pixel-width)
+               (lambda (_window _parent)
+                 1800)))
+      (should (equal (vertico-buffer-frame--candidate-frame-size-to-fit
+                      'parent 'window '(80 . 10))
+                     '(120 . 10))))))
+
+(ert-deftest vertico-buffer-frame-candidate-text-pixel-width-measures-overlay ()
+  (let ((old-buffer (window-buffer (selected-window))))
+    (with-temp-buffer
+      (unwind-protect
+          (progn
+            (switch-to-buffer (current-buffer))
+            (setq-local vertico--candidates-ov
+                        (make-overlay (point-max) (point-max)))
+            (overlay-put vertico--candidates-ov
+                         'before-string
+                         "aa\nabcdef\nbbbb")
+            (cl-letf (((symbol-function #'frame-pixel-width)
+                       (lambda (_frame)
+                         100))
+                      ((symbol-function #'string-pixel-width)
+                       (lambda (string)
+                         (* 10 (length string)))))
+              (should (= (vertico-buffer-frame--candidate-text-pixel-width
+                          (selected-window) 'parent)
+                         60))))
+        (when (buffer-live-p old-buffer)
+          (set-window-buffer (selected-window) old-buffer))))))
+
 (ert-deftest vertico-buffer-frame-preview-size-follows-candidate-frame ()
   (let ((vertico-buffer-frame-preview-width nil)
         (vertico-buffer-frame-preview-height nil))
@@ -1164,6 +1239,8 @@
       (should-not mode-line-format)
       (should-not header-line-format)
       (should-not tab-line-format)
+      (should (memq #'vertico-buffer-frame--candidate-post-command
+                    post-command-hook))
       (should (memq #'vertico-buffer-frame--preview-post-command
                     post-command-hook)))))
 
@@ -1174,6 +1251,8 @@
       (vertico-buffer-frame--minibuffer-setup)
       (should (proper-list-p post-command-hook))
       (should (memq #'ignore post-command-hook))
+      (should (memq #'vertico-buffer-frame--candidate-post-command
+                    post-command-hook))
       (should (memq #'vertico-buffer-frame--preview-post-command
                     post-command-hook)))))
 
@@ -1506,6 +1585,38 @@
         (should (equal resized '((frame size))))
         (should (equal placed '((frame parent))))
         (should-not vertico-buffer-frame--candidate-layout-state)))))
+
+(ert-deftest vertico-buffer-frame-refresh-candidate-layout-uses-fit-size ()
+  (with-temp-buffer
+    (setq-local vertico-buffer-frame--candidate-frame 'frame
+                vertico-buffer-frame--candidate-window 'window)
+    (let (synced)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame)
+                   (eq frame 'frame)))
+                ((symbol-function #'window-live-p)
+                 (lambda (window)
+                   (eq window 'window)))
+                ((symbol-function #'frame-parameter)
+                 (lambda (_frame parameter)
+                   (and (eq parameter 'parent-frame)
+                        'parent)))
+                ((symbol-function #'vertico-buffer-frame--candidate-frame-size)
+                 (lambda (parent)
+                   (should (eq parent 'parent))
+                   '(80 . 10)))
+                ((symbol-function
+                  #'vertico-buffer-frame--candidate-frame-size-to-fit)
+                 (lambda (parent window size)
+                   (should (eq parent 'parent))
+                   (should (eq window 'window))
+                   (should (equal size '(80 . 10)))
+                   '(95 . 10)))
+                ((symbol-function #'vertico-buffer-frame--sync-candidate-frame-layout)
+                 (lambda (parent size)
+                   (setq synced (list parent size)))))
+        (vertico-buffer-frame--refresh-candidate-frame-layout)
+        (should (equal synced '(parent (95 . 10))))))))
 
 (ert-deftest vertico-buffer-frame-delete-owned-frames-deletes-package-frames ()
   (let (deleted)

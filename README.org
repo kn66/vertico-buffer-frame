@@ -64,6 +64,7 @@ checkout file directly, so Emacs does not load the installed copy first.
 - ~vertico-buffer-frame-size-method~
 - ~vertico-buffer-frame-width~
 - ~vertico-buffer-frame-height~
+- ~vertico-buffer-frame-resize-to-fit-candidates~
 - ~vertico-buffer-frame-golden-ratio-scale~
 - ~vertico-buffer-frame-parameters~
 - ~vertico-buffer-frame-report-display-errors~
@@ -91,6 +92,10 @@ the child frame.  Set ~vertico-buffer-frame-size-method~ to ~fixed~ to use
 counts.  With the default scale of 1.0, the candidate frame is one
 golden-ratio step smaller than the largest golden rectangle fitting in the
 parent frame.  Values near 1.618 use the full fitting rectangle.
+
+When ~vertico-buffer-frame-resize-to-fit-candidates~ is non-nil, the candidate
+frame uses the configured size as its minimum width and expands up to the
+parent frame width when visible candidate lines would otherwise be truncated.
 
 Each minibuffer session gets its own candidate child frame.  Candidate child
 frames are deleted after minibuffer exit.  Preview child frames are reused while
@@ -133,6 +138,7 @@ Example:
         vertico-buffer-frame-preview-search-buffer-limit 20
         vertico-buffer-frame-preview-report-errors t
         vertico-buffer-frame-border-width 1
+        vertico-buffer-frame-resize-to-fit-candidates nil
         vertico-buffer-frame-golden-ratio-scale 1.0
         vertico-buffer-frame-report-display-errors nil
         vertico-buffer-frame-parameters nil)
