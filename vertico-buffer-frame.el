@@ -41,10 +41,10 @@
 ;;
 ;; The preview frame is placed over the lower-right side of the candidate frame
 ;; so the minibuffer prompt keeps its normal width for long input, such as path
-;; editing and file renaming.  Candidate frames are hidden after minibuffer
-;; exit and reused when the parent frame and display parameters still match.
-;; Preview frames and temporary preview buffers are owned by the minibuffer
-;; session that created them, which keeps recursive minibuffers isolated.
+;; editing and file renaming.  Candidate frames are deleted after minibuffer
+;; exit.  Preview frames and temporary preview buffers are owned by the
+;; minibuffer session that created them, which keeps recursive minibuffers
+;; isolated.
 
 ;;; Code:
 
@@ -106,16 +106,6 @@ buffer action.  Enabling this option reports the error with `message', which is
 useful when diagnosing backend-specific child-frame failures."
   :type 'boolean)
 
-(defconst vertico-buffer-frame--default-candidate-frame-pool-limit 8
-  "Default number of hidden candidate child frames kept for reuse.")
-
-(defcustom vertico-buffer-frame-candidate-frame-pool-limit
-  vertico-buffer-frame--default-candidate-frame-pool-limit
-  "Maximum number of hidden candidate child frames kept for reuse.
-When nil, keep all reusable candidate frames.  Set this to 0 to disable
-candidate frame reuse after minibuffer exit."
-  :type '(choice (const :tag "Unlimited" nil) natnum))
-
 (defconst vertico-buffer-frame--golden-ratio (/ (+ 1.0 (sqrt 5.0)) 2.0)
   "Golden ratio used for automatic child-frame layout.")
 
@@ -124,7 +114,6 @@ candidate frame reuse after minibuffer exit."
 (defvar vertico-buffer-frame--saved-embark-display-action-present nil)
 (defvar vertico-buffer-frame--saved-state nil)
 (defvar vertico-buffer-frame--minibuffers nil)
-(defvar vertico-buffer-frame--candidate-frame-pool nil)
 (defvar vertico-buffer-frame--last-display-error-message nil)
 (defvar vertico-buffer-frame-mode)
 (defvar vertico-buffer-frame-mode-map)
@@ -134,7 +123,7 @@ candidate frame reuse after minibuffer exit."
 (defvar-local vertico-buffer-frame--candidate-frame nil)
 (defvar-local vertico-buffer-frame--candidate-window nil)
 (defvar-local vertico-buffer-frame--candidate-layout-state nil)
-(defvar-local vertico-buffer-frame--candidate-needs-update nil)
+(defvar-local vertico-buffer-frame--child-frame-session nil)
 (defvar-local vertico-buffer-frame--cleanup-function nil)
 
 (defconst vertico-buffer-frame--embark-display-action
@@ -193,14 +182,6 @@ candidate frame reuse after minibuffer exit."
             (symbolp (car parameter))))
      vertico-buffer-frame-parameters)))
 
-(defun vertico-buffer-frame--candidate-frame-pool ()
-  "Return the candidate frame pool when it is a proper list."
-  (or (and (proper-list-p vertico-buffer-frame--candidate-frame-pool)
-           vertico-buffer-frame--candidate-frame-pool)
-      (progn
-        (setq vertico-buffer-frame--candidate-frame-pool nil)
-        nil)))
-
 (defun vertico-buffer-frame--minibuffer-list ()
   "Return active minibuffer buffers when the list is well-formed."
   (or (and (proper-list-p vertico-buffer-frame--minibuffers)
@@ -208,6 +189,20 @@ candidate frame reuse after minibuffer exit."
       (progn
         (setq vertico-buffer-frame--minibuffers nil)
         nil)))
+
+(defun vertico-buffer-frame--tracked-minibuffer-buffer-p (buffer)
+  "Return non-nil when BUFFER is tracked as an active minibuffer."
+  (memq buffer (vertico-buffer-frame--minibuffer-list)))
+
+(defun vertico-buffer-frame--top-minibuffer-buffer ()
+  "Return the most recently registered minibuffer buffer."
+  (car (vertico-buffer-frame--minibuffer-list)))
+
+(defun vertico-buffer-frame--child-frame-session ()
+  "Return the unique child-frame session key for the current buffer."
+  (or vertico-buffer-frame--child-frame-session
+      (setq-local vertico-buffer-frame--child-frame-session
+                  (make-symbol "vertico-buffer-frame-session"))))
 
 (defun vertico-buffer-frame--display-buffer-alist ()
   "Return `display-buffer-alist' when it is a proper list."
@@ -234,8 +229,9 @@ candidate frame reuse after minibuffer exit."
           (delq vertico-buffer-frame--embark-display-action
                 display-buffer-alist))))
 
-(defun vertico-buffer-frame--base-parameters (parent name width height)
-  "Return child frame parameters for PARENT, NAME, WIDTH and HEIGHT."
+(defun vertico-buffer-frame--base-parameters (parent name width height
+                                                    &optional role)
+  "Return child frame parameters for PARENT, NAME, WIDTH, HEIGHT and ROLE."
   (append
    `((parent-frame . ,parent)
      (name . ,name)
@@ -243,9 +239,9 @@ candidate frame reuse after minibuffer exit."
      (minibuffer . nil)
      (width . ,width)
      (height . ,height)
-     (visibility . nil)
+     (visibility . ,(eq role 'candidate))
      (undecorated . t)
-     (no-accept-focus . t)
+     (no-accept-focus . ,(not (eq role 'candidate)))
      (no-focus-on-map . t)
      (skip-taskbar . t)
      (unsplittable . t)
@@ -305,12 +301,6 @@ candidate frame reuse after minibuffer exit."
     (and (vertico-buffer-frame--frame-live-p frame)
          (frame-parameter frame parameter))))
 
-(defun vertico-buffer-frame--frame-root-window (frame)
-  "Return FRAME's root window, ignoring stale frame errors."
-  (ignore-errors
-    (and (vertico-buffer-frame--frame-live-p frame)
-         (frame-root-window frame))))
-
 (defun vertico-buffer-frame--set-frame-owner-buffer (frame buffer)
   "Record BUFFER as FRAME's minibuffer owner.
 When BUFFER is nil, clear the owner.  Ignore stale frame objects because this
@@ -328,18 +318,43 @@ When BUFFER is nil, clear the owner.  Ignore stale frame objects because this
               buffer)
       (vertico-buffer-frame--delete-frame frame))))
 
-(defun vertico-buffer-frame--frame-reuse-key (parent name role)
-  "Return a key describing reusable child frame state.
-PARENT, NAME and ROLE identify the requested child frame."
-  (list parent
-        name
-        role
-        (vertico-buffer-frame--border-width)
-        (vertico-buffer-frame--parameters)
-        (ignore-errors
-          (vertico-buffer-frame--default-background parent))
-        (ignore-errors
-          (vertico-buffer-frame--default-foreground parent))))
+(defun vertico-buffer-frame--select-parent-of-frame (frame)
+  "Select FRAME's parent when FRAME is the selected frame."
+  (condition-case-unless-debug nil
+      (when (and (vertico-buffer-frame--frame-live-p frame)
+                 (eq frame (selected-frame)))
+        (when-let* ((parent (vertico-buffer-frame--frame-parameter
+                             frame 'parent-frame))
+                    ((vertico-buffer-frame--frame-live-p parent)))
+          (select-frame-set-input-focus parent)
+          t))
+    (error nil)))
+
+(defun vertico-buffer-frame--selected-frame-owner-buffer ()
+  "Return the minibuffer buffer owning the selected frame, if tracked."
+  (let ((buffer (vertico-buffer-frame--frame-parameter
+                 (selected-frame)
+                 vertico-buffer-frame--owner-buffer-parameter)))
+    (and (vertico-buffer-frame--tracked-minibuffer-buffer-p buffer)
+         buffer)))
+
+(defun vertico-buffer-frame--compute-minibuffer-exit-buffer ()
+  "Return the tracked minibuffer buffer to clean for this exit hook run."
+  (let ((top (vertico-buffer-frame--top-minibuffer-buffer)))
+    (or (and (vertico-buffer-frame--tracked-minibuffer-buffer-p
+              (current-buffer))
+             (current-buffer))
+        (and (eq (vertico-buffer-frame--selected-frame-owner-buffer)
+                 top)
+             top)
+        (and (eq (vertico-buffer-frame--active-minibuffer-buffer)
+                 top)
+             top)
+        top)))
+
+(defun vertico-buffer-frame--minibuffer-exit-buffer ()
+  "Return the cleanup target for `minibuffer-exit-hook'."
+  (vertico-buffer-frame--compute-minibuffer-exit-buffer))
 
 (defun vertico-buffer-frame--clamp-number (value minimum maximum)
   "Clamp VALUE between MINIMUM and MAXIMUM."
@@ -505,12 +520,14 @@ display action used by `display-buffer-in-child-frame'."
            (vertico-buffer-frame--base-parameters
             parent name
             (vertico-buffer-frame--positive-chars (car size))
-            (vertico-buffer-frame--positive-chars (cdr size)))
+            (vertico-buffer-frame--positive-chars (cdr size))
+            role)
            `((vertico-buffer-frame-owner . t)
              (vertico-buffer-frame-role . ,role)
-             (vertico-buffer-frame-reuse-key
-              . ,(vertico-buffer-frame--frame-reuse-key parent name role))
-             (share-child-frame . ,(list 'vertico-buffer-frame role name)))))
+             (share-child-frame
+              . ,(list (vertico-buffer-frame--child-frame-session)
+                       role
+                       name)))))
          (window
           (display-buffer-in-child-frame
            buffer
@@ -542,16 +559,18 @@ display action used by `display-buffer-in-child-frame'."
       (when (and (vertico-buffer-frame--frame-live-p frame)
                  (not (eq (frame-visible-p frame) t)))
         (make-frame-visible frame)
+        (vertico-buffer-frame--select-parent-of-frame frame)
         t)
     (error nil)))
 
 (defun vertico-buffer-frame--hide-frame (frame)
   "Make FRAME invisible if it is live and currently visible."
   (condition-case-unless-debug nil
-      (when (and (vertico-buffer-frame--frame-live-p frame)
-                 (frame-visible-p frame))
-        (make-frame-invisible frame)
-        t)
+      (when (vertico-buffer-frame--frame-live-p frame)
+        (vertico-buffer-frame--select-parent-of-frame frame)
+        (when (frame-visible-p frame)
+          (make-frame-invisible frame)
+          t))
     (error nil)))
 
 (defun vertico-buffer-frame--active-minibuffer-buffer ()
@@ -586,111 +605,6 @@ PARENT is the expected parent frame and SIZE is the target character size."
                            vertico-buffer-frame--candidate-frame parent size))
               t))))
     (error nil)))
-
-(defun vertico-buffer-frame--candidate-frame-reusable-p (frame reuse-key)
-  "Return non-nil when FRAME can be reused for REUSE-KEY."
-  (and (vertico-buffer-frame--frame-live-p frame)
-       (eq (vertico-buffer-frame--frame-parameter
-            frame 'vertico-buffer-frame-role)
-           'candidate)
-       (equal (vertico-buffer-frame--frame-parameter
-               frame 'vertico-buffer-frame-reuse-key)
-              reuse-key)))
-
-(defun vertico-buffer-frame--frame-hidden-p (frame)
-  "Return non-nil when FRAME is live but not visible."
-  (condition-case-unless-debug nil
-      (and (vertico-buffer-frame--frame-live-p frame)
-           (not (frame-visible-p frame)))
-    (error nil)))
-
-(defun vertico-buffer-frame--pooled-candidate-frame-p (frame)
-  "Return non-nil when FRAME is safe to keep in the candidate frame pool."
-  (and (vertico-buffer-frame--frame-hidden-p frame)
-       (eq (vertico-buffer-frame--frame-parameter
-            frame 'vertico-buffer-frame-role)
-           'candidate)
-       (vertico-buffer-frame--window-live-p
-        (vertico-buffer-frame--frame-root-window frame))
-       (not (vertico-buffer-frame--frame-parameter
-             frame vertico-buffer-frame--owner-buffer-parameter))
-       (vertico-buffer-frame--frame-parameter
-        frame 'vertico-buffer-frame-reuse-key)))
-
-(defun vertico-buffer-frame--candidate-frame-pool-limit ()
-  "Return the effective candidate frame pool limit."
-  (cond
-   ((null vertico-buffer-frame-candidate-frame-pool-limit)
-    nil)
-   ((natnump vertico-buffer-frame-candidate-frame-pool-limit)
-    vertico-buffer-frame-candidate-frame-pool-limit)
-   (t
-    vertico-buffer-frame--default-candidate-frame-pool-limit)))
-
-(defun vertico-buffer-frame--prune-candidate-frame-pool ()
-  "Drop unusable frames from the candidate frame pool."
-  (let (kept)
-    (dolist (frame (vertico-buffer-frame--candidate-frame-pool))
-      (if (vertico-buffer-frame--pooled-candidate-frame-p frame)
-          (push frame kept)
-        (vertico-buffer-frame--delete-frame frame)))
-    (setq vertico-buffer-frame--candidate-frame-pool
-          (nreverse kept))))
-
-(defun vertico-buffer-frame--trim-candidate-frame-pool ()
-  "Delete candidate frames beyond the configured pool limit."
-  (when-let* ((limit (vertico-buffer-frame--candidate-frame-pool-limit)))
-    (let (kept
-          (excess (vertico-buffer-frame--candidate-frame-pool))
-          (count 0))
-      (while (and excess
-                  (< count limit))
-        (push (pop excess) kept)
-        (cl-incf count))
-      (mapc #'vertico-buffer-frame--delete-frame
-            (copy-sequence excess))
-      (setq vertico-buffer-frame--candidate-frame-pool
-            (nreverse kept)))))
-
-(defun vertico-buffer-frame--stash-candidate-frame (frame)
-  "Hide FRAME and keep it for a later candidate display."
-  (when (vertico-buffer-frame--frame-live-p frame)
-    (ignore-errors
-      (vertico-buffer-frame--hide-frame frame))
-    (if (and (vertico-buffer-frame--frame-hidden-p frame)
-             (eq (vertico-buffer-frame--frame-parameter
-                  frame 'vertico-buffer-frame-role)
-                 'candidate)
-             (vertico-buffer-frame--window-live-p
-              (vertico-buffer-frame--frame-root-window frame))
-             (vertico-buffer-frame--frame-parameter
-              frame 'vertico-buffer-frame-reuse-key))
-        (progn
-          (vertico-buffer-frame--set-frame-owner-buffer frame nil)
-          (vertico-buffer-frame--candidate-frame-pool)
-          (cl-pushnew frame vertico-buffer-frame--candidate-frame-pool)
-          (vertico-buffer-frame--trim-candidate-frame-pool))
-      (vertico-buffer-frame--delete-frame frame))))
-
-(defun vertico-buffer-frame--reusable-candidate-window (reuse-key)
-  "Return a hidden candidate window matching REUSE-KEY, if available."
-  (vertico-buffer-frame--prune-candidate-frame-pool)
-  (when-let* ((frame
-               (cl-find-if
-                (lambda (candidate-frame)
-                  (and (vertico-buffer-frame--candidate-frame-reusable-p
-                        candidate-frame reuse-key)
-                       (vertico-buffer-frame--pooled-candidate-frame-p
-                        candidate-frame)))
-                vertico-buffer-frame--candidate-frame-pool)))
-    (let ((window (vertico-buffer-frame--frame-root-window frame)))
-      (if (vertico-buffer-frame--window-live-p window)
-          (progn
-            (setq vertico-buffer-frame--candidate-frame-pool
-                  (delq frame vertico-buffer-frame--candidate-frame-pool))
-            window)
-        (vertico-buffer-frame--delete-frame frame)
-        nil))))
 
 (defun vertico-buffer-frame--with-selected-live-window (window function)
   "Call FUNCTION with WINDOW selected, returning nil on stale window errors."
@@ -733,7 +647,7 @@ PARENT is the expected parent frame and SIZE is the target character size."
       (setq-local vertico-buffer-frame--candidate-frame nil
                   vertico-buffer-frame--candidate-window nil
                   vertico-buffer-frame--candidate-layout-state nil
-                  vertico-buffer-frame--candidate-needs-update nil
+                  vertico-buffer-frame--child-frame-session nil
                   vertico-buffer-frame--preview-frame nil
                   vertico-buffer-frame--preview-window nil
                   vertico-buffer-frame--preview-layout-state nil
@@ -754,29 +668,26 @@ This function is intended for `vertico-buffer-display-action'."
         (with-current-buffer owner
           (let* ((parent (vertico-buffer-frame--parent-frame))
                  (size (vertico-buffer-frame--candidate-frame-size parent))
-                 (name (format "Vertico %s" (minibuffer-depth)))
-                 (reuse-key
-                  (vertico-buffer-frame--frame-reuse-key
-                   parent name 'candidate)))
+                 (name (format "Vertico %s" (minibuffer-depth))))
             (unless (and (vertico-buffer-frame--candidate-window-live-p)
-                         (vertico-buffer-frame--candidate-frame-reusable-p
-                          vertico-buffer-frame--candidate-frame reuse-key))
-              (vertico-buffer-frame--stash-candidate-frame
+                         (eq (vertico-buffer-frame--frame-parameter
+                              vertico-buffer-frame--candidate-frame
+                              'parent-frame)
+                             parent))
+              (vertico-buffer-frame--delete-frame
                vertico-buffer-frame--candidate-frame)
               (setq-local vertico-buffer-frame--candidate-frame nil
-                          vertico-buffer-frame--candidate-window nil))
+                          vertico-buffer-frame--candidate-window nil
+                          vertico-buffer-frame--candidate-layout-state nil))
             (unless (vertico-buffer-frame--candidate-window-live-p)
               (setq-local
                vertico-buffer-frame--candidate-window
-               (or (vertico-buffer-frame--reusable-candidate-window
-                    reuse-key)
-                   (vertico-buffer-frame--display-buffer-in-child-frame
-                    buffer parent name size 'candidate alist))
+               (vertico-buffer-frame--display-buffer-in-child-frame
+                buffer parent name size 'candidate alist)
                vertico-buffer-frame--candidate-frame
                (or (vertico-buffer-frame--window-frame
                     vertico-buffer-frame--candidate-window)
-                   (error "Candidate window did not have a live frame"))
-               vertico-buffer-frame--candidate-needs-update t))
+                   (error "Candidate window did not have a live frame"))))
             (vertico-buffer-frame--set-frame-owner-buffer
              vertico-buffer-frame--candidate-frame
              (current-buffer))
@@ -786,8 +697,7 @@ This function is intended for `vertico-buffer-display-action'."
               (set-window-dedicated-p
                vertico-buffer-frame--candidate-window nil)
               (set-window-buffer
-               vertico-buffer-frame--candidate-window buffer)
-              (setq-local vertico-buffer-frame--candidate-needs-update t))
+               vertico-buffer-frame--candidate-window buffer))
             (vertico-buffer-frame--install-cleanup)
             (vertico-buffer-frame--sync-candidate-frame-layout parent size)
             (setq vertico-buffer-frame--last-display-error-message nil)
@@ -797,56 +707,25 @@ This function is intended for `vertico-buffer-display-action'."
        (vertico-buffer-frame--report-display-error error)
        (display-buffer-use-least-recent-window buffer alist)))))
 
-(defun vertico-buffer-frame--reveal-candidate-frame ()
-  "Reveal and refresh the current minibuffer's candidate frame."
-  (condition-case-unless-debug nil
-      (when (vertico-buffer-frame--candidate-window-live-p)
-        (let* ((parent (vertico-buffer-frame--parent-frame))
-               (size (vertico-buffer-frame--candidate-frame-size parent))
-               (layout-changed
-                (vertico-buffer-frame--sync-candidate-frame-layout parent
-                                                                   size))
-               (shown
-                (vertico-buffer-frame--show-frame
-                 vertico-buffer-frame--candidate-frame)))
-          (vertico-buffer-frame--refresh-preview-frame)
-          (when (or layout-changed
-                    shown
-                    vertico-buffer-frame--candidate-needs-update)
-            (force-window-update
-             (window-buffer vertico-buffer-frame--candidate-window))
-            (setq-local vertico-buffer-frame--candidate-needs-update nil))))
-    (error nil)))
-
-(defun vertico-buffer-frame--pre-redisplay (_window)
-  "Reveal and refresh the current minibuffer's candidate frame before redisplay."
-  (vertico-buffer-frame--reveal-candidate-frame))
-
 (defun vertico-buffer-frame--install-cleanup ()
   "Install cleanup for the current minibuffer buffer."
   (unless vertico-buffer-frame--cleanup-function
-    (let ((buffer (current-buffer))
-          function)
-      (setq function
-            (lambda ()
-              (when (or (not (buffer-live-p buffer))
-                        (eq (current-buffer) buffer)
-                        (eq (vertico-buffer-frame--active-minibuffer-buffer)
-                            buffer))
-                (vertico-buffer-frame--remove-hook
-                 'minibuffer-exit-hook function)
-                (vertico-buffer-frame--cleanup-minibuffer buffer))))
-      (setq-local vertico-buffer-frame--cleanup-function function)
-      (cl-pushnew buffer vertico-buffer-frame--minibuffers)
-      (vertico-buffer-frame--add-hook
-       'minibuffer-exit-hook function t))))
+    (setq-local vertico-buffer-frame--cleanup-function t)
+    (cl-pushnew (current-buffer) vertico-buffer-frame--minibuffers)
+    (vertico-buffer-frame--add-hook
+     'minibuffer-exit-hook
+     #'vertico-buffer-frame--minibuffer-exit t)))
+
+(defun vertico-buffer-frame--minibuffer-exit ()
+  "Clean up the child frames owned by the exiting minibuffer."
+  (when-let* ((buffer (vertico-buffer-frame--minibuffer-exit-buffer)))
+    (vertico-buffer-frame--cleanup-minibuffer buffer)))
 
 (defun vertico-buffer-frame--delete-frame (frame)
   "Delete FRAME if it is live."
-  (setq vertico-buffer-frame--candidate-frame-pool
-        (delq frame (vertico-buffer-frame--candidate-frame-pool)))
   (ignore-errors
     (when (vertico-buffer-frame--frame-live-p frame)
+      (vertico-buffer-frame--select-parent-of-frame frame)
       (delete-frame frame t))))
 
 (defun vertico-buffer-frame--delete-owned-frames ()
@@ -857,12 +736,6 @@ This function is intended for `vertico-buffer-display-action'."
               (vertico-buffer-frame--frame-parameter
                frame vertico-buffer-frame--owner-buffer-parameter))
       (vertico-buffer-frame--delete-frame frame))))
-
-(defun vertico-buffer-frame--delete-candidate-frame-pool ()
-  "Delete candidate frames kept for reuse."
-  (mapc #'vertico-buffer-frame--delete-frame
-        (copy-sequence (vertico-buffer-frame--candidate-frame-pool)))
-  (setq vertico-buffer-frame--candidate-frame-pool nil))
 
 (defun vertico-buffer-frame--display-minibuffer-selected-window
     (buffer alist)
@@ -904,18 +777,12 @@ of a Vertico child frame."
   "Clean up child frames owned by minibuffer BUFFER."
   (if (buffer-live-p buffer)
       (with-current-buffer buffer
-        (let ((cleanup vertico-buffer-frame--cleanup-function))
-          (vertico-buffer-frame--remove-hook
-           'pre-redisplay-functions
-           #'vertico-buffer-frame--pre-redisplay t)
+        (progn
           (vertico-buffer-frame--remove-hook
            'post-command-hook
            #'vertico-buffer-frame--preview-post-command t)
           (vertico-buffer-frame--cancel-preview-timer)
-          (when cleanup
-            (vertico-buffer-frame--remove-hook
-             'minibuffer-exit-hook cleanup))
-          (vertico-buffer-frame--stash-candidate-frame
+          (vertico-buffer-frame--delete-frame
            vertico-buffer-frame--candidate-frame)
           (vertico-buffer-frame--hide-frame
            vertico-buffer-frame--preview-frame)
@@ -926,7 +793,7 @@ of a Vertico child frame."
           (setq-local vertico-buffer-frame--candidate-frame nil
                       vertico-buffer-frame--candidate-window nil
                       vertico-buffer-frame--candidate-layout-state nil
-                      vertico-buffer-frame--candidate-needs-update nil
+                      vertico-buffer-frame--child-frame-session nil
                       vertico-buffer-frame--preview-frame nil
                       vertico-buffer-frame--preview-window nil
                       vertico-buffer-frame--preview-layout-state nil
@@ -951,8 +818,7 @@ of a Vertico child frame."
   "Release all child frames currently owned by active minibuffers."
   (interactive)
   (mapc #'vertico-buffer-frame--cleanup-minibuffer
-        (copy-sequence (vertico-buffer-frame--minibuffer-list)))
-  (vertico-buffer-frame--delete-candidate-frame-pool))
+        (copy-sequence (vertico-buffer-frame--minibuffer-list))))
 
 ;;;###autoload
 (defun vertico-buffer-frame-toggle-preview (&optional arg)
@@ -977,9 +843,6 @@ Inside an active minibuffer, the change is buffer-local to that session."
     (setq-local mode-line-format nil
                 header-line-format nil
                 tab-line-format nil)
-    (vertico-buffer-frame--add-hook
-     'pre-redisplay-functions
-     #'vertico-buffer-frame--pre-redisplay nil t)
     (vertico-buffer-frame--add-hook
      'post-command-hook
      #'vertico-buffer-frame--preview-post-command t t)
@@ -1014,6 +877,9 @@ Inside an active minibuffer, the change is buffer-local to that session."
     (vertico-buffer-frame--remove-hook
      'minibuffer-setup-hook
      #'vertico-buffer-frame--minibuffer-setup)
+    (vertico-buffer-frame--remove-hook
+     'minibuffer-exit-hook
+     #'vertico-buffer-frame--minibuffer-exit)
     (unless vertico-buffer-frame--saved-embark-display-action-present
       (vertico-buffer-frame--remove-embark-display-action))
     (vertico-buffer-frame-cleanup)

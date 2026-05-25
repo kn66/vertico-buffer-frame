@@ -264,7 +264,8 @@ candidate."
     (error nil)))
 
 (defun vertico-buffer-frame--limit-value (value fallback)
-  "Return VALUE as a nonnegative limit, preserving nil as unlimited."
+  "Return VALUE as a nonnegative limit, preserving nil as unlimited.
+Use FALLBACK when VALUE is not an integer or nil."
   (cond
    ((null value)
     nil)
@@ -1354,7 +1355,8 @@ When STRINGP is non-nil, look for a @String definition."
 
 (defun vertico-buffer-frame--preview-target-from-functions
     (category candidate raw-candidate)
-  "Return preview target from user functions for CATEGORY and CANDIDATE."
+  "Return preview target from user functions.
+Pass CATEGORY, CANDIDATE, and RAW-CANDIDATE to each function."
   (catch 'target
     (dolist (function (vertico-buffer-frame--preview-target-function-list))
       (when function
