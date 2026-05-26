@@ -82,8 +82,19 @@ When this is `fixed', use `vertico-buffer-frame-width' and
   "Non-nil means expand the candidate frame width to fit visible candidates.
 The configured candidate frame width is used as the minimum width.  When a
 visible candidate line is wider, the child frame grows up to the parent frame
-width and is centered again."
+width, leaving `vertico-buffer-frame-resize-to-fit-candidates-margin' pixels
+on each side, and is centered again."
   :type 'boolean)
+
+(defconst vertico-buffer-frame--default-resize-to-fit-candidates-margin 16
+  "Default margin around resized candidate frames in pixels.")
+
+(defcustom vertico-buffer-frame-resize-to-fit-candidates-margin
+  vertico-buffer-frame--default-resize-to-fit-candidates-margin
+  "Margin kept on each side of a resized candidate frame, in pixels.
+This only applies when `vertico-buffer-frame-resize-to-fit-candidates' is
+non-nil."
+  :type 'natnum)
 
 (defconst vertico-buffer-frame--default-border-width 1
   "Default width of the child frame border in pixels.")
@@ -476,10 +487,23 @@ When BUFFER is nil, clear the owner.  Ignore stale frame objects because this
     (_
      (vertico-buffer-frame--golden-frame-size parent))))
 
+(defun vertico-buffer-frame--resize-to-fit-candidates-margin ()
+  "Return the effective candidate resize margin in pixels."
+  (if (natnump vertico-buffer-frame-resize-to-fit-candidates-margin)
+      vertico-buffer-frame-resize-to-fit-candidates-margin
+    vertico-buffer-frame--default-resize-to-fit-candidates-margin))
+
+(defun vertico-buffer-frame--candidate-frame-max-pixels (parent)
+  "Return the maximum candidate frame width in pixels inside PARENT."
+  (max 1
+       (- (frame-pixel-width parent)
+          (* 2
+             (vertico-buffer-frame--resize-to-fit-candidates-margin)))))
+
 (defun vertico-buffer-frame--candidate-frame-max-width (parent frame)
   "Return the maximum candidate FRAME width in characters inside PARENT."
   (vertico-buffer-frame--pixels-to-contained-chars
-   (frame-pixel-width parent)
+   (vertico-buffer-frame--candidate-frame-max-pixels parent)
    (frame-char-width frame)))
 
 (defun vertico-buffer-frame--candidate-overlay-string (window)
@@ -520,10 +544,11 @@ When BUFFER is nil, clear the owner.  Ignore stale frame objects because this
       (vertico-buffer-frame--max-line-pixel-width string max-pixels))))
 
 (defun vertico-buffer-frame--candidate-text-pixel-width (window parent)
-  "Return the widest visible text line in WINDOW, capped by PARENT pixels."
+  "Return the widest visible text line in WINDOW, capped for PARENT."
   (condition-case-unless-debug nil
       (when (vertico-buffer-frame--window-live-p window)
-        (let ((max-pixels (frame-pixel-width parent)))
+        (let ((max-pixels
+               (vertico-buffer-frame--candidate-frame-max-pixels parent)))
           (or (vertico-buffer-frame--candidate-overlay-pixel-width
                window max-pixels)
               (car

@@ -1097,7 +1097,8 @@
                      '(95 . 10))))))
 
 (ert-deftest vertico-buffer-frame-candidate-size-to-fit-caps-at-parent-width ()
-  (let ((vertico-buffer-frame-resize-to-fit-candidates t))
+  (let ((vertico-buffer-frame-resize-to-fit-candidates t)
+        (vertico-buffer-frame-resize-to-fit-candidates-margin 0))
     (cl-letf (((symbol-function #'window-live-p)
                (lambda (window)
                  (eq window 'window)))
@@ -1117,6 +1118,42 @@
       (should (equal (vertico-buffer-frame--candidate-frame-size-to-fit
                       'parent 'window '(80 . 10))
                      '(120 . 10))))))
+
+(ert-deftest vertico-buffer-frame-candidate-size-to-fit-leaves-margin ()
+  (let ((vertico-buffer-frame-resize-to-fit-candidates t)
+        (vertico-buffer-frame-resize-to-fit-candidates-margin 16))
+    (cl-letf (((symbol-function #'window-live-p)
+               (lambda (window)
+                 (eq window 'window)))
+              ((symbol-function #'window-frame)
+               (lambda (window)
+                 (and (eq window 'window) 'frame)))
+              ((symbol-function #'frame-char-width)
+               (lambda (_frame)
+                 10))
+              ((symbol-function #'frame-pixel-width)
+               (lambda (_frame)
+                 1200))
+              ((symbol-function
+                #'vertico-buffer-frame--candidate-text-pixel-width)
+               (lambda (_window _parent)
+                 1800)))
+      (should (equal (vertico-buffer-frame--candidate-frame-size-to-fit
+                      'parent 'window '(80 . 10))
+                     '(116 . 10))))))
+
+(ert-deftest vertico-buffer-frame-candidate-size-to-fit-tolerates-bad-margin ()
+  (let ((vertico-buffer-frame-resize-to-fit-candidates t)
+        (vertico-buffer-frame-resize-to-fit-candidates-margin "bad"))
+    (cl-letf (((symbol-function #'frame-pixel-width)
+               (lambda (_frame)
+                 1200))
+              ((symbol-function #'frame-char-width)
+               (lambda (_frame)
+                 10)))
+      (should (equal (vertico-buffer-frame--candidate-frame-max-width
+                      'parent 'frame)
+                     116)))))
 
 (ert-deftest vertico-buffer-frame-candidate-text-pixel-width-measures-overlay ()
   (let ((old-buffer (window-buffer (selected-window))))
