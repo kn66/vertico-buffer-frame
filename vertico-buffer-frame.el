@@ -190,6 +190,27 @@ useful when diagnosing backend-specific child-frame failures."
   (ignore-errors
     (minibuffer-window frame)))
 
+(defun vertico-buffer-frame--outermost-parent-frame (frame)
+  "Return FRAME's outermost live parent frame, or FRAME."
+  (let ((source frame)
+        seen
+        parent)
+    (while (and (not (memq source seen))
+                (setq parent
+                      (condition-case-unless-debug nil
+                          (frame-parameter source 'parent-frame)
+                        (error nil)))
+                (vertico-buffer-frame--frame-live-p parent))
+      (push source seen)
+      (setq source parent))
+    source))
+
+(defun vertico-buffer-frame--color-source-frame (parent role)
+  "Return the frame used as the color source for PARENT and ROLE."
+  (if (eq role 'preview)
+      (vertico-buffer-frame--outermost-parent-frame parent)
+    parent))
+
 (defun vertico-buffer-frame--border-width ()
   "Return the effective child frame border width."
   (if (natnump vertico-buffer-frame-border-width)
@@ -255,41 +276,42 @@ useful when diagnosing backend-specific child-frame failures."
 (defun vertico-buffer-frame--base-parameters (parent name width height
                                                      &optional role)
   "Return child frame parameters for PARENT, NAME, WIDTH, HEIGHT and ROLE."
-  (append
-   `((parent-frame . ,parent)
-     (name . ,name)
-     (title . "")
-     (minibuffer . ,(vertico-buffer-frame--minibuffer-window parent))
-     (width . ,width)
-     (height . ,height)
-     (visibility . nil)
-     (undecorated . t)
-     (no-accept-focus . ,(not (eq role 'candidate)))
-     (no-focus-on-map . t)
-     (skip-taskbar . t)
-     (unsplittable . t)
-     (border-width . 0)
-     (child-frame-border-width . ,(vertico-buffer-frame--border-width))
-     (internal-border-width . 0)
-     (left-fringe . 0)
-     (right-fringe . 0)
-     (right-divider-width . 0)
-     (bottom-divider-width . 0)
-     (vertical-scroll-bars . nil)
-     (horizontal-scroll-bars . nil)
-     (menu-bar-lines . 0)
-     (tool-bar-lines . 0)
-     (tab-bar-lines . 0)
-     (line-spacing . 0)
-     (alpha . 100)
-     (alpha-background . 100))
-   (when-let* ((background
-                (vertico-buffer-frame--default-background parent)))
-     `((background-color . ,background)))
-   (when-let* ((foreground
-                (vertico-buffer-frame--default-foreground parent)))
-     `((foreground-color . ,foreground)))
-   (vertico-buffer-frame--parameters)))
+  (let ((color-source (vertico-buffer-frame--color-source-frame parent role)))
+    (append
+     `((parent-frame . ,parent)
+       (name . ,name)
+       (title . "")
+       (minibuffer . ,(vertico-buffer-frame--minibuffer-window parent))
+       (width . ,width)
+       (height . ,height)
+       (visibility . nil)
+       (undecorated . t)
+       (no-accept-focus . ,(not (eq role 'candidate)))
+       (no-focus-on-map . t)
+       (skip-taskbar . t)
+       (unsplittable . t)
+       (border-width . 0)
+       (child-frame-border-width . ,(vertico-buffer-frame--border-width))
+       (internal-border-width . 0)
+       (left-fringe . 0)
+       (right-fringe . 0)
+       (right-divider-width . 0)
+       (bottom-divider-width . 0)
+       (vertical-scroll-bars . nil)
+       (horizontal-scroll-bars . nil)
+       (menu-bar-lines . 0)
+       (tool-bar-lines . 0)
+       (tab-bar-lines . 0)
+       (line-spacing . 0)
+       (alpha . 100)
+       (alpha-background . 100))
+     (when-let* ((background
+                  (vertico-buffer-frame--default-background color-source)))
+       `((background-color . ,background)))
+     (when-let* ((foreground
+                  (vertico-buffer-frame--default-foreground color-source)))
+       `((foreground-color . ,foreground)))
+     (vertico-buffer-frame--parameters))))
 
 (defun vertico-buffer-frame--specified-color (color)
   "Return COLOR unless it is an unspecified face color."
@@ -683,7 +705,9 @@ display action used by `display-buffer-in-child-frame'."
           (setq frame (or (vertico-buffer-frame--window-frame window)
                           (error "Child frame window did not have a live frame")))
           (vertico-buffer-frame--prepare-window window)
-          (vertico-buffer-frame--apply-border-face frame parent)
+          (vertico-buffer-frame--apply-border-face
+           frame
+           (vertico-buffer-frame--color-source-frame parent role))
           (vertico-buffer-frame--set-frame-owner-buffer
            frame
            (current-buffer))
