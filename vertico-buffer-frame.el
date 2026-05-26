@@ -174,6 +174,11 @@ useful when diagnosing backend-specific child-frame failures."
     (and (vertico-buffer-frame--window-live-p window)
          (window-frame window))))
 
+(defun vertico-buffer-frame--minibuffer-window (frame)
+  "Return FRAME's minibuffer window, ignoring frame errors."
+  (ignore-errors
+    (minibuffer-window frame)))
+
 (defun vertico-buffer-frame--border-width ()
   "Return the effective child frame border width."
   (if (natnump vertico-buffer-frame-border-width)
@@ -237,16 +242,16 @@ useful when diagnosing backend-specific child-frame failures."
                 display-buffer-alist))))
 
 (defun vertico-buffer-frame--base-parameters (parent name width height
-                                                    &optional role)
+                                                     &optional role)
   "Return child frame parameters for PARENT, NAME, WIDTH, HEIGHT and ROLE."
   (append
    `((parent-frame . ,parent)
      (name . ,name)
      (title . "")
-     (minibuffer . nil)
+     (minibuffer . ,(vertico-buffer-frame--minibuffer-window parent))
      (width . ,width)
      (height . ,height)
-     (visibility . ,(eq role 'candidate))
+     (visibility . nil)
      (undecorated . t)
      (no-accept-focus . ,(not (eq role 'candidate)))
      (no-focus-on-map . t)
@@ -668,6 +673,9 @@ display action used by `display-buffer-in-child-frame'."
       (when (and (vertico-buffer-frame--frame-live-p frame)
                  (not (eq (frame-visible-p frame) t)))
         (make-frame-visible frame)
+        (when (eq system-type 'windows-nt)
+          (ignore-errors
+            (redraw-frame frame)))
         (vertico-buffer-frame--select-parent-of-frame frame)
         t)
     (error nil)))
@@ -732,7 +740,10 @@ PARENT is the expected parent frame and SIZE is the target character size."
 
 (defun vertico-buffer-frame--candidate-post-command ()
   "Update candidate frame sizing after Vertico refreshes candidates."
-  (vertico-buffer-frame--refresh-candidate-frame-layout))
+  (vertico-buffer-frame--refresh-candidate-frame-layout)
+  (when (vertico-buffer-frame--candidate-window-live-p)
+    (vertico-buffer-frame--show-frame
+     vertico-buffer-frame--candidate-frame)))
 
 (defun vertico-buffer-frame--with-selected-live-window (window function)
   "Call FUNCTION with WINDOW selected, returning nil on stale window errors."
