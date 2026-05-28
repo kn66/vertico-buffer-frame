@@ -61,6 +61,8 @@
 (require 'vertico-buffer-frame-preview)
 (require 'vertico-buffer-frame-consult)
 
+;;;; User options and internal state
+
 (defcustom vertico-buffer-frame-width 90
   "Width of the Vertico child frame in characters."
   :type 'natnum)
@@ -86,7 +88,7 @@ width, leaving `vertico-buffer-frame-resize-to-fit-candidates-margin' pixels
 on each side, and is centered again."
   :type 'boolean)
 
-(defconst vertico-buffer-frame--default-resize-to-fit-candidates-margin 16
+(defconst vertico-buffer-frame--default-resize-to-fit-candidates-margin 32
   "Default margin around resized candidate frames in pixels.")
 
 (defcustom vertico-buffer-frame-resize-to-fit-candidates-margin
@@ -137,6 +139,17 @@ useful when diagnosing backend-specific child-frame failures."
 (defvar vertico-buffer-frame-mode-map)
 (defvar vertico-buffer-frame-preview)
 (defvar vertico-buffer-frame--preview-frame)
+(defvar x-gtk-resize-child-frames)
+
+(defvar vertico-buffer-frame--gtk-resize-child-frames
+  (let ((case-fold-search t))
+    (and (string-match-p "gtk3" system-configuration-features)
+         (string-match-p "gnome\\|cinnamon"
+                         (or (getenv "XDG_CURRENT_DESKTOP")
+                             (getenv "DESKTOP_SESSION")
+                             ""))
+         'resize-mode))
+  "GTK child-frame resize workaround value used while resizing frames.")
 
 (defvar-local vertico-buffer-frame--candidate-frame nil)
 (defvar-local vertico-buffer-frame--candidate-window nil)
@@ -153,6 +166,11 @@ useful when diagnosing backend-specific child-frame failures."
   'vertico-buffer-frame-owner-buffer
   "Frame parameter storing the minibuffer buffer that owns a child frame.")
 
+(defconst vertico-buffer-frame--preview-edge-margin 8
+  "Gap between the preview frame and its reference edge in pixels.")
+
+;;;; Display action and compatibility helpers
+
 ;;;###autoload
 (defun vertico-buffer-frame-display-action ()
   "Return the display action used by `vertico-buffer-frame-mode'."
@@ -166,6 +184,15 @@ useful when diagnosing backend-specific child-frame failures."
                       (selected-window)))))
     (or (vertico-buffer-frame--window-frame window)
         (selected-frame))))
+
+(defun vertico-buffer-frame--child-frames-supported-p (&optional frame)
+  "Return non-nil when FRAME's terminal can display child frames."
+  (condition-case-unless-debug nil
+      (let ((frame (or frame (selected-frame))))
+        (or (not (framep frame))
+            (display-graphic-p frame)
+            (featurep 'tty-child-frames)))
+    (error nil)))
 
 (defun vertico-buffer-frame--frame-live-p (frame)
   "Return non-nil when FRAME is live, ignoring stale frame errors."
@@ -211,6 +238,15 @@ useful when diagnosing backend-specific child-frame failures."
       (vertico-buffer-frame--outermost-parent-frame parent)
     parent))
 
+(defun vertico-buffer-frame--frame-font (frame)
+  "Return FRAME's font parameter, ignoring stale frame errors."
+  (condition-case-unless-debug nil
+      (let ((font (frame-parameter frame 'font)))
+        (and font
+             (not (equal font ""))
+             font))
+    (error nil)))
+
 (defun vertico-buffer-frame--border-width ()
   "Return the effective child frame border width."
   (if (natnump vertico-buffer-frame-border-width)
@@ -225,6 +261,8 @@ useful when diagnosing backend-specific child-frame failures."
        (and (consp parameter)
             (symbolp (car parameter))))
      vertico-buffer-frame-parameters)))
+
+;;;; Minibuffer ownership and display-buffer state
 
 (defun vertico-buffer-frame--minibuffer-list ()
   "Return active minibuffer buffers when the list is well-formed."
@@ -273,6 +311,8 @@ useful when diagnosing backend-specific child-frame failures."
           (delq vertico-buffer-frame--embark-display-action
                 display-buffer-alist))))
 
+;;;; Child-frame parameters and appearance
+
 (defun vertico-buffer-frame--base-parameters (parent name width height
                                                      &optional role)
   "Return child frame parameters for PARENT, NAME, WIDTH, HEIGHT and ROLE."
@@ -305,6 +345,8 @@ useful when diagnosing backend-specific child-frame failures."
        (line-spacing . 0)
        (alpha . 100)
        (alpha-background . 100))
+     (when-let* ((font (vertico-buffer-frame--frame-font parent)))
+       `((font . ,font)))
      (when-let* ((background
                   (vertico-buffer-frame--default-background color-source)))
        `((background-color . ,background)))
@@ -364,19 +406,28 @@ Use SOURCE's default colors when non-nil, otherwise use FRAME's colors."
 (defun vertico-buffer-frame--set-frame-owner-buffer (frame buffer)
   "Record BUFFER as FRAME's minibuffer owner.
 When BUFFER is nil, clear the owner.  Ignore stale frame objects because this
-  function is used from cleanup paths."
+function is used from cleanup paths."
   (ignore-errors
     (when (vertico-buffer-frame--frame-live-p frame)
       (set-frame-parameter
        frame vertico-buffer-frame--owner-buffer-parameter buffer))))
 
+(defun vertico-buffer-frame--clear-candidate-frame-state ()
+  "Clear buffer-local candidate child-frame and window state."
+  (setq-local vertico-buffer-frame--candidate-frame nil
+              vertico-buffer-frame--candidate-window nil
+              vertico-buffer-frame--candidate-layout-state nil))
+
 (defun vertico-buffer-frame--delete-frames-owned-by-buffer (buffer)
   "Delete child frames whose owner buffer is BUFFER."
-  (dolist (frame (frame-list))
-    (when (eq (vertico-buffer-frame--frame-parameter
-               frame vertico-buffer-frame--owner-buffer-parameter)
-              buffer)
-      (vertico-buffer-frame--delete-frame frame))))
+  (when buffer
+    (let (frames)
+      (dolist (frame (frame-list))
+        (when (eq (vertico-buffer-frame--frame-parameter
+                   frame vertico-buffer-frame--owner-buffer-parameter)
+                  buffer)
+          (push frame frames)))
+      (vertico-buffer-frame--delete-frame-list (nreverse frames)))))
 
 (defun vertico-buffer-frame--select-parent-of-frame (frame)
   "Select FRAME's parent when FRAME is the selected frame."
@@ -401,7 +452,7 @@ When BUFFER is nil, clear the owner.  Ignore stale frame objects because this
 (defun vertico-buffer-frame--compute-minibuffer-exit-buffer ()
   "Return the tracked minibuffer buffer to clean for this exit hook run."
   (let ((top (vertico-buffer-frame--top-minibuffer-buffer)))
-    (or (and (vertico-buffer-frame--tracked-minibuffer-buffer-p
+  (or (and (vertico-buffer-frame--tracked-minibuffer-buffer-p
               (current-buffer))
              (current-buffer))
         (and (eq (vertico-buffer-frame--selected-frame-owner-buffer)
@@ -416,6 +467,8 @@ When BUFFER is nil, clear the owner.  Ignore stale frame objects because this
   "Return the cleanup target for `minibuffer-exit-hook'."
   (vertico-buffer-frame--compute-minibuffer-exit-buffer))
 
+;;;; Candidate and preview frame layout
+
 (defun vertico-buffer-frame--clamp-number (value minimum maximum)
   "Clamp VALUE between MINIMUM and MAXIMUM."
   (min (max value minimum) maximum))
@@ -423,6 +476,22 @@ When BUFFER is nil, clear the owner.  Ignore stale frame objects because this
 (defun vertico-buffer-frame--number-or (value fallback)
   "Return VALUE as a float when it is numeric, otherwise FALLBACK."
   (float (if (numberp value) value fallback)))
+
+(defun vertico-buffer-frame--frame-position-matches-p (frame left top)
+  "Return non-nil when FRAME is already at LEFT and TOP pixels."
+  (let ((position (ignore-errors
+                    (frame-position frame))))
+    (and (consp position)
+         (= (round (vertico-buffer-frame--number-or (car position) 0))
+            left)
+         (= (round (vertico-buffer-frame--number-or (cdr position) 0))
+            top))))
+
+(defun vertico-buffer-frame--move-frame-to (frame left top)
+  "Move FRAME to LEFT and TOP pixels unless it is already there."
+  (unless (vertico-buffer-frame--frame-position-matches-p frame left top)
+    (let ((inhibit-redisplay t))
+      (set-frame-position frame left top))))
 
 (defun vertico-buffer-frame--positive-pixels (value)
   "Return VALUE rounded to a positive pixel count."
@@ -604,13 +673,31 @@ When BUFFER is nil, clear the owner.  Ignore stale frame objects because this
   "Resize FRAME to character SIZE."
   (condition-case-unless-debug nil
       (when (vertico-buffer-frame--frame-live-p frame)
+        ;; These dynamically bound variables are consulted by frame resizing.
+        ;; GTK builds under GNOME-like desktops may also need the child-frame
+        ;; resize workaround while `set-frame-size' runs.
         (let ((width (car size))
-              (height (cdr size)))
+              (height (cdr size))
+              (window-min-height 1)
+              (window-min-width 1)
+              (inhibit-redisplay t)
+              (x-gtk-resize-child-frames
+               (or vertico-buffer-frame--gtk-resize-child-frames
+                   (and (boundp 'x-gtk-resize-child-frames)
+                        x-gtk-resize-child-frames))))
           (when (and (natnump width)
                      (natnump height))
-            (set-frame-size frame
-                            (vertico-buffer-frame--positive-chars width)
-                            (vertico-buffer-frame--positive-chars height))
+            (setq width (vertico-buffer-frame--positive-chars width)
+                  height (vertico-buffer-frame--positive-chars height))
+            (let ((current-width (ignore-errors
+                                   (frame-width frame)))
+                  (current-height (ignore-errors
+                                    (frame-height frame))))
+              (unless (and (integerp current-width)
+                           (integerp current-height)
+                           (= current-width width)
+                           (= current-height height))
+                (set-frame-size frame width height)))
             t)))
     (error nil)))
 
@@ -638,28 +725,61 @@ When BUFFER is nil, clear the owner.  Ignore stale frame objects because this
 (defun vertico-buffer-frame--place-candidate-frame (frame parent)
   "Place candidate FRAME inside PARENT."
   (condition-case-unless-debug nil
-      (progn
-        (set-frame-position
-         frame
-         (vertico-buffer-frame--center-left parent frame)
-         (vertico-buffer-frame--center-top parent frame))
+      (let* ((left (vertico-buffer-frame--center-left parent frame))
+             (top (vertico-buffer-frame--center-top parent frame)))
+        (vertico-buffer-frame--move-frame-to frame left top)
         t)
     (error nil)))
 
 (defun vertico-buffer-frame--place-preview-frame (frame parent)
   "Place preview FRAME at the bottom-right inside PARENT."
   (condition-case-unless-debug nil
-      (progn
-        (set-frame-position
-         frame
-         (max 0 (- (frame-pixel-width parent)
-                   (frame-pixel-width frame)
-                   8))
-         (max 0 (- (frame-pixel-height parent)
-                   (frame-pixel-height frame)
-                   8)))
+      (let* ((parent-width (frame-pixel-width parent))
+             (parent-height (frame-pixel-height parent))
+             (frame-width (frame-pixel-width frame))
+             (frame-height (frame-pixel-height frame)))
+        (cl-destructuring-bind (reference-left reference-top
+                                reference-width reference-height)
+            (or (vertico-buffer-frame--preview-reference-geometry parent)
+                (list 0 0 parent-width parent-height))
+          (let* ((max-left (max 0 (- parent-width frame-width)))
+                 (max-top (max 0 (- parent-height frame-height)))
+                 (target-left
+                  (vertico-buffer-frame--clamp-number
+                   (- (+ reference-left reference-width)
+                      frame-width
+                      vertico-buffer-frame--preview-edge-margin)
+                   0
+                   max-left))
+                 (target-top
+                  (vertico-buffer-frame--clamp-number
+                   (- (+ reference-top reference-height)
+                      frame-height
+                      vertico-buffer-frame--preview-edge-margin)
+                   0
+                   max-top)))
+            (vertico-buffer-frame--move-frame-to
+             frame target-left target-top)))
         t)
     (error nil)))
+
+(defun vertico-buffer-frame--preview-reference-geometry (parent)
+  "Return candidate geometry as (LEFT TOP WIDTH HEIGHT), or nil.
+The preview frame is a sibling of the candidate frame, not its child, but the
+default placement still follows the candidate frame."
+  (let ((candidate vertico-buffer-frame--candidate-frame))
+    (when (and (vertico-buffer-frame--frame-live-p candidate)
+               (eq (vertico-buffer-frame--frame-parameter
+                    candidate 'parent-frame)
+                   parent))
+      (let ((position (frame-position candidate)))
+        (when (consp position)
+          (list (max 0 (round
+                        (vertico-buffer-frame--number-or (car position) 0)))
+                (max 0 (round
+                        (vertico-buffer-frame--number-or (cdr position) 0)))
+                (frame-pixel-width candidate)
+                (frame-pixel-height candidate)))))))
 
 (defun vertico-buffer-frame--frame-layout-state (frame parent size)
   "Return layout state for FRAME in PARENT with character SIZE."
@@ -669,6 +789,8 @@ When BUFFER is nil, clear the owner.  Ignore stale frame objects because this
         (frame-pixel-width frame)
         (frame-pixel-height frame)
         size))
+
+;;;; Child-frame display, reuse, and fallback
 
 (defun vertico-buffer-frame--display-buffer-in-child-frame
     (buffer parent name size &optional role alist)
@@ -754,6 +876,14 @@ display action used by `display-buffer-in-child-frame'."
        (vertico-buffer-frame--window-live-p
         vertico-buffer-frame--candidate-window)))
 
+(defun vertico-buffer-frame--candidate-frame-current-p (parent)
+  "Return non-nil when the current candidate frame can be reused under PARENT."
+  (and (vertico-buffer-frame--candidate-window-live-p)
+       (eq (vertico-buffer-frame--frame-parameter
+            vertico-buffer-frame--candidate-frame
+            'parent-frame)
+           parent)))
+
 (defun vertico-buffer-frame--sync-candidate-frame-layout (parent size)
   "Resize and position the current candidate frame when layout changed.
 PARENT is the expected parent frame and SIZE is the target character size."
@@ -811,7 +941,16 @@ PARENT is the expected parent frame and SIZE is the target character size."
      (lambda ()
        (pop-to-buffer
         buffer
-        '(nil . ((inhibit-same-window . t))))))))
+        '(display-buffer-same-window))))))
+
+(defun vertico-buffer-frame--same-window-display-alist (alist)
+  "Return ALIST adjusted for forced same-window display.
+Some callers pass `inhibit-same-window' in their display alist.  That is
+correct for ordinary display routing, but it conflicts with this package's
+Embark rule, whose whole purpose is to display in the minibuffer origin window."
+  (if (proper-list-p alist)
+      (assq-delete-all 'inhibit-same-window (copy-sequence alist))
+    alist))
 
 (defun vertico-buffer-frame--report-display-error (error)
   "Report child-frame display ERROR when diagnostics are enabled."
@@ -821,30 +960,98 @@ PARENT is the expected parent frame and SIZE is the target character size."
         (setq vertico-buffer-frame--last-display-error-message message)
         (message "vertico-buffer-frame display error: %s" message)))))
 
-(defun vertico-buffer-frame--reset-display-state-after-error (owner)
-  "Release child-frame state owned by OWNER after display failure."
+(defun vertico-buffer-frame--fallback-display-action ()
+  "Return the non-child-frame display action used after child-frame failure."
+  (let ((saved-action (and vertico-buffer-frame--saved-state
+                           vertico-buffer-frame--saved-display-action)))
+    (if (and (proper-list-p saved-action)
+             (car saved-action)
+             (not (equal saved-action
+                         (vertico-buffer-frame-display-action))))
+        saved-action
+      '(display-buffer-use-least-recent-window))))
+
+(defun vertico-buffer-frame--display-buffer-fallback (buffer alist)
+  "Display BUFFER with the saved Vertico action plus ALIST.
+This preserves the user's normal `vertico-buffer-display-action' when child
+frames are unavailable or fail, while avoiding recursion back into this
+package's child-frame action."
+  (let* ((action (vertico-buffer-frame--fallback-display-action))
+         (function (car action))
+         (merged-alist (append (cdr action) alist)))
+    (if (functionp function)
+        (funcall function buffer merged-alist)
+      (display-buffer buffer (append action alist)))))
+
+(defun vertico-buffer-frame--release-display-state-for-fallback (owner)
+  "Release child-frame state owned by OWNER before normal-window fallback."
   (when (buffer-live-p owner)
     (with-current-buffer owner
       (vertico-buffer-frame--cancel-preview-timer)
-      (vertico-buffer-frame--delete-frame
-       vertico-buffer-frame--candidate-frame)
-      (vertico-buffer-frame--delete-frame
-       vertico-buffer-frame--preview-frame)
+      (vertico-buffer-frame--discard-candidate-frame)
       (vertico-buffer-frame--delete-frames-owned-by-buffer owner)
-      (vertico-buffer-frame--kill-preview-buffer)
-      (setq-local vertico-buffer-frame--candidate-frame nil
-                  vertico-buffer-frame--candidate-window nil
-                  vertico-buffer-frame--candidate-layout-state nil
-                  vertico-buffer-frame--child-frame-session nil
-                  vertico-buffer-frame--preview-frame nil
-                  vertico-buffer-frame--preview-window nil
-                  vertico-buffer-frame--preview-layout-state nil
-                  vertico-buffer-frame--preview-last-error-message nil
-                  vertico-buffer-frame--preview-last-target-error-message nil
-                  vertico-buffer-frame--preview-scheduled-state nil
-                  vertico-buffer-frame--file-preview-cache nil
-                  vertico-buffer-frame--imenu-cache nil
-                  vertico-buffer-frame--consult-imenu-entry-table-cache nil))))
+      (vertico-buffer-frame--clear-preview-frame-state)
+      (vertico-buffer-frame--clear-preview-target-state)
+      (setq-local vertico-buffer-frame--child-frame-session nil))))
+
+(defun vertico-buffer-frame--discard-candidate-frame ()
+  "Delete the current candidate frame and preview state that depends on it."
+  ;; The preview frame is a sibling of the candidate frame, but its size and
+  ;; placement follow the candidate.  When the candidate frame is stale or tied
+  ;; to the wrong parent, the preview has to be rebuilt with it.
+  (vertico-buffer-frame--delete-preview-frame)
+  (vertico-buffer-frame--kill-preview-buffer)
+  (vertico-buffer-frame--delete-frame
+   vertico-buffer-frame--candidate-frame)
+  (vertico-buffer-frame--clear-candidate-frame-state))
+
+(defun vertico-buffer-frame--ensure-candidate-window
+    (buffer parent name size alist)
+  "Return a live candidate window for BUFFER under PARENT.
+NAME, SIZE, and ALIST are used when a new child frame must be created."
+  (unless (vertico-buffer-frame--candidate-frame-current-p parent)
+    (vertico-buffer-frame--discard-candidate-frame))
+  (unless (vertico-buffer-frame--candidate-window-live-p)
+    (setq-local
+     vertico-buffer-frame--candidate-window
+     (vertico-buffer-frame--display-buffer-in-child-frame
+      buffer parent name size 'candidate alist)
+     vertico-buffer-frame--candidate-frame
+     (or (vertico-buffer-frame--window-frame
+          vertico-buffer-frame--candidate-window)
+         (error "Candidate window did not have a live frame"))))
+  vertico-buffer-frame--candidate-window)
+
+(defun vertico-buffer-frame--set-candidate-window-buffer (buffer)
+  "Display BUFFER in the current candidate window."
+  (unless (eq (window-buffer vertico-buffer-frame--candidate-window)
+              buffer)
+    (set-window-dedicated-p
+     vertico-buffer-frame--candidate-window nil)
+    (set-window-buffer
+     vertico-buffer-frame--candidate-window buffer)))
+
+(defun vertico-buffer-frame--display-buffer-in-candidate-frame
+    (buffer alist parent)
+  "Display BUFFER in the current minibuffer's candidate child frame.
+ALIST is the display action alist passed by `display-buffer'.  PARENT is the
+frame that should own the candidate child frame."
+  (let* ((size (vertico-buffer-frame--candidate-frame-size parent))
+         (name (format "Vertico %s" (minibuffer-depth)))
+         (window
+          (vertico-buffer-frame--ensure-candidate-window
+           buffer parent name size alist)))
+    (vertico-buffer-frame--set-frame-owner-buffer
+     vertico-buffer-frame--candidate-frame
+     (current-buffer))
+    (vertico-buffer-frame--set-candidate-window-buffer buffer)
+    (vertico-buffer-frame--install-cleanup)
+    (vertico-buffer-frame--sync-candidate-frame-layout
+     parent
+     (vertico-buffer-frame--candidate-frame-size-to-fit
+      parent window size))
+    (setq vertico-buffer-frame--last-display-error-message nil)
+    window))
 
 (defun vertico-buffer-frame--display-buffer (buffer alist)
   "Display BUFFER in a child frame owned by the active minibuffer.
@@ -854,49 +1061,20 @@ This function is intended for `vertico-buffer-display-action'."
                    (current-buffer))))
     (condition-case-unless-debug error
         (with-current-buffer owner
-          (let* ((parent (vertico-buffer-frame--parent-frame))
-                 (size (vertico-buffer-frame--candidate-frame-size parent))
-                 (name (format "Vertico %s" (minibuffer-depth))))
-            (unless (and (vertico-buffer-frame--candidate-window-live-p)
-                         (eq (vertico-buffer-frame--frame-parameter
-                              vertico-buffer-frame--candidate-frame
-                              'parent-frame)
-                             parent))
-              (vertico-buffer-frame--delete-frame
-               vertico-buffer-frame--candidate-frame)
-              (setq-local vertico-buffer-frame--candidate-frame nil
-                          vertico-buffer-frame--candidate-window nil
-                          vertico-buffer-frame--candidate-layout-state nil))
-            (unless (vertico-buffer-frame--candidate-window-live-p)
-              (setq-local
-               vertico-buffer-frame--candidate-window
-               (vertico-buffer-frame--display-buffer-in-child-frame
-                buffer parent name size 'candidate alist)
-               vertico-buffer-frame--candidate-frame
-               (or (vertico-buffer-frame--window-frame
-                    vertico-buffer-frame--candidate-window)
-                   (error "Candidate window did not have a live frame"))))
-            (vertico-buffer-frame--set-frame-owner-buffer
-             vertico-buffer-frame--candidate-frame
-             (current-buffer))
-            (unless (eq (window-buffer
-                         vertico-buffer-frame--candidate-window)
-                        buffer)
-              (set-window-dedicated-p
-               vertico-buffer-frame--candidate-window nil)
-              (set-window-buffer
-               vertico-buffer-frame--candidate-window buffer))
-            (vertico-buffer-frame--install-cleanup)
-            (vertico-buffer-frame--sync-candidate-frame-layout
-             parent
-             (vertico-buffer-frame--candidate-frame-size-to-fit
-              parent vertico-buffer-frame--candidate-window size))
-            (setq vertico-buffer-frame--last-display-error-message nil)
-            vertico-buffer-frame--candidate-window))
+          (let ((parent (vertico-buffer-frame--parent-frame)))
+            (if (not (vertico-buffer-frame--child-frames-supported-p parent))
+                (progn
+                  (vertico-buffer-frame--release-display-state-for-fallback
+                   (current-buffer))
+                  (vertico-buffer-frame--display-buffer-fallback buffer alist))
+              (vertico-buffer-frame--display-buffer-in-candidate-frame
+               buffer alist parent))))
       (error
-       (vertico-buffer-frame--reset-display-state-after-error owner)
+       (vertico-buffer-frame--release-display-state-for-fallback owner)
        (vertico-buffer-frame--report-display-error error)
-       (display-buffer-use-least-recent-window buffer alist)))))
+       (vertico-buffer-frame--display-buffer-fallback buffer alist)))))
+
+;;;; Cleanup and mode lifecycle
 
 (defun vertico-buffer-frame--install-cleanup ()
   "Install cleanup for the current minibuffer buffer."
@@ -919,14 +1097,42 @@ This function is intended for `vertico-buffer-display-action'."
       (vertico-buffer-frame--select-parent-of-frame frame)
       (delete-frame frame t))))
 
+(defun vertico-buffer-frame--delete-preview-frame ()
+  "Hide and delete the current preview frame, clearing frame state."
+  (vertico-buffer-frame--hide-frame
+   vertico-buffer-frame--preview-frame)
+  (vertico-buffer-frame--delete-frame
+   vertico-buffer-frame--preview-frame)
+  (vertico-buffer-frame--clear-preview-frame-state))
+
+(defun vertico-buffer-frame--frame-delete-priority (frame)
+  "Return deletion priority for FRAME.
+Preview frames are deleted before candidate frames so nested or stale child
+frame relationships are unwound from the outside in."
+  (pcase (vertico-buffer-frame--frame-parameter
+          frame 'vertico-buffer-frame-role)
+    ('preview 0)
+    ('candidate 1)
+    (_ 2)))
+
+(defun vertico-buffer-frame--delete-frame-list (frames)
+  "Delete FRAMES in a child-frame-safe order."
+  (dolist (frame (cl-stable-sort
+                  (copy-sequence frames)
+                  #'<
+                  :key #'vertico-buffer-frame--frame-delete-priority))
+    (vertico-buffer-frame--delete-frame frame)))
+
 (defun vertico-buffer-frame--delete-owned-frames ()
   "Delete child frames owned by `vertico-buffer-frame'."
-  (dolist (frame (frame-list))
-    (when (or (vertico-buffer-frame--frame-parameter
-               frame 'vertico-buffer-frame-owner)
-              (vertico-buffer-frame--frame-parameter
-               frame vertico-buffer-frame--owner-buffer-parameter))
-      (vertico-buffer-frame--delete-frame frame))))
+  (let (frames)
+    (dolist (frame (frame-list))
+      (when (or (vertico-buffer-frame--frame-parameter
+                 frame 'vertico-buffer-frame-owner)
+                (vertico-buffer-frame--frame-parameter
+                 frame vertico-buffer-frame--owner-buffer-parameter))
+        (push frame frames)))
+    (vertico-buffer-frame--delete-frame-list (nreverse frames))))
 
 (defun vertico-buffer-frame--display-minibuffer-selected-window
     (buffer alist)
@@ -939,13 +1145,15 @@ of a Vertico child frame."
               (window (ignore-errors
                         (minibuffer-selected-window)))
               ((vertico-buffer-frame--window-live-p window)))
-    (let (function
+    (let ((owner (current-buffer))
+          function
           displayed-window)
       (setq function
             (lambda ()
               (vertico-buffer-frame--remove-hook
-               'minibuffer-exit-hook function)
-              (when (and (buffer-live-p buffer)
+               'minibuffer-exit-hook function t)
+              (when (and (eq (current-buffer) owner)
+                         (buffer-live-p buffer)
                          (vertico-buffer-frame--window-live-p window))
                 (condition-case-unless-debug nil
                     (run-at-time
@@ -958,50 +1166,37 @@ of a Vertico child frame."
             (vertico-buffer-frame--with-selected-live-window
              window
              (lambda ()
-               (display-buffer-same-window buffer alist))))
+               (display-buffer-same-window
+                buffer
+                (vertico-buffer-frame--same-window-display-alist
+                 alist)))))
       (when displayed-window
         (vertico-buffer-frame--add-hook
-         'minibuffer-exit-hook function 90)
+         'minibuffer-exit-hook function 90 t)
         displayed-window))))
 
 (defun vertico-buffer-frame--cleanup-minibuffer (buffer)
   "Clean up child frames owned by minibuffer BUFFER."
   (if (buffer-live-p buffer)
       (with-current-buffer buffer
-        (progn
-          (vertico-buffer-frame--remove-hook
-           'post-command-hook
-           #'vertico-buffer-frame--preview-post-command t)
-          (vertico-buffer-frame--remove-hook
-           'post-command-hook
-           #'vertico-buffer-frame--candidate-post-command t)
-          (vertico-buffer-frame--cancel-preview-timer)
-          (vertico-buffer-frame--delete-frame
-           vertico-buffer-frame--candidate-frame)
-          (vertico-buffer-frame--hide-frame
-           vertico-buffer-frame--preview-frame)
-          (vertico-buffer-frame--delete-frame
-           vertico-buffer-frame--preview-frame)
-          (vertico-buffer-frame--delete-frames-owned-by-buffer buffer)
-          (vertico-buffer-frame--kill-preview-buffer)
-          (setq-local vertico-buffer-frame--candidate-frame nil
-                      vertico-buffer-frame--candidate-window nil
-                      vertico-buffer-frame--candidate-layout-state nil
-                      vertico-buffer-frame--child-frame-session nil
-                      vertico-buffer-frame--preview-frame nil
-                      vertico-buffer-frame--preview-window nil
-                      vertico-buffer-frame--preview-layout-state nil
-                      vertico-buffer-frame--preview-buffer nil
-                      vertico-buffer-frame--preview-timer nil
-                      vertico-buffer-frame--preview-last-error-message nil
-                      vertico-buffer-frame--preview-last-target-error-message
-                      nil
-                      vertico-buffer-frame--preview-scheduled-state nil
-                      vertico-buffer-frame--project-root-cache nil
-                      vertico-buffer-frame--file-preview-cache nil
-                      vertico-buffer-frame--imenu-cache nil
-                      vertico-buffer-frame--consult-imenu-entry-table-cache nil
-                      vertico-buffer-frame--cleanup-function nil)))
+        (vertico-buffer-frame--remove-hook
+         'post-command-hook
+         #'vertico-buffer-frame--preview-post-command t)
+        (vertico-buffer-frame--remove-hook
+         'post-command-hook
+         #'vertico-buffer-frame--candidate-post-command t)
+        (vertico-buffer-frame--cancel-preview-timer)
+        (vertico-buffer-frame--delete-preview-frame)
+        (vertico-buffer-frame--delete-frame
+         vertico-buffer-frame--candidate-frame)
+        (vertico-buffer-frame--delete-frames-owned-by-buffer buffer)
+        (vertico-buffer-frame--kill-preview-buffer)
+        (vertico-buffer-frame--clear-candidate-frame-state)
+        (vertico-buffer-frame--clear-preview-frame-state)
+        (vertico-buffer-frame--clear-preview-target-state)
+        (vertico-buffer-frame--clear-preview-session-state)
+        (setq-local vertico-buffer-frame--child-frame-session nil
+                    vertico-buffer-frame--cleanup-function nil))
     (vertico-buffer-frame--delete-frames-owned-by-buffer buffer)
     (vertico-buffer-frame--kill-preview-buffers-owned-by-buffer buffer))
   (setq vertico-buffer-frame--minibuffers

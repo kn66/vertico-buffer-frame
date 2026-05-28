@@ -147,9 +147,20 @@ non-nil, preview errors are not caught."
 (defcustom vertico-buffer-frame-preview-target-functions nil
   "Hook functions for additional preview targets.
 Each function is called with CATEGORY, CANDIDATE and RAW-CANDIDATE.
-It should return a preview target accepted by
-`vertico-buffer-frame--show-preview', or nil if it cannot handle the
-candidate."
+It should return nil if it cannot handle the candidate, or a target list of
+one of these forms:
+
+  (file FILE)
+  (file-line FILE LINE)
+  (file-position FILE POSITION)
+  (buffer BUFFER-NAME)
+  (buffer-line BUFFER LINE)
+  (buffer-position BUFFER POSITION)
+  (text NAME INSERTER)
+
+FILE and BUFFER-NAME are strings.  BUFFER is a live buffer.  LINE is a
+one-based line number.  POSITION is an integer or marker.  INSERTER is a
+function called in a temporary preview buffer."
   :type 'hook)
 
 (defvar vertico-buffer-frame-mode)
@@ -178,6 +189,29 @@ candidate."
 (defvar-local vertico-buffer-frame--temporary-preview-buffer nil)
 (defvar-local vertico-buffer-frame--preview-owner-buffer nil)
 
+;;;; Preview state
+
+(defun vertico-buffer-frame--clear-preview-frame-state ()
+  "Clear buffer-local preview child-frame and window state."
+  (setq-local vertico-buffer-frame--preview-frame nil
+              vertico-buffer-frame--preview-window nil
+              vertico-buffer-frame--preview-layout-state nil))
+
+(defun vertico-buffer-frame--clear-preview-target-state ()
+  "Clear buffer-local preview diagnostics and target caches."
+  (setq-local vertico-buffer-frame--preview-last-error-message nil
+              vertico-buffer-frame--preview-last-target-error-message nil
+              vertico-buffer-frame--preview-scheduled-state nil
+              vertico-buffer-frame--file-preview-cache nil
+              vertico-buffer-frame--imenu-cache nil
+              vertico-buffer-frame--consult-imenu-entry-table-cache nil))
+
+(defun vertico-buffer-frame--clear-preview-session-state ()
+  "Clear buffer-local preview state that is scoped to one minibuffer session."
+  (setq-local vertico-buffer-frame--preview-buffer nil
+              vertico-buffer-frame--preview-timer nil
+              vertico-buffer-frame--project-root-cache nil))
+
 (defconst vertico-buffer-frame-preview--golden-ratio
   (/ (+ 1.0 (sqrt 5.0)) 2.0)
   "Golden ratio used for automatic preview layout.")
@@ -198,6 +232,8 @@ candidate."
 (declare-function locate-library "subr")
 (declare-function mail-extract-address-components "mail-extr")
 (declare-function project-root "project")
+(declare-function vertico-buffer-frame--child-frames-supported-p
+                  "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--delete-frame "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--display-buffer-in-child-frame
                   "vertico-buffer-frame")
@@ -209,11 +245,15 @@ candidate."
 (declare-function vertico-buffer-frame--hide-frame "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--pixels-to-chars "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--place-preview-frame "vertico-buffer-frame")
+(declare-function vertico-buffer-frame--preview-reference-geometry
+                  "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--resize-frame-to-size
                   "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--show-frame "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--window-frame "vertico-buffer-frame")
 (declare-function vertico--candidate "vertico")
+
+;;;; Completion state
 
 (defun vertico-buffer-frame--completion-active-p ()
   "Return non-nil when the current buffer is an active completion minibuffer."
@@ -352,6 +392,10 @@ the `multi-category' text property."
                   (cdr multi)))
         (cons metadata-category candidate)))))
 
+;;;; Preview target resolution
+
+;;;;; File, buffer, and project targets
+
 (defun vertico-buffer-frame--remote-file-name-p (file directory)
   "Return non-nil when FILE names a remote path under DIRECTORY."
   (condition-case-unless-debug nil
@@ -425,6 +469,8 @@ the `multi-category' text property."
   "Return a buffer-position target for BUFFER at POSITION."
   (when (and (buffer-live-p buffer) position)
     (list 'buffer-position buffer position)))
+
+;;;;; Text and metadata targets
 
 (defun vertico-buffer-frame--symbol-preview-target (candidate)
   "Return a text preview target for symbol CANDIDATE."
@@ -583,6 +629,8 @@ the `multi-category' text property."
                       (or (locate-library (concat candidate ".el"))
                           (locate-library candidate)))))
     (list 'file file)))
+
+;;;;; Package and register targets
 
 (defun vertico-buffer-frame--package-descriptor (package)
   "Return PACKAGE descriptor from installed or archive package metadata."
@@ -775,6 +823,8 @@ the `multi-category' text property."
                     (when address
                       (insert "Address: " address "\n")))
                 (error nil)))))))
+
+;;;;; Search and location targets
 
 (defun vertico-buffer-frame--find-buffer-position (candidate &optional buffers)
   "Return a buffer-position target for the first occurrence of CANDIDATE.
@@ -1268,12 +1318,17 @@ When STRINGP is non-nil, look for a @String definition."
           (lambda ()
             (insert candidate "\n")))))
 
+;;;;; Resolver dispatch
+
 (defconst vertico-buffer-frame--preview-target-resolvers
-  '((file vertico-buffer-frame--file-target)
+  '(;; File and live-buffer targets.
+    (file vertico-buffer-frame--file-target)
     (project-file vertico-buffer-frame--project-file-target)
     (buffer vertico-buffer-frame--buffer-target)
     (xref-location vertico-buffer-frame--xref-location-target :raw-candidate)
     (bookmark vertico-buffer-frame--bookmark-target)
+
+    ;; Symbol-like targets all share the same documentation preview.
     (symbol-help vertico-buffer-frame--symbol-preview-target)
     (command vertico-buffer-frame--symbol-preview-target)
     (function vertico-buffer-frame--symbol-preview-target)
@@ -1284,6 +1339,8 @@ When STRINGP is non-nil, look for a @String definition."
     (customization-group vertico-buffer-frame--symbol-preview-target)
     (custom-variable vertico-buffer-frame--symbol-preview-target)
     (apropos-symbol vertico-buffer-frame--symbol-preview-target)
+
+    ;; Metadata text previews.
     (unicode-name vertico-buffer-frame--unicode-name-target)
     (info-menu vertico-buffer-frame--info-menu-target)
     (calendar-month vertico-buffer-frame--calendar-month-target)
@@ -1298,6 +1355,8 @@ When STRINGP is non-nil, look for a @String definition."
     (register vertico-buffer-frame--register-target)
     (email vertico-buffer-frame--email-target)
     (ecomplete vertico-buffer-frame--email-target)
+
+    ;; Search-like candidates.
     (dabbrev vertico-buffer-frame--dabbrev-target)
     (imenu vertico-buffer-frame--imenu-target :raw-candidate)
     (bibtex-key vertico-buffer-frame--bibtex-target nil)
@@ -1386,12 +1445,33 @@ current minibuffer state."
           (vertico-buffer-frame--builtin-preview-target
            category candidate raw-candidate)))))
 
+;;;; Preview frame layout
+
 (defun vertico-buffer-frame--preview-parent-frame ()
-  "Return the parent frame for the preview child frame."
-  (if (vertico-buffer-frame--preview-live-frame-p
-       vertico-buffer-frame--candidate-frame)
-      vertico-buffer-frame--candidate-frame
-    (vertico-buffer-frame--parent-frame)))
+  "Return the parent frame for the preview child frame.
+The preview frame is a sibling of the candidate frame.  When the candidate
+frame is live, use its parent so preview placement stays in the same coordinate
+space."
+  (let* ((candidate vertico-buffer-frame--candidate-frame)
+         (candidate-parent
+          (and (vertico-buffer-frame--preview-live-frame-p candidate)
+               (vertico-buffer-frame--frame-parameter
+                candidate 'parent-frame))))
+    (if (vertico-buffer-frame--preview-live-frame-p candidate-parent)
+        candidate-parent
+      (vertico-buffer-frame--parent-frame))))
+
+(defun vertico-buffer-frame--preview-size-source-frame (parent)
+  "Return the frame used to derive preview size under PARENT.
+When the live candidate frame belongs to PARENT, derive the preview size from
+that candidate frame so resize-to-fit candidates and previews move together."
+  (let ((candidate vertico-buffer-frame--candidate-frame))
+    (if (and (vertico-buffer-frame--preview-live-frame-p candidate)
+             (eq (vertico-buffer-frame--frame-parameter
+                  candidate 'parent-frame)
+                 parent))
+        candidate
+      parent)))
 
 (defun vertico-buffer-frame--preview-live-frame-p (frame)
   "Return non-nil when FRAME is live, ignoring stale frame errors."
@@ -1404,6 +1484,17 @@ current minibuffer state."
   (condition-case-unless-debug nil
       (window-live-p window)
     (error nil)))
+
+(defun vertico-buffer-frame--preview-window-current-p (parent)
+  "Return non-nil when the current preview window can be reused under PARENT."
+  (and (vertico-buffer-frame--preview-live-frame-p
+        vertico-buffer-frame--preview-frame)
+       (vertico-buffer-frame--preview-live-window-p
+        vertico-buffer-frame--preview-window)
+       (eq (vertico-buffer-frame--frame-parameter
+            vertico-buffer-frame--preview-frame
+            'parent-frame)
+           parent)))
 
 (defun vertico-buffer-frame--preview-auto-pixel-size (parent)
   "Return automatic preview size in pixels for PARENT."
@@ -1438,14 +1529,23 @@ current minibuffer state."
                       (or height-cap most-positive-fixnum))))
     (cons width height)))
 
+(defun vertico-buffer-frame--preview-frame-layout-state (frame parent size)
+  "Return layout state for preview FRAME under PARENT with character SIZE.
+Include candidate geometry because preview placement follows the candidate frame
+instead of only the parent frame."
+  (append (vertico-buffer-frame--frame-layout-state frame parent size)
+          (list (vertico-buffer-frame--preview-reference-geometry parent))))
+
 (defun vertico-buffer-frame--refresh-preview-frame ()
   "Resize and reposition the current preview frame, if it is live."
   (condition-case-unless-debug nil
       (when (vertico-buffer-frame--preview-live-frame-p
              vertico-buffer-frame--preview-frame)
         (let* ((parent (vertico-buffer-frame--preview-parent-frame))
-               (size (vertico-buffer-frame--preview-frame-size parent))
-               (state (vertico-buffer-frame--frame-layout-state
+               (size-source
+                (vertico-buffer-frame--preview-size-source-frame parent))
+               (size (vertico-buffer-frame--preview-frame-size size-source))
+               (state (vertico-buffer-frame--preview-frame-layout-state
                        vertico-buffer-frame--preview-frame parent size))
                (layout-changed
                 (not (equal state vertico-buffer-frame--preview-layout-state)))
@@ -1458,7 +1558,7 @@ current minibuffer state."
                         vertico-buffer-frame--preview-frame parent)))
             (when placed
               (setq-local vertico-buffer-frame--preview-layout-state
-                          (vertico-buffer-frame--frame-layout-state
+                          (vertico-buffer-frame--preview-frame-layout-state
                            vertico-buffer-frame--preview-frame parent size))))
           (when (and placed
                      (vertico-buffer-frame--preview-live-window-p
@@ -1466,6 +1566,8 @@ current minibuffer state."
             (force-window-update
              (window-buffer vertico-buffer-frame--preview-window)))))
     (error nil)))
+
+;;;; Preview buffer ownership and file rendering
 
 (defun vertico-buffer-frame--kill-temporary-preview-buffer (buffer)
   "Kill temporary preview BUFFER when it is live."
@@ -1623,6 +1725,122 @@ When KEEP-BUFFER is non-nil, preserve that buffer."
           (min limit size)
         limit))))
 
+(defconst vertico-buffer-frame--file-line-scan-chunk-size 65536
+  "Number of bytes read at a time while locating a preview line.")
+
+(defun vertico-buffer-frame--file-line-byte-position (file line)
+  "Return the zero-based byte position where FILE's LINE starts."
+  (when (and (integerp line)
+             (> line 0))
+    (condition-case-unless-debug nil
+        (catch 'position
+          (when (= line 1)
+            (throw 'position 0))
+          (let ((remaining-newlines (1- line))
+                (offset 0)
+                eof)
+            (while (not eof)
+              (with-temp-buffer
+                (set-buffer-multibyte nil)
+                (let ((inserted
+                       (cadr
+                        (insert-file-contents-literally
+                         file
+                         nil
+                         offset
+                         (+ offset
+                            vertico-buffer-frame--file-line-scan-chunk-size)))))
+                  (if (or (not (integerp inserted))
+                          (= inserted 0))
+                      (setq eof t)
+                    (goto-char (point-min))
+                    (while (search-forward "\n" nil t)
+                      (setq remaining-newlines
+                            (1- remaining-newlines))
+                      (when (= remaining-newlines 0)
+                        (throw 'position
+                               (+ offset (1- (point))))))
+                    (setq offset (+ offset inserted))
+                    (when (< inserted
+                             vertico-buffer-frame--file-line-scan-chunk-size)
+                      (setq eof t)))))))
+          nil)
+      (error nil))))
+
+(defun vertico-buffer-frame--file-position-byte-position (position)
+  "Return a zero-based byte position approximated from POSITION."
+  (let ((position (cond
+                   ((markerp position)
+                    (marker-position position))
+                   ((integerp position)
+                    position))))
+    (and (integerp position)
+         (> position 0)
+         (1- position))))
+
+(defun vertico-buffer-frame--large-regular-file-preview-data (file)
+  "Return (SIZE . LIMIT) when FILE should use a location-focused preview."
+  (condition-case-unless-debug nil
+      (let ((size (vertico-buffer-frame--file-size file))
+            (limit (vertico-buffer-frame--preview-max-file-size)))
+        (and (file-regular-p file)
+             (integerp size)
+             (integerp limit)
+             (> limit 0)
+             (> size limit)
+             (or vertico-buffer-frame-preview-binary-files
+                 (not (vertico-buffer-frame--binary-file-p file size)))
+             (cons size limit)))
+    (error nil)))
+
+(defun vertico-buffer-frame--focused-file-preview-buffer
+    (file start size limit)
+  "Return a preview buffer for FILE beginning near byte START.
+At most LIMIT bytes are read from a file of SIZE bytes."
+  (let* ((start (max 0 (min start size)))
+         (end (min size (+ start limit))))
+    (vertico-buffer-frame--text-preview-buffer
+     "file"
+     (lambda ()
+       (insert-file-contents file nil start end)
+       (when (< end size)
+         (goto-char (point-max))
+         (insert "\n\nPreview starts at byte "
+                 (number-to-string start)
+                 " and is truncated at "
+                 (number-to-string end)
+                 " of "
+                 (number-to-string size)
+                 " bytes.\n"))))))
+
+(defun vertico-buffer-frame--file-line-preview-spec (file line)
+  "Return a preview display spec for FILE at LINE."
+  (if-let* ((data (vertico-buffer-frame--large-regular-file-preview-data
+                   file))
+            (start (vertico-buffer-frame--file-line-byte-position
+                    file line)))
+      (list (vertico-buffer-frame--focused-file-preview-buffer
+             file start (car data) (cdr data))
+            (cons 'line 1)
+            nil)
+    (list (vertico-buffer-frame--file-preview-buffer file)
+          (cons 'line line)
+          nil)))
+
+(defun vertico-buffer-frame--file-position-preview-spec (file position)
+  "Return a preview display spec for FILE at POSITION."
+  (if-let* ((data (vertico-buffer-frame--large-regular-file-preview-data
+                   file))
+            (start (vertico-buffer-frame--file-position-byte-position
+                    position)))
+      (list (vertico-buffer-frame--focused-file-preview-buffer
+             file start (car data) (cdr data))
+            (cons 'position 1)
+            nil)
+    (list (vertico-buffer-frame--file-preview-buffer file)
+          (cons 'position position)
+          nil)))
+
 (defun vertico-buffer-frame--binary-file-p (file size)
   "Return non-nil when FILE appears to be binary.
 SIZE is the file size in bytes, or nil if it is unknown."
@@ -1695,6 +1913,22 @@ SIZE is the file size in bytes, or nil if it is unknown."
         (setq-local vertico-buffer-frame--preview-buffer buffer)
         buffer))))
 
+(defun vertico-buffer-frame--insert-file-preview (file)
+  "Insert a preview for FILE and return non-nil when it can be cached."
+  (condition-case-unless-debug error
+      (cond
+       ((file-directory-p file)
+        (vertico-buffer-frame--insert-directory-preview file))
+       ((file-regular-p file)
+        (vertico-buffer-frame--insert-regular-file-preview file))
+       (t
+        (insert (vertico-buffer-frame--display-file-name file) "\n")
+        t))
+    (error
+     (vertico-buffer-frame--insert-file-preview-error
+      file "File preview" error)
+     nil)))
+
 (defun vertico-buffer-frame--file-preview-buffer (file)
   "Return a temporary preview buffer for FILE."
   (let ((key (vertico-buffer-frame--file-preview-cache-key file)))
@@ -1704,24 +1938,8 @@ SIZE is the file size in bytes, or nil if it is unknown."
                 (vertico-buffer-frame--text-preview-buffer
                  "file"
                  (lambda ()
-                   (condition-case-unless-debug error
-                       (setq preview-cacheable
-                             (cond
-                              ((file-directory-p file)
-                               (vertico-buffer-frame--insert-directory-preview
-                                file))
-                              ((file-regular-p file)
-                               (vertico-buffer-frame--insert-regular-file-preview
-                                file))
-                              (t
-                               (insert (vertico-buffer-frame--display-file-name
-                                        file)
-                                       "\n")
-                               t)))
-                     (error
-                      (vertico-buffer-frame--insert-file-preview-error
-                       file "File preview" error)
-                      (setq preview-cacheable nil)))))))
+                   (setq preview-cacheable
+                         (vertico-buffer-frame--insert-file-preview file))))))
           (when (and key preview-cacheable)
             (setq-local vertico-buffer-frame--file-preview-cache
                         (cons key buffer)))
@@ -1759,6 +1977,8 @@ SIZE is the file size in bytes, or nil if it is unknown."
     (when (= (point) content-start)
       (insert "No documentation available.\n"))))
 
+;;;; Preview child-frame display
+
 (defun vertico-buffer-frame--preview-placeholder-buffer ()
   "Return the buffer initially displayed by a preview child frame."
   (let ((buffer (get-buffer-create " *vertico-buffer-frame-preview*")))
@@ -1769,56 +1989,53 @@ SIZE is the file size in bytes, or nil if it is unknown."
                   tab-line-format nil))
     buffer))
 
+(defun vertico-buffer-frame--create-preview-window (parent initial-buffer)
+  "Create and return a preview child-frame window under PARENT.
+INITIAL-BUFFER, when non-nil, is displayed before the preview target is
+installed so the target buffer is not killed during stale frame cleanup."
+  (let ((size (vertico-buffer-frame--preview-frame-size
+               (vertico-buffer-frame--preview-size-source-frame parent)))
+        window
+        frame
+        success)
+    (unwind-protect
+        (progn
+          (setq window
+                (vertico-buffer-frame--display-buffer-in-child-frame
+                 (or initial-buffer
+                     (vertico-buffer-frame--preview-placeholder-buffer))
+                 parent
+                 (format "Vertico Preview %s" (minibuffer-depth))
+                 size
+                 'preview))
+          (setq frame (or (vertico-buffer-frame--window-frame window)
+                          (error "Preview window did not have a live frame")))
+          (set-window-parameter window 'no-other-window t)
+          (set-window-parameter window 'no-delete-other-windows t)
+          (setq-local vertico-buffer-frame--preview-frame frame
+                      vertico-buffer-frame--preview-window window)
+          (when (vertico-buffer-frame--place-preview-frame frame parent)
+            (setq-local vertico-buffer-frame--preview-layout-state
+                        (vertico-buffer-frame--preview-frame-layout-state
+                         frame parent size)))
+          (setq success t)
+          window)
+      (unless success
+        (vertico-buffer-frame--clear-preview-frame-state)
+        (vertico-buffer-frame--delete-frame frame)))))
+
 (defun vertico-buffer-frame--preview-window (&optional buffer)
   "Return the preview window, creating a child frame when needed.
 When BUFFER is live, use it as the initial child-frame buffer and preserve it
 during stale preview cleanup."
   (let ((parent (vertico-buffer-frame--preview-parent-frame))
         (initial-buffer (and (buffer-live-p buffer) buffer)))
-    (unless (and (vertico-buffer-frame--preview-live-frame-p
-                  vertico-buffer-frame--preview-frame)
-                 (vertico-buffer-frame--preview-live-window-p
-                  vertico-buffer-frame--preview-window)
-                 (eq (vertico-buffer-frame--frame-parameter
-                      vertico-buffer-frame--preview-frame
-                      'parent-frame)
-                     parent))
+    (unless (vertico-buffer-frame--preview-window-current-p parent)
       (vertico-buffer-frame--delete-frame
        vertico-buffer-frame--preview-frame)
       (vertico-buffer-frame--kill-preview-buffer initial-buffer)
-      (setq-local vertico-buffer-frame--preview-frame nil
-                  vertico-buffer-frame--preview-window nil
-                  vertico-buffer-frame--preview-layout-state nil)
-      (let ((size (vertico-buffer-frame--preview-frame-size parent))
-            window
-            frame
-            success)
-        (unwind-protect
-            (progn
-              (setq window
-                    (vertico-buffer-frame--display-buffer-in-child-frame
-                     (or initial-buffer
-                         (vertico-buffer-frame--preview-placeholder-buffer))
-                     parent
-                     (format "Vertico Preview %s" (minibuffer-depth))
-                     size
-                     'preview))
-              (setq frame (or (vertico-buffer-frame--window-frame window)
-                              (error "Preview window did not have a live frame")))
-              (set-window-parameter window 'no-other-window t)
-              (set-window-parameter window 'no-delete-other-windows t)
-              (setq-local vertico-buffer-frame--preview-frame frame
-                          vertico-buffer-frame--preview-window window)
-              (when (vertico-buffer-frame--place-preview-frame frame parent)
-                (setq-local vertico-buffer-frame--preview-layout-state
-                            (vertico-buffer-frame--frame-layout-state
-                             frame parent size)))
-              (setq success t))
-          (unless success
-            (setq-local vertico-buffer-frame--preview-frame nil
-                        vertico-buffer-frame--preview-window nil
-                        vertico-buffer-frame--preview-layout-state nil)
-            (vertico-buffer-frame--delete-frame frame))))))
+      (vertico-buffer-frame--clear-preview-frame-state)
+      (vertico-buffer-frame--create-preview-window parent initial-buffer)))
   (vertico-buffer-frame--refresh-preview-frame)
   vertico-buffer-frame--preview-window)
 
@@ -1876,6 +2093,77 @@ Return non-nil when BUFFER was displayed successfully."
           (vertico-buffer-frame--center-window-point window)))
     (error nil)))
 
+(defun vertico-buffer-frame--set-preview-window-location (window location)
+  "Move preview WINDOW to LOCATION when LOCATION specifies one."
+  (pcase location
+    (`(line . ,line)
+     (vertico-buffer-frame--set-window-line window line))
+    (`(position . ,position)
+     (vertico-buffer-frame--set-window-position window position))))
+
+(defun vertico-buffer-frame--kill-replaced-preview-buffer
+    (replacement-buffer new-buffer old-preview-buffer)
+  "Kill REPLACEMENT-BUFFER when NEW-BUFFER has superseded it.
+OLD-PREVIEW-BUFFER may still be the displayed preview, so leave it alone."
+  (when (and replacement-buffer
+             (not (eq replacement-buffer new-buffer))
+             (not (eq replacement-buffer old-preview-buffer)))
+    (vertico-buffer-frame--kill-old-preview-buffer
+     replacement-buffer new-buffer)))
+
+(defun vertico-buffer-frame--cleanup-failed-preview-display
+    (replacement-buffer old-preview-buffer)
+  "Restore preview buffer state after a failed live preview display.
+REPLACEMENT-BUFFER is the buffer installed while resolving the new target.
+OLD-PREVIEW-BUFFER is the buffer that was visible before the display attempt."
+  (when (and replacement-buffer
+             (not (eq replacement-buffer old-preview-buffer)))
+    (vertico-buffer-frame--kill-old-preview-buffer replacement-buffer nil))
+  (when (eq vertico-buffer-frame--preview-buffer replacement-buffer)
+    (setq-local vertico-buffer-frame--preview-buffer nil)))
+
+(defun vertico-buffer-frame--display-live-preview-buffer
+    (buffer location external-buffer old-preview-buffer)
+  "Display live preview BUFFER and keep temporary buffer ownership consistent.
+LOCATION may be (line . LINE), (position . POSITION), or nil.  When
+EXTERNAL-BUFFER is non-nil, BUFFER belongs to the user and must not be recorded
+as an owned temporary preview buffer.  OLD-PREVIEW-BUFFER is the preview buffer
+that was visible before resolving this target."
+  (let ((replacement-buffer vertico-buffer-frame--preview-buffer)
+        success)
+    (setq-local vertico-buffer-frame--preview-buffer old-preview-buffer)
+    (unwind-protect
+        (let ((window (vertico-buffer-frame--preview-window buffer)))
+          (unless (vertico-buffer-frame--set-preview-window-buffer
+                   window buffer old-preview-buffer)
+            (error "Preview window was not usable"))
+          (setq-local vertico-buffer-frame--preview-buffer
+                      (and (not external-buffer)
+                           buffer))
+          (vertico-buffer-frame--kill-replaced-preview-buffer
+           replacement-buffer buffer old-preview-buffer)
+          (vertico-buffer-frame--set-preview-window-location window location)
+          (vertico-buffer-frame--show-frame
+           vertico-buffer-frame--preview-frame)
+          (setq success t))
+      (unless success
+        (vertico-buffer-frame--cleanup-failed-preview-display
+         replacement-buffer old-preview-buffer)))))
+
+(defun vertico-buffer-frame--hide-missing-preview-buffer (old-preview-buffer)
+  "Hide the preview after target resolution failed to produce a live buffer.
+OLD-PREVIEW-BUFFER is the temporary preview buffer that was visible before the
+failed target resolution."
+  (when (and vertico-buffer-frame--preview-buffer
+             (not (eq vertico-buffer-frame--preview-buffer
+                      old-preview-buffer)))
+    (vertico-buffer-frame--kill-old-preview-buffer
+     vertico-buffer-frame--preview-buffer nil))
+  (setq-local vertico-buffer-frame--preview-buffer old-preview-buffer)
+  (vertico-buffer-frame--kill-old-preview-buffer old-preview-buffer nil)
+  (setq-local vertico-buffer-frame--preview-buffer nil)
+  (vertico-buffer-frame--hide-preview))
+
 (defun vertico-buffer-frame--display-preview-buffer
     (buffer &optional location external-buffer old-preview-buffer)
   "Display preview BUFFER in the preview child frame.
@@ -1883,73 +2171,10 @@ LOCATION may be (line . LINE), (position . POSITION), or nil.  When
 EXTERNAL-BUFFER is non-nil, do not treat the displayed buffer as an owned
 temporary preview buffer.  OLD-PREVIEW-BUFFER is the temporary buffer being
 replaced."
-  (let (replacement-preview-buffer)
-    (if (buffer-live-p buffer)
-        (let (success)
-          (setq replacement-preview-buffer
-                vertico-buffer-frame--preview-buffer)
-          (setq-local vertico-buffer-frame--preview-buffer
-                      old-preview-buffer)
-          (unwind-protect
-              (let ((window (vertico-buffer-frame--preview-window buffer)))
-                (unless (vertico-buffer-frame--set-preview-window-buffer
-                         window
-                         buffer
-                         old-preview-buffer)
-                  (error "Preview window was not usable"))
-                (setq-local vertico-buffer-frame--preview-buffer
-                            (and (not external-buffer)
-                                 buffer))
-                (when (and replacement-preview-buffer
-                           (not (eq replacement-preview-buffer buffer))
-                           (not (eq replacement-preview-buffer
-                                    old-preview-buffer)))
-                  (vertico-buffer-frame--kill-old-preview-buffer
-                   replacement-preview-buffer
-                   buffer))
-                (pcase location
-                  (`(line . ,line)
-                   (vertico-buffer-frame--set-window-line window line))
-                  (`(position . ,position)
-                   (vertico-buffer-frame--set-window-position window
-                                                              position)))
-                (vertico-buffer-frame--show-frame
-                 vertico-buffer-frame--preview-frame)
-                (setq success t))
-            (unless success
-              (when (and replacement-preview-buffer
-                         (not (eq replacement-preview-buffer
-                                  old-preview-buffer)))
-                (vertico-buffer-frame--kill-old-preview-buffer
-                 replacement-preview-buffer
-                 nil))
-              (when (eq vertico-buffer-frame--preview-buffer
-                        replacement-preview-buffer)
-                (setq-local vertico-buffer-frame--preview-buffer nil)))))
-      (when (and vertico-buffer-frame--preview-buffer
-                 (not (eq vertico-buffer-frame--preview-buffer
-                          old-preview-buffer)))
-        (vertico-buffer-frame--kill-old-preview-buffer
-         vertico-buffer-frame--preview-buffer
-         nil))
-      (setq-local vertico-buffer-frame--preview-buffer
-                  old-preview-buffer)
-      (vertico-buffer-frame--kill-old-preview-buffer old-preview-buffer nil)
-      (setq-local vertico-buffer-frame--preview-buffer nil)
-      (vertico-buffer-frame--hide-preview))))
-
-(defun vertico-buffer-frame--show-preview-buffer
-    (buffer-function &optional location external-buffer)
-  "Build and display the preview buffer returned by BUFFER-FUNCTION.
-LOCATION may be (line . LINE), (position . POSITION), or nil.  When
-EXTERNAL-BUFFER is non-nil, do not treat the displayed buffer as an owned
-temporary preview buffer."
-  (let ((old-preview-buffer vertico-buffer-frame--preview-buffer))
-    (vertico-buffer-frame--display-preview-buffer
-     (funcall buffer-function)
-     location
-     external-buffer
-     old-preview-buffer)))
+  (if (buffer-live-p buffer)
+      (vertico-buffer-frame--display-live-preview-buffer
+       buffer location external-buffer old-preview-buffer)
+    (vertico-buffer-frame--hide-missing-preview-buffer old-preview-buffer)))
 
 (defun vertico-buffer-frame--preview-target-display-spec (target)
   "Return a preview display spec for TARGET.
@@ -1959,13 +2184,9 @@ The result is (BUFFER LOCATION EXTERNAL-BUFFER), where LOCATION may be
     (`(file ,file)
      (list (vertico-buffer-frame--file-preview-buffer file) nil nil))
     (`(file-line ,file ,line)
-     (list (vertico-buffer-frame--file-preview-buffer file)
-           (cons 'line line)
-           nil))
+     (vertico-buffer-frame--file-line-preview-spec file line))
     (`(file-position ,file ,position)
-     (list (vertico-buffer-frame--file-preview-buffer file)
-           (cons 'position position)
-           nil))
+     (vertico-buffer-frame--file-position-preview-spec file position))
     (`(buffer ,name)
      (list (get-buffer name) nil t))
     (`(buffer-line ,buffer ,line)
@@ -1978,14 +2199,17 @@ The result is (BUFFER LOCATION EXTERNAL-BUFFER), where LOCATION may be
 (defun vertico-buffer-frame--show-preview (target)
   "Show preview TARGET."
   (let ((old-preview-buffer vertico-buffer-frame--preview-buffer))
-    (when-let* ((spec (vertico-buffer-frame--preview-target-display-spec
-                       target)))
-      (pcase-let ((`(,buffer ,location ,external-buffer) spec))
-        (vertico-buffer-frame--display-preview-buffer
-         buffer
-         location
-         external-buffer
-         old-preview-buffer)))))
+    (if-let* ((spec (vertico-buffer-frame--preview-target-display-spec
+                     target)))
+        (pcase-let ((`(,buffer ,location ,external-buffer) spec))
+          (vertico-buffer-frame--display-preview-buffer
+           buffer
+           location
+           external-buffer
+           old-preview-buffer))
+      (vertico-buffer-frame--hide-preview))))
+
+;;;; Preview refresh scheduling
 
 (defun vertico-buffer-frame--report-preview-error (error)
   "Hide the preview and optionally report ERROR."
@@ -2029,7 +2253,9 @@ The result is (BUFFER LOCATION EXTERNAL-BUFFER), where LOCATION may be
   "Refresh the preview for the current minibuffer buffer."
   (if (and vertico-buffer-frame-mode
            vertico-buffer-frame-preview
-           (vertico-buffer-frame--completion-active-p))
+           (vertico-buffer-frame--completion-active-p)
+           (vertico-buffer-frame--child-frames-supported-p
+            (vertico-buffer-frame--preview-parent-frame)))
       (if-let* ((target (vertico-buffer-frame--preview-target)))
           (progn
             (vertico-buffer-frame--show-preview target)

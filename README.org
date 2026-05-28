@@ -80,11 +80,31 @@ checkout file directly, so Emacs does not load the installed copy first.
 - ~vertico-buffer-frame-preview-search-buffer-limit~
 - ~vertico-buffer-frame-preview-report-errors~
 - ~vertico-buffer-frame-preview-categories~
+- ~vertico-buffer-frame-preview-target-functions~
 
 Additional preview target adapters can be added with the hook variable
 ~vertico-buffer-frame-preview-target-functions~.  Hook functions receive
-~CATEGORY~, ~CANDIDATE~ and ~RAW-CANDIDATE~, and should return a target accepted
-by the internal preview renderer, or nil.
+~CATEGORY~, ~CANDIDATE~ and ~RAW-CANDIDATE~, and should return a target, or nil
+when they cannot handle the candidate.
+
+Target forms accepted by the internal preview renderer are:
+
+- ~(file FILE)~
+- ~(file-line FILE LINE)~
+- ~(file-position FILE POSITION)~
+- ~(buffer BUFFER-NAME)~
+- ~(buffer-line BUFFER LINE)~
+- ~(buffer-position BUFFER POSITION)~
+- ~(text NAME INSERTER)~
+
+~FILE~ and ~BUFFER-NAME~ are strings, ~BUFFER~ is a live buffer, ~LINE~ is a
+one-based line number, ~POSITION~ is an integer or marker, and ~INSERTER~ is a
+function called in a temporary preview buffer.
+
+Preview target resolution is still gated by
+~vertico-buffer-frame-preview-categories~.  When a hook function handles a
+custom completion category, add that category to
+~vertico-buffer-frame-preview-categories~ as well.
 
 The candidate frame is sized from the parent frame using the golden ratio by
 default, then rounded to the nearest character-cell size before applying it to
@@ -142,7 +162,7 @@ Example:
         vertico-buffer-frame-preview-report-errors t
         vertico-buffer-frame-border-width 1
         vertico-buffer-frame-resize-to-fit-candidates nil
-        vertico-buffer-frame-resize-to-fit-candidates-margin 16
+        vertico-buffer-frame-resize-to-fit-candidates-margin 32
         vertico-buffer-frame-golden-ratio-scale 1.0
         vertico-buffer-frame-report-display-errors nil
         vertico-buffer-frame-parameters nil)
@@ -290,4 +310,8 @@ Before tagging a release, also smoke-test an interactive graphical session:
   a minibuffer from the active minibuffer.
 - Large files, binary-looking files, directories with many entries and remote
   file candidates.
+- Location previews inside large files, such as high line-number
+  ~consult-ripgrep~ or xref candidates.
+- Long candidates with ~vertico-buffer-frame-resize-to-fit-candidates~ enabled,
+  checking that the preview keeps following the candidate frame.
 - Multiple Emacs frames and frame resizing while the minibuffer is active.
