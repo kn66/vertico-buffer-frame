@@ -1767,16 +1767,59 @@ When KEEP-BUFFER is non-nil, preserve that buffer."
           nil)
       (error nil))))
 
-(defun vertico-buffer-frame--file-position-byte-position (position)
-  "Return a zero-based byte position approximated from POSITION."
-  (let ((position (cond
-                   ((markerp position)
-                    (marker-position position))
-                   ((integerp position)
-                    position))))
-    (and (integerp position)
-         (> position 0)
-         (1- position))))
+(defun vertico-buffer-frame--file-position-character-position (position)
+  "Return the one-based character position described by POSITION."
+  (cond
+   ((markerp position)
+    (marker-position position))
+   ((integerp position)
+    position)))
+
+(defconst vertico-buffer-frame--file-position-scan-chunk-size 65536
+  "Minimum bytes read while mapping file positions to byte offsets.")
+
+(defun vertico-buffer-frame--file-position-prefix-byte-length (position coding)
+  "Return file byte length before character POSITION using CODING."
+  (length
+   (encode-coding-string
+    (buffer-substring-no-properties (point-min) position)
+    (or coding 'undecided-unix))))
+
+(defun vertico-buffer-frame--file-position-byte-position (file position)
+  "Return the zero-based byte position for character POSITION in FILE.
+POSITION is an Emacs buffer position.  For multibyte encodings or end-of-line
+conversion, character positions do not map to file bytes by subtracting one, so
+read a prefix and encode the text before POSITION with the detected file
+coding system."
+  (when-let* ((position
+               (vertico-buffer-frame--file-position-character-position
+                position))
+              ((> position 0))
+              (size (vertico-buffer-frame--file-size file)))
+    (condition-case-unless-debug nil
+        (with-temp-buffer
+          (let ((end (min size
+                          (max position
+                               vertico-buffer-frame--file-position-scan-chunk-size)))
+                byte-position)
+            (while (and (not byte-position)
+                        end)
+              (erase-buffer)
+              (insert-file-contents file nil 0 end)
+              (when (<= position (point-max))
+                (setq byte-position
+                      (vertico-buffer-frame--file-position-prefix-byte-length
+                       position last-coding-system-used)))
+              (setq end
+                    (cond
+                     (byte-position
+                      nil)
+                     ((>= end size)
+                      nil)
+                     (t
+                      (min size (* 2 end))))))
+            byte-position))
+      (error nil))))
 
 (defun vertico-buffer-frame--large-regular-file-preview-data (file)
   "Return (SIZE . LIMIT) when FILE should use a location-focused preview."
@@ -1832,7 +1875,7 @@ At most LIMIT bytes are read from a file of SIZE bytes."
   (if-let* ((data (vertico-buffer-frame--large-regular-file-preview-data
                    file))
             (start (vertico-buffer-frame--file-position-byte-position
-                    position)))
+                    file position)))
       (list (vertico-buffer-frame--focused-file-preview-buffer
              file start (car data) (cdr data))
             (cons 'position 1)

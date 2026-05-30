@@ -452,7 +452,7 @@ function is used from cleanup paths."
 (defun vertico-buffer-frame--compute-minibuffer-exit-buffer ()
   "Return the tracked minibuffer buffer to clean for this exit hook run."
   (let ((top (vertico-buffer-frame--top-minibuffer-buffer)))
-  (or (and (vertico-buffer-frame--tracked-minibuffer-buffer-p
+    (or (and (vertico-buffer-frame--tracked-minibuffer-buffer-p
               (current-buffer))
              (current-buffer))
         (and (eq (vertico-buffer-frame--selected-frame-owner-buffer)
@@ -960,28 +960,69 @@ Embark rule, whose whole purpose is to display in the minibuffer origin window."
         (setq vertico-buffer-frame--last-display-error-message message)
         (message "vertico-buffer-frame display error: %s" message)))))
 
+(defun vertico-buffer-frame--display-action-functions (action)
+  "Return ACTION's display-buffer action functions as a list."
+  (when (proper-list-p action)
+    (let ((functions (car action)))
+      (cond
+       ((null functions)
+        nil)
+       ((functionp functions)
+        (list functions))
+       ((proper-list-p functions)
+        functions)))))
+
+(defun vertico-buffer-frame--valid-display-action-p (action)
+  "Return non-nil when ACTION is a usable `display-buffer' action."
+  (or (null action)
+      ;; `display-buffer' treats a non-list action as a request to avoid the
+      ;; selected window.  Preserve that meaning for users who set it explicitly.
+      (not (listp action))
+      (and (proper-list-p action)
+           (let ((functions (car action)))
+             (or (null functions)
+                 (functionp functions)
+                 (and (proper-list-p functions)
+                      (cl-every #'functionp functions)))))))
+
+(defun vertico-buffer-frame--frame-display-action-p (action)
+  "Return non-nil when ACTION would recurse into this package."
+  (memq #'vertico-buffer-frame--display-buffer
+        (vertico-buffer-frame--display-action-functions action)))
+
 (defun vertico-buffer-frame--fallback-display-action ()
   "Return the non-child-frame display action used after child-frame failure."
-  (let ((saved-action (and vertico-buffer-frame--saved-state
-                           vertico-buffer-frame--saved-display-action)))
-    (if (and (proper-list-p saved-action)
-             (car saved-action)
-             (not (equal saved-action
-                         (vertico-buffer-frame-display-action))))
+  (let ((saved-action vertico-buffer-frame--saved-display-action))
+    (if (and vertico-buffer-frame--saved-state
+             (vertico-buffer-frame--valid-display-action-p saved-action)
+             (not (vertico-buffer-frame--frame-display-action-p saved-action)))
         saved-action
       '(display-buffer-use-least-recent-window))))
+
+(defun vertico-buffer-frame--display-action-with-alist (action alist)
+  "Return ACTION with ALIST appended to its action alist."
+  (cond
+   ((null action)
+    (and alist
+         (cons nil alist)))
+   ((proper-list-p action)
+    (append action alist))
+   (t
+    ;; Match `display-buffer' non-list ACTION semantics while still preserving
+    ;; the caller-supplied ALIST.
+    (cons nil
+          (cons '(inhibit-same-window . t)
+                alist)))))
 
 (defun vertico-buffer-frame--display-buffer-fallback (buffer alist)
   "Display BUFFER with the saved Vertico action plus ALIST.
 This preserves the user's normal `vertico-buffer-display-action' when child
 frames are unavailable or fail, while avoiding recursion back into this
 package's child-frame action."
-  (let* ((action (vertico-buffer-frame--fallback-display-action))
-         (function (car action))
-         (merged-alist (append (cdr action) alist)))
-    (if (functionp function)
-        (funcall function buffer merged-alist)
-      (display-buffer buffer (append action alist)))))
+  (let ((action (vertico-buffer-frame--fallback-display-action)))
+    (display-buffer
+     buffer
+     (vertico-buffer-frame--display-action-with-alist action alist))))
 
 (defun vertico-buffer-frame--release-display-state-for-fallback (owner)
   "Release child-frame state owned by OWNER before normal-window fallback."

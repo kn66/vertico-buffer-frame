@@ -1076,187 +1076,330 @@
       (should-not prepared))))
 
 (ert-deftest vertico-buffer-frame-display-buffer-falls-back-when-unsupported ()
-  (let (fallback displayed sized)
-    (cl-letf (((symbol-function #'vertico-buffer-frame--parent-frame)
-               (lambda ()
-                 'parent))
-              ((symbol-function #'vertico-buffer-frame--child-frames-supported-p)
-               (lambda (frame)
-                 (should (eq frame 'parent))
-                 nil))
-              ((symbol-function #'vertico-buffer-frame--candidate-frame-size)
-               (lambda (_parent)
-                 (setq sized t)
-                 '(80 . 10)))
-              ((symbol-function #'display-buffer-in-child-frame)
-               (lambda (&rest _args)
-                 (setq displayed t)
-                 'window))
-              ((symbol-function #'display-buffer-use-least-recent-window)
-               (lambda (buffer alist)
-                 (setq fallback (list buffer alist))
-                 'fallback-window)))
-      (should (eq (vertico-buffer-frame--display-buffer
-                   'buffer
-                   '((inhibit-same-window . t)))
-                  'fallback-window))
-      (should (equal fallback
-                     '(buffer ((inhibit-same-window . t)))))
-      (should-not sized)
-      (should-not displayed))))
+  (let ((buffer (generate-new-buffer " *vbf-fallback-unsupported*"))
+        (fallback-window (selected-window))
+        fallback
+        displayed
+        sized)
+    (unwind-protect
+        (cl-letf (((symbol-function #'vertico-buffer-frame--parent-frame)
+                   (lambda ()
+                     'parent))
+                  ((symbol-function
+                    #'vertico-buffer-frame--child-frames-supported-p)
+                   (lambda (frame)
+                     (should (eq frame 'parent))
+                     nil))
+                  ((symbol-function #'vertico-buffer-frame--candidate-frame-size)
+                   (lambda (_parent)
+                     (setq sized t)
+                     '(80 . 10)))
+                  ((symbol-function #'display-buffer-in-child-frame)
+                   (lambda (&rest _args)
+                     (setq displayed t)
+                     'window))
+                  ((symbol-function #'display-buffer-use-least-recent-window)
+                   (lambda (buffer alist)
+                     (setq fallback (list buffer alist))
+                     fallback-window)))
+          (should (eq (vertico-buffer-frame--display-buffer
+                       buffer
+                       '((inhibit-same-window . t)))
+                      fallback-window))
+          (should (equal fallback
+                         (list buffer '((inhibit-same-window . t)))))
+          (should-not sized)
+          (should-not displayed))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 (ert-deftest vertico-buffer-frame-display-buffer-fallback-uses-saved-action ()
-  (let ((vertico-buffer-frame--saved-state t)
+  (let ((buffer (generate-new-buffer " *vbf-fallback-saved*"))
+        (fallback-window (selected-window))
+        (vertico-buffer-frame--saved-state t)
         (vertico-buffer-frame--saved-display-action
          '(display-buffer-at-bottom (window-height . 7)))
         called)
-    (cl-letf (((symbol-function #'display-buffer-at-bottom)
-               (lambda (buffer alist)
-                 (setq called (list buffer alist))
-                 'saved-window)))
-      (should (eq (vertico-buffer-frame--display-buffer-fallback
-                   'buffer
-                   '((inhibit-same-window . t)))
-                  'saved-window))
-      (should (equal called
-                     '(buffer ((window-height . 7)
-                               (inhibit-same-window . t))))))))
+    (unwind-protect
+        (cl-letf (((symbol-function #'display-buffer-at-bottom)
+                   (lambda (buffer alist)
+                     (setq called (list buffer alist))
+                     fallback-window)))
+          (should (eq (vertico-buffer-frame--display-buffer-fallback
+                       buffer
+                       '((inhibit-same-window . t)))
+                      fallback-window))
+          (should (equal called
+                         (list buffer
+                               '((window-height . 7)
+                                 (inhibit-same-window . t))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest vertico-buffer-frame-display-buffer-fallback-uses-saved-nil-action ()
+  (let ((buffer (generate-new-buffer " *vbf-fallback-nil-action*"))
+        (fallback-window (selected-window))
+        (vertico-buffer-frame--saved-state t)
+        (vertico-buffer-frame--saved-display-action nil)
+        (display-buffer-fallback-action '((display-buffer-use-some-window)))
+        called)
+    (unwind-protect
+        (cl-letf (((symbol-function #'display-buffer-use-some-window)
+                   (lambda (buffer alist)
+                     (setq called (list buffer alist))
+                     fallback-window)))
+          (should (eq (vertico-buffer-frame--display-buffer-fallback
+                       buffer
+                       '((inhibit-same-window . t)))
+                      fallback-window))
+          (should (equal called
+                         (list buffer
+                               '((inhibit-same-window . t))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest vertico-buffer-frame-display-buffer-fallback-uses-saved-function-list ()
+  (let ((buffer (generate-new-buffer " *vbf-fallback-function-list*"))
+        (fallback-window (selected-window))
+        (vertico-buffer-frame--saved-state t)
+        (vertico-buffer-frame--saved-display-action
+         '((display-buffer-reuse-window display-buffer-pop-up-window)
+           (window-height . 7)))
+        calls)
+    (unwind-protect
+        (cl-letf (((symbol-function #'display-buffer-reuse-window)
+                   (lambda (buffer alist)
+                     (push (list 'reuse buffer alist) calls)
+                     nil))
+                  ((symbol-function #'display-buffer-pop-up-window)
+                   (lambda (buffer alist)
+                     (push (list 'pop-up buffer alist) calls)
+                     fallback-window)))
+          (should (eq (vertico-buffer-frame--display-buffer-fallback
+                       buffer
+                       '((inhibit-same-window . t)))
+                      fallback-window))
+          (setq calls (nreverse calls))
+          (should (equal (mapcar #'car calls)
+                         '(reuse pop-up)))
+          (should (equal (mapcar #'cadr calls)
+                         (list buffer buffer)))
+          (should (equal (mapcar #'caddr calls)
+                         '(((window-height . 7)
+                            (inhibit-same-window . t))
+                           ((window-height . 7)
+                            (inhibit-same-window . t))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest vertico-buffer-frame-display-buffer-fallback-skips-frame-action ()
+  (let ((buffer (generate-new-buffer " *vbf-fallback-frame-action*"))
+        (fallback-window (selected-window))
+        (vertico-buffer-frame--saved-state t)
+        (vertico-buffer-frame--saved-display-action
+         (vertico-buffer-frame-display-action))
+        fallback)
+    (unwind-protect
+        (cl-letf (((symbol-function #'display-buffer-use-least-recent-window)
+                   (lambda (buffer alist)
+                     (setq fallback (list buffer alist))
+                     fallback-window)))
+          (should (eq (vertico-buffer-frame--display-buffer-fallback
+                       buffer
+                       '((inhibit-same-window . t)))
+                      fallback-window))
+          (should (equal fallback
+                         (list buffer
+                               '((inhibit-same-window . t))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest vertico-buffer-frame-display-buffer-fallback-keeps-display-buffer-fallbacks ()
+  (let ((buffer (generate-new-buffer " *vbf-fallback-reuse*"))
+        (fallback-window (selected-window))
+        (vertico-buffer-frame--saved-state t)
+        (vertico-buffer-frame--saved-display-action
+         '(display-buffer-reuse-window))
+        (display-buffer-fallback-action '((display-buffer-use-some-window)))
+        calls)
+    (unwind-protect
+        (cl-letf (((symbol-function #'display-buffer-reuse-window)
+                   (lambda (buffer alist)
+                     (push (list 'reuse buffer alist) calls)
+                     nil))
+                  ((symbol-function #'display-buffer-use-some-window)
+                   (lambda (buffer alist)
+                     (push (list 'some buffer alist) calls)
+                     fallback-window)))
+          (should (eq (vertico-buffer-frame--display-buffer-fallback
+                       buffer
+                       '((inhibit-same-window . t)))
+                      fallback-window))
+          (setq calls (nreverse calls))
+          (should (equal (mapcar #'car calls)
+                         '(reuse some)))
+          (should (equal (mapcar #'cadr calls)
+                         (list buffer buffer)))
+          (should (equal (mapcar #'caddr calls)
+                         '(((inhibit-same-window . t))
+                           ((inhibit-same-window . t))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 (ert-deftest vertico-buffer-frame-display-buffer-falls-back-on-nil-window ()
-  (let (fallback)
-    (cl-letf (((symbol-function #'vertico-buffer-frame--parent-frame)
-               (lambda ()
-                 'parent))
-              ((symbol-function #'vertico-buffer-frame--candidate-frame-size)
-               (lambda (_parent)
-                 '(80 . 10)))
-              ((symbol-function #'vertico-buffer-frame--default-background)
-               (lambda (_frame)
-                 nil))
-              ((symbol-function #'vertico-buffer-frame--default-foreground)
-               (lambda (_frame)
-                 nil))
-              ((symbol-function #'display-buffer-in-child-frame)
-               (lambda (&rest _args)
-                 nil))
-              ((symbol-function #'display-buffer-use-least-recent-window)
-               (lambda (buffer alist)
-                 (setq fallback (list buffer alist))
-                 'fallback-window)))
-      (should (eq (vertico-buffer-frame--display-buffer
-                   'buffer
-                   '((inhibit-same-window . t)))
-                  'fallback-window))
-      (should (equal fallback
-                     '(buffer ((inhibit-same-window . t))))))))
+  (let ((buffer (generate-new-buffer " *vbf-fallback-nil-window*"))
+        (fallback-window (selected-window))
+        fallback)
+    (unwind-protect
+        (cl-letf (((symbol-function #'vertico-buffer-frame--parent-frame)
+                   (lambda ()
+                     'parent))
+                  ((symbol-function #'vertico-buffer-frame--candidate-frame-size)
+                   (lambda (_parent)
+                     '(80 . 10)))
+                  ((symbol-function #'vertico-buffer-frame--default-background)
+                   (lambda (_frame)
+                     nil))
+                  ((symbol-function #'vertico-buffer-frame--default-foreground)
+                   (lambda (_frame)
+                     nil))
+                  ((symbol-function #'display-buffer-in-child-frame)
+                   (lambda (&rest _args)
+                     nil))
+                  ((symbol-function #'display-buffer-use-least-recent-window)
+                   (lambda (buffer alist)
+                     (setq fallback (list buffer alist))
+                     fallback-window)))
+          (should (eq (vertico-buffer-frame--display-buffer
+                       buffer
+                       '((inhibit-same-window . t)))
+                      fallback-window))
+          (should (equal fallback
+                         (list buffer '((inhibit-same-window . t))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 (ert-deftest vertico-buffer-frame-display-buffer-falls-back-on-stale-window-frame ()
-  (let (fallback prepared)
-    (cl-letf (((symbol-function #'vertico-buffer-frame--parent-frame)
-               (lambda ()
-                 'parent))
-              ((symbol-function #'vertico-buffer-frame--candidate-frame-size)
-               (lambda (_parent)
-                 '(80 . 10)))
-              ((symbol-function
-                #'vertico-buffer-frame--display-buffer-in-child-frame)
-               (lambda (&rest _args)
-                 'candidate-window))
-              ((symbol-function #'window-live-p)
-               (lambda (window)
-                 (eq window 'candidate-window)))
-              ((symbol-function #'window-frame)
-               (lambda (_window)
-                 (error "Stale window")))
-              ((symbol-function #'set-window-buffer)
-               (lambda (&rest _args)
-                 (setq prepared t)))
-              ((symbol-function #'display-buffer-use-least-recent-window)
-               (lambda (buffer alist)
-                 (setq fallback (list buffer alist))
-                 'fallback-window)))
-      (should (eq (vertico-buffer-frame--display-buffer
-                   'buffer
-                   '((inhibit-same-window . t)))
-                  'fallback-window))
-      (should (equal fallback
-                     '(buffer ((inhibit-same-window . t)))))
-      (should-not prepared))))
+  (let ((buffer (generate-new-buffer " *vbf-fallback-stale-window*"))
+        (fallback-window (selected-window))
+        fallback
+        prepared)
+    (unwind-protect
+        (cl-letf (((symbol-function #'vertico-buffer-frame--parent-frame)
+                   (lambda ()
+                     'parent))
+                  ((symbol-function #'vertico-buffer-frame--candidate-frame-size)
+                   (lambda (_parent)
+                     '(80 . 10)))
+                  ((symbol-function
+                    #'vertico-buffer-frame--display-buffer-in-child-frame)
+                   (lambda (&rest _args)
+                     'candidate-window))
+                  ((symbol-function #'window-live-p)
+                   (lambda (window)
+                     (eq window 'candidate-window)))
+                  ((symbol-function #'window-frame)
+                   (lambda (_window)
+                     (error "Stale window")))
+                  ((symbol-function #'set-window-buffer)
+                   (lambda (&rest _args)
+                     (setq prepared t)))
+                  ((symbol-function #'display-buffer-use-least-recent-window)
+                   (lambda (buffer alist)
+                     (setq fallback (list buffer alist))
+                     fallback-window)))
+          (should (eq (vertico-buffer-frame--display-buffer
+                       buffer
+                       '((inhibit-same-window . t)))
+                      fallback-window))
+          (should (equal fallback
+                         (list buffer '((inhibit-same-window . t)))))
+          (should-not prepared))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 (ert-deftest vertico-buffer-frame-display-buffer-cleans-up-on-late-error ()
   (with-temp-buffer
-    (let (deleted
+    (let ((target-buffer (generate-new-buffer " *vbf-fallback-late-error*"))
+          (fallback-window (selected-window))
+          deleted
           fallback
           killed
           orphan-cleanup
           timer-cancelled)
-      (setq-local vertico-buffer-frame--file-preview-cache '(key . buffer)
-                  vertico-buffer-frame--imenu-cache '(key . entries)
-                  vertico-buffer-frame--consult-imenu-entry-table-cache
-                  '(key . table))
-      (cl-letf (((symbol-function #'vertico-buffer-frame--parent-frame)
-                 (lambda ()
-                   'parent))
-                ((symbol-function #'vertico-buffer-frame--candidate-frame-size)
-                 (lambda (_parent)
-                   '(80 . 10)))
-                ((symbol-function
-                  #'vertico-buffer-frame--display-buffer-in-child-frame)
-                 (lambda (&rest _args)
-                   'candidate-window))
-                ((symbol-function #'window-live-p)
-                 (lambda (window)
-                   (eq window 'candidate-window)))
-                ((symbol-function #'frame-live-p)
-                 (lambda (frame)
-                   (eq frame 'candidate-frame)))
-                ((symbol-function #'window-frame)
-                 (lambda (window)
-                   (and (eq window 'candidate-window)
-                        'candidate-frame)))
-                ((symbol-function #'window-buffer)
-                 (lambda (window)
-                   (and (eq window 'candidate-window)
-                        'old-buffer)))
-                ((symbol-function #'set-window-dedicated-p)
-                 (lambda (&rest _args)))
-                ((symbol-function #'set-window-buffer)
-                 (lambda (&rest _args)
-                   (error "Late display failure")))
-                ((symbol-function #'vertico-buffer-frame--delete-frame)
-                 (lambda (frame)
-                   (when frame
-                     (push frame deleted))))
-                ((symbol-function
-                  #'vertico-buffer-frame--delete-frames-owned-by-buffer)
-                 (lambda (owner)
-                   (setq orphan-cleanup owner)))
-                ((symbol-function #'vertico-buffer-frame--cancel-preview-timer)
-                 (lambda ()
-                   (setq timer-cancelled t)))
-                ((symbol-function #'vertico-buffer-frame--kill-preview-buffer)
-                 (lambda (&optional _keep-buffer)
-                   (setq killed t)))
-                ((symbol-function #'display-buffer-use-least-recent-window)
-                 (lambda (buffer alist)
-                   (setq fallback (list buffer alist))
-                   'fallback-window)))
-        (should (eq (vertico-buffer-frame--display-buffer
-                     'target-buffer
-                     '((inhibit-same-window . t)))
-                    'fallback-window))
-        (should (equal fallback
-                       '(target-buffer ((inhibit-same-window . t)))))
-        (should (equal deleted '(candidate-frame)))
-        (should (eq orphan-cleanup (current-buffer)))
-        (should killed)
-        (should timer-cancelled)
-        (should-not vertico-buffer-frame--candidate-frame)
-        (should-not vertico-buffer-frame--candidate-window)
-        (should-not vertico-buffer-frame--file-preview-cache)
-        (should-not vertico-buffer-frame--imenu-cache)
-        (should-not
-         vertico-buffer-frame--consult-imenu-entry-table-cache)))))
+      (unwind-protect
+          (progn
+            (setq-local vertico-buffer-frame--file-preview-cache '(key . buffer)
+                        vertico-buffer-frame--imenu-cache '(key . entries)
+                        vertico-buffer-frame--consult-imenu-entry-table-cache
+                        '(key . table))
+            (cl-letf (((symbol-function #'vertico-buffer-frame--parent-frame)
+                       (lambda ()
+                         'parent))
+                      ((symbol-function #'vertico-buffer-frame--candidate-frame-size)
+                       (lambda (_parent)
+                         '(80 . 10)))
+                      ((symbol-function
+                        #'vertico-buffer-frame--display-buffer-in-child-frame)
+                       (lambda (&rest _args)
+                         'candidate-window))
+                      ((symbol-function #'window-live-p)
+                       (lambda (window)
+                         (eq window 'candidate-window)))
+                      ((symbol-function #'frame-live-p)
+                       (lambda (frame)
+                         (eq frame 'candidate-frame)))
+                      ((symbol-function #'window-frame)
+                       (lambda (window)
+                         (and (eq window 'candidate-window)
+                              'candidate-frame)))
+                      ((symbol-function #'window-buffer)
+                       (lambda (window)
+                         (and (eq window 'candidate-window)
+                              'old-buffer)))
+                      ((symbol-function #'set-window-dedicated-p)
+                       (lambda (&rest _args)))
+                      ((symbol-function #'set-window-buffer)
+                       (lambda (&rest _args)
+                         (error "Late display failure")))
+                      ((symbol-function #'vertico-buffer-frame--delete-frame)
+                       (lambda (frame)
+                         (when frame
+                           (push frame deleted))))
+                      ((symbol-function
+                        #'vertico-buffer-frame--delete-frames-owned-by-buffer)
+                       (lambda (owner)
+                         (setq orphan-cleanup owner)))
+                      ((symbol-function
+                        #'vertico-buffer-frame--cancel-preview-timer)
+                       (lambda ()
+                         (setq timer-cancelled t)))
+                      ((symbol-function #'vertico-buffer-frame--kill-preview-buffer)
+                       (lambda (&optional _keep-buffer)
+                         (setq killed t)))
+                      ((symbol-function #'display-buffer-use-least-recent-window)
+                       (lambda (buffer alist)
+                         (setq fallback (list buffer alist))
+                         fallback-window)))
+              (should (eq (vertico-buffer-frame--display-buffer
+                           target-buffer
+                           '((inhibit-same-window . t)))
+                          fallback-window))
+              (should (equal fallback
+                             (list target-buffer
+                                   '((inhibit-same-window . t)))))
+              (should (equal deleted '(candidate-frame)))
+              (should (eq orphan-cleanup (current-buffer)))
+              (should killed)
+              (should timer-cancelled)
+              (should-not vertico-buffer-frame--candidate-frame)
+              (should-not vertico-buffer-frame--candidate-window)
+              (should-not vertico-buffer-frame--file-preview-cache)
+              (should-not vertico-buffer-frame--imenu-cache)
+              (should-not
+               vertico-buffer-frame--consult-imenu-entry-table-cache)))
+        (when (buffer-live-p target-buffer)
+          (kill-buffer target-buffer))))))
 
 (ert-deftest vertico-buffer-frame-prepare-window-strips-window-chrome ()
   (let (parameters margins fringes scroll-bars)
@@ -1806,28 +1949,33 @@
         (should (equal placed '((frame-1 parent))))))))
 
 (ert-deftest vertico-buffer-frame-display-buffer-reports-fallback-error ()
-  (let ((vertico-buffer-frame-report-display-errors t)
+  (let ((buffer (generate-new-buffer " *vbf-fallback-report*"))
+        (fallback-window (selected-window))
+        (vertico-buffer-frame-report-display-errors t)
         (vertico-buffer-frame--last-display-error-message nil)
         fallback
         reported)
-    (cl-letf (((symbol-function #'vertico-buffer-frame--parent-frame)
-               (lambda ()
-                 (error "Boom")))
-              ((symbol-function #'display-buffer-use-least-recent-window)
-               (lambda (buffer alist)
-                 (setq fallback (list buffer alist))
-                 'fallback-window))
-              ((symbol-function #'message)
-               (lambda (format-string &rest args)
-                 (setq reported (apply #'format format-string args)))))
-      (should (eq (vertico-buffer-frame--display-buffer
-                   'buffer
-                   '((inhibit-same-window . t)))
-                  'fallback-window))
-      (should (equal fallback
-                     '(buffer ((inhibit-same-window . t)))))
-      (should (equal reported
-                     "vertico-buffer-frame display error: Boom")))))
+    (unwind-protect
+        (cl-letf (((symbol-function #'vertico-buffer-frame--parent-frame)
+                   (lambda ()
+                     (error "Boom")))
+                  ((symbol-function #'display-buffer-use-least-recent-window)
+                   (lambda (buffer alist)
+                     (setq fallback (list buffer alist))
+                     fallback-window))
+                  ((symbol-function #'message)
+                   (lambda (format-string &rest args)
+                     (setq reported (apply #'format format-string args)))))
+          (should (eq (vertico-buffer-frame--display-buffer
+                       buffer
+                       '((inhibit-same-window . t)))
+                      fallback-window))
+          (should (equal fallback
+                         (list buffer '((inhibit-same-window . t)))))
+          (should (equal reported
+                         "vertico-buffer-frame display error: Boom")))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 (ert-deftest vertico-buffer-frame-show-frame-ignores-frame-errors ()
   (let (shown)
@@ -2578,6 +2726,56 @@
                                                (buffer-string)))
                       (should (string-match-p
                                "Preview starts at byte"
+                               (buffer-string)))))))
+            (vertico-buffer-frame--kill-preview-buffer)))
+      (delete-file file))))
+
+(ert-deftest vertico-buffer-frame-file-position-preview-handles-multibyte-prefix ()
+  (let ((file (make-temp-file "vbf-preview")))
+    (unwind-protect
+        (with-temp-buffer
+          (unwind-protect
+              (progn
+                (setq-local vertico-buffer-frame--preview-buffer nil)
+                (let ((coding-system-for-write 'utf-8-unix))
+                  (with-temp-file file
+                    (insert (string #x3042 #x3042) "TARGETbbbb")))
+                (let ((vertico-buffer-frame-preview-max-file-size 6))
+                  (pcase-let ((`(,preview ,location ,external)
+                               (vertico-buffer-frame--preview-target-display-spec
+                                (list 'file-position file 3))))
+                    (should-not external)
+                    (should (equal location '(position . 1)))
+                    (with-current-buffer preview
+                      (should (string-prefix-p "TARGET"
+                                               (buffer-string)))
+                      (should (string-match-p
+                               "Preview starts at byte 6"
+                               (buffer-string)))))))
+            (vertico-buffer-frame--kill-preview-buffer)))
+      (delete-file file))))
+
+(ert-deftest vertico-buffer-frame-file-position-preview-handles-dos-eol-prefix ()
+  (let ((file (make-temp-file "vbf-preview")))
+    (unwind-protect
+        (with-temp-buffer
+          (unwind-protect
+              (progn
+                (setq-local vertico-buffer-frame--preview-buffer nil)
+                (let ((coding-system-for-write 'utf-8-dos))
+                  (with-temp-file file
+                    (insert "one\ntarget\nextra")))
+                (let ((vertico-buffer-frame-preview-max-file-size 8))
+                  (pcase-let ((`(,preview ,location ,external)
+                               (vertico-buffer-frame--preview-target-display-spec
+                                (list 'file-position file 5))))
+                    (should-not external)
+                    (should (equal location '(position . 1)))
+                    (with-current-buffer preview
+                      (should (string-prefix-p "target"
+                                               (buffer-string)))
+                      (should (string-match-p
+                               "Preview starts at byte 5"
                                (buffer-string)))))))
             (vertico-buffer-frame--kill-preview-buffer)))
       (delete-file file))))
