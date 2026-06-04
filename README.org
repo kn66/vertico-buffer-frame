@@ -43,6 +43,19 @@ Add this directory to ~load-path~, then:
   (vertico-buffer-frame-mode 1)
 #+end_src
 
+For per-command or per-category use with ~vertico-multiform-mode~, enable the
+local mode from a multiform rule instead of enabling the global mode:
+
+#+begin_src elisp
+  (require 'vertico-buffer-frame)
+  (setq vertico-multiform-categories
+        '((consult-grep vertico-buffer-frame-local-mode)))
+  (vertico-multiform-mode 1)
+#+end_src
+
+The shorter multiform symbol ~buffer-frame-local~ also resolves to
+~vertico-buffer-frame-local-mode~.
+
 Mouse clicks and mouse-wheel scrolling through ~vertico-mouse~ can be enabled
 in the usual Vertico way:
 
@@ -109,6 +122,9 @@ Preview target resolution is still gated by
 ~vertico-buffer-frame-preview-categories~.  When a hook function handles a
 custom completion category, add that category to
 ~vertico-buffer-frame-preview-categories~ as well.
+For enabled categories without a matching target, completion metadata
+annotations, affixations and group titles are used as a fallback text preview
+when available.
 
 The candidate frame is sized from the parent frame using the golden ratio by
 default, then rounded to the nearest character-cell size before applying it to
@@ -190,12 +206,17 @@ To toggle the preview while completing, bind the toggle command in
 * Commands
 
 - ~vertico-buffer-frame-cleanup~
+- ~vertico-buffer-frame-local-mode~
 - ~vertico-buffer-frame-toggle-preview~
 
 When called during completion, ~vertico-buffer-frame-toggle-preview~ changes
 preview visibility only for the current minibuffer session.  When called
 outside the minibuffer, it changes the global default
 ~vertico-buffer-frame-preview~.
+
+~vertico-buffer-frame-local-mode~ is intended for ~vertico-multiform-mode~.  It
+enables the child-frame display only for the current minibuffer session and
+restores the previous local Vertico display state when disabled.
 
 ~vertico-buffer-frame-cleanup~ deletes active preview frames and active
 candidate frames.
@@ -248,6 +269,9 @@ Preview display is category-gated by
 disable their preview, or add a function to
 ~vertico-buffer-frame-preview-target-functions~ for extra preview target
 resolution.
+When no target resolver handles an enabled category, standard completion
+metadata annotations, affixations and group titles can still provide a small
+text preview.
 
 The current implementation reuses the preview frame while the minibuffer is
 active.

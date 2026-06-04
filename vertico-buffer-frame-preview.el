@@ -164,6 +164,7 @@ function called in a temporary preview buffer."
   :type 'hook)
 
 (defvar vertico-buffer-frame-mode)
+(defvar vertico-buffer-frame-local-mode)
 (defvar vertico-buffer-frame--candidate-frame)
 (defvar Info-complete-menu-buffer)
 (defvar calendar-month-name-array)
@@ -173,6 +174,7 @@ function called in a temporary preview buffer."
 (defvar input-method-alist)
 (defvar package-alist)
 (defvar package-archive-contents)
+(defvar package--initialized)
 
 (defvar-local vertico-buffer-frame--preview-frame nil)
 (defvar-local vertico-buffer-frame--preview-window nil)
@@ -217,8 +219,11 @@ function called in a temporary preview buffer."
   "Golden ratio used for automatic preview layout.")
 
 (declare-function bookmark-get-bookmark "bookmark")
+(declare-function bookmark-get-annotation "bookmark")
 (declare-function bookmark-get-filename "bookmark")
+(declare-function bookmark-get-handler "bookmark")
 (declare-function bookmark-get-position "bookmark")
+(declare-function bookmark-prop-get "bookmark")
 (declare-function calendar-current-date "calendar")
 (declare-function calendar-extract-year "calendar")
 (declare-function calendar-generate-month "calendar")
@@ -231,13 +236,15 @@ function called in a temporary preview buffer."
 (declare-function get-charset-property "mule")
 (declare-function locate-library "subr")
 (declare-function mail-extract-address-components "mail-extr")
+(declare-function package-get-descriptor "package")
 (declare-function project-root "project")
+(declare-function vertico-buffer-frame--active-p "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--child-frames-supported-p
                   "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--delete-frame "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--display-buffer-in-child-frame
                   "vertico-buffer-frame")
-(declare-function vertico-buffer-frame--frame-parameter
+(declare-function vertico-buffer-frame--frame-parent
                   "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--parent-frame "vertico-buffer-frame")
 (declare-function vertico-buffer-frame--frame-layout-state
@@ -270,16 +277,125 @@ function called in a temporary preview buffer."
         (minibuffer-contents-no-properties))
     (error nil)))
 
+(defun vertico-buffer-frame--cached-metadata ()
+  "Return Vertico's cached completion metadata, if available."
+  (and (boundp 'vertico--metadata)
+       vertico--metadata))
+
+(defun vertico-buffer-frame--table-metadata ()
+  "Return completion metadata from the current completion table."
+  (ignore-errors
+    (completion-metadata
+     (or (vertico-buffer-frame--minibuffer-input) "")
+     minibuffer-completion-table
+     minibuffer-completion-predicate)))
+
+(defun vertico-buffer-frame--completion-metadata ()
+  "Return current completion metadata, preferring Vertico's cached metadata."
+  (when (vertico-buffer-frame--completion-active-p)
+    (or (vertico-buffer-frame--cached-metadata)
+        (vertico-buffer-frame--table-metadata))))
+
 (defun vertico-buffer-frame--category ()
   "Return the current completion category."
   (when (vertico-buffer-frame--completion-active-p)
-    (ignore-errors
-      (completion-metadata-get
-       (completion-metadata
-        (or (vertico-buffer-frame--minibuffer-input) "")
-        minibuffer-completion-table
-        minibuffer-completion-predicate)
-       'category))))
+    (or (vertico-buffer-frame--metadata-category
+         (vertico-buffer-frame--cached-metadata))
+        (vertico-buffer-frame--metadata-category
+         (vertico-buffer-frame--table-metadata)))))
+
+(defun vertico-buffer-frame--metadata-get (metadata property)
+  "Return PROPERTY from completion METADATA, ignoring malformed values."
+  (condition-case-unless-debug nil
+      (and metadata
+           (completion-metadata-get metadata property))
+    (error nil)))
+
+(defun vertico-buffer-frame--metadata-category (metadata)
+  "Return completion category from METADATA, ignoring malformed values."
+  (vertico-buffer-frame--metadata-get metadata 'category))
+
+(defun vertico-buffer-frame--metadata-function (metadata property)
+  "Return function PROPERTY from completion METADATA."
+  (let ((function (vertico-buffer-frame--metadata-get metadata property)))
+    (and (functionp function)
+         function)))
+
+(defun vertico-buffer-frame--call-metadata-function (function &rest args)
+  "Call completion metadata FUNCTION with ARGS.
+Report errors as preview target errors and return nil on failure."
+  (condition-case-unless-debug error
+      (apply function args)
+    (error
+     (vertico-buffer-frame--report-preview-target-error error)
+     nil)))
+
+(defun vertico-buffer-frame--metadata-detail-string (value)
+  "Return VALUE formatted as a non-empty metadata detail string."
+  (when value
+    (let ((string (format "%s" value)))
+      (unless (string-empty-p string)
+        string))))
+
+(defun vertico-buffer-frame--metadata-affixation (metadata candidate)
+  "Return (PREFIX . SUFFIX) for CANDIDATE from METADATA."
+  (when-let* ((function
+               (vertico-buffer-frame--metadata-function
+                metadata 'affixation-function))
+              (entry (car-safe
+                      (vertico-buffer-frame--call-metadata-function
+                       function (list candidate)))))
+    (cons (vertico-buffer-frame--metadata-detail-string (nth 1 entry))
+          (vertico-buffer-frame--metadata-detail-string (nth 2 entry)))))
+
+(defun vertico-buffer-frame--metadata-annotation (metadata candidate)
+  "Return annotation for CANDIDATE from METADATA."
+  (when-let* ((function
+               (vertico-buffer-frame--metadata-function
+                metadata 'annotation-function)))
+    (vertico-buffer-frame--metadata-detail-string
+     (vertico-buffer-frame--call-metadata-function function candidate))))
+
+(defun vertico-buffer-frame--metadata-group (metadata candidate)
+  "Return group title for CANDIDATE from METADATA."
+  (when-let* ((function
+               (vertico-buffer-frame--metadata-function
+                metadata 'group-function)))
+    (vertico-buffer-frame--metadata-detail-string
+     (vertico-buffer-frame--call-metadata-function function candidate nil))))
+
+(defun vertico-buffer-frame--insert-metadata-detail (label value)
+  "Insert metadata detail LABEL and VALUE when VALUE is non-empty."
+  (when value
+    (insert label ": " value "\n")))
+
+(defun vertico-buffer-frame--completion-metadata-target
+    (metadata category candidate)
+  "Return a text preview target from completion METADATA for CANDIDATE."
+  (when-let* (((stringp candidate)))
+    (let* ((affixation
+            (vertico-buffer-frame--metadata-affixation metadata candidate))
+           (prefix (car-safe affixation))
+           (suffix (cdr-safe affixation))
+           (annotation (unless affixation
+                         (vertico-buffer-frame--metadata-annotation
+                          metadata candidate)))
+           (group (vertico-buffer-frame--metadata-group metadata candidate)))
+      (when (or prefix suffix annotation group)
+        (list 'text
+              "Completion"
+              (lambda ()
+                (insert candidate "\n\n")
+                (when (symbolp category)
+                  (insert "Category: " (symbol-name category) "\n"))
+                (vertico-buffer-frame--insert-metadata-detail
+                 "Group" group)
+                (vertico-buffer-frame--insert-metadata-detail
+                 "Prefix" prefix)
+                (vertico-buffer-frame--insert-metadata-detail
+                 "Suffix" suffix)
+                (vertico-buffer-frame--insert-metadata-detail
+                 "Annotation" annotation)))))))
 
 (defun vertico-buffer-frame--candidate ()
   "Return the current raw Vertico candidate."
@@ -634,13 +750,25 @@ the `multi-category' text property."
 
 (defun vertico-buffer-frame--package-descriptor (package)
   "Return PACKAGE descriptor from installed or archive package metadata."
-  (or (vertico-buffer-frame--package-descriptor-in-list
+  (or (vertico-buffer-frame--package-standard-descriptor package)
+      (vertico-buffer-frame--package-descriptor-in-list
        package
        (vertico-buffer-frame--package-metadata-list 'package-alist))
       (vertico-buffer-frame--package-descriptor-in-list
        package
        (vertico-buffer-frame--package-metadata-list
         'package-archive-contents))))
+
+(defun vertico-buffer-frame--package-standard-descriptor (package)
+  "Return PACKAGE descriptor via `package-get-descriptor' when safe."
+  (condition-case-unless-debug nil
+      (when (and (symbolp package)
+                 (fboundp 'package-get-descriptor)
+                 (bound-and-true-p package--initialized))
+        (let ((descriptor (package-get-descriptor package)))
+          (and (vertico-buffer-frame--package-descriptor-p descriptor)
+               descriptor)))
+    (error nil)))
 
 (defun vertico-buffer-frame--package-metadata-list (symbol)
   "Return package metadata held by SYMBOL as a safe proper list."
@@ -904,6 +1032,12 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
                      (bookmark-get-filename bookmark)))
              (position (ignore-errors
                          (bookmark-get-position bookmark)))
+             (buffer (ignore-errors
+                       (bookmark-prop-get bookmark 'buffer)))
+             (annotation (ignore-errors
+                           (bookmark-get-annotation bookmark)))
+             (handler (ignore-errors
+                        (bookmark-get-handler bookmark)))
              (readable-file (and file
                                  (vertico-buffer-frame--readable-file file))))
         (cond
@@ -911,6 +1045,8 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
           (list 'file-position
                 readable-file
                 position))
+         ((buffer-live-p buffer)
+          (vertico-buffer-frame--buffer-position-target buffer position))
          (t
           (list 'text
                 "Bookmark"
@@ -921,7 +1057,11 @@ Search BUFFERS, or the minibuffer origin buffer followed by live buffers."
                             (vertico-buffer-frame--display-file-name file)
                             "\n"))
                   (when position
-                    (insert "Position: " (format "%s" position) "\n"))))))))))
+                    (insert "Position: " (format "%s" position) "\n"))
+                  (when annotation
+                    (insert "\n" (format "%s" annotation) "\n"))
+                  (when handler
+                    (insert "Handler: " (format "%S" handler) "\n"))))))))))
 
 (defun vertico-buffer-frame--xref-readable-file (file)
   "Return readable xref FILE, optionally relative to the project root."
@@ -1431,19 +1571,23 @@ Pass CATEGORY, CANDIDATE, and RAW-CANDIDATE to each function."
   "Return the current preview target.
 When RAW-CANDIDATE or CATEGORY are non-nil, use them instead of reading the
 current minibuffer state."
-  (when-let* ((raw-candidate (or raw-candidate
-                                 (vertico-buffer-frame--candidate)))
-              (entry (vertico-buffer-frame--candidate-entry
-                      raw-candidate
-                      (or category
-                          (vertico-buffer-frame--category))))
-              (category (car entry))
-              (candidate (cdr entry)))
-    (when (vertico-buffer-frame--preview-category-enabled-p category)
-      (or (vertico-buffer-frame--preview-target-from-functions
-           category candidate raw-candidate)
-          (vertico-buffer-frame--builtin-preview-target
-           category candidate raw-candidate)))))
+  (let ((metadata (vertico-buffer-frame--completion-metadata)))
+    (when-let* ((raw-candidate (or raw-candidate
+                                   (vertico-buffer-frame--candidate)))
+                (entry (vertico-buffer-frame--candidate-entry
+                        raw-candidate
+                        (or category
+                            (vertico-buffer-frame--metadata-category
+                             metadata))))
+                (category (car entry))
+                (candidate (cdr entry)))
+      (when (vertico-buffer-frame--preview-category-enabled-p category)
+        (or (vertico-buffer-frame--preview-target-from-functions
+             category candidate raw-candidate)
+            (vertico-buffer-frame--builtin-preview-target
+             category candidate raw-candidate)
+            (vertico-buffer-frame--completion-metadata-target
+             metadata category candidate))))))
 
 ;;;; Preview frame layout
 
@@ -1455,8 +1599,7 @@ space."
   (let* ((candidate vertico-buffer-frame--candidate-frame)
          (candidate-parent
           (and (vertico-buffer-frame--preview-live-frame-p candidate)
-               (vertico-buffer-frame--frame-parameter
-                candidate 'parent-frame))))
+               (vertico-buffer-frame--frame-parent candidate))))
     (if (vertico-buffer-frame--preview-live-frame-p candidate-parent)
         candidate-parent
       (vertico-buffer-frame--parent-frame))))
@@ -1467,8 +1610,7 @@ When the live candidate frame belongs to PARENT, derive the preview size from
 that candidate frame so resize-to-fit candidates and previews move together."
   (let ((candidate vertico-buffer-frame--candidate-frame))
     (if (and (vertico-buffer-frame--preview-live-frame-p candidate)
-             (eq (vertico-buffer-frame--frame-parameter
-                  candidate 'parent-frame)
+             (eq (vertico-buffer-frame--frame-parent candidate)
                  parent))
         candidate
       parent)))
@@ -1491,9 +1633,8 @@ that candidate frame so resize-to-fit candidates and previews move together."
         vertico-buffer-frame--preview-frame)
        (vertico-buffer-frame--preview-live-window-p
         vertico-buffer-frame--preview-window)
-       (eq (vertico-buffer-frame--frame-parameter
-            vertico-buffer-frame--preview-frame
-            'parent-frame)
+       (eq (vertico-buffer-frame--frame-parent
+            vertico-buffer-frame--preview-frame)
            parent)))
 
 (defun vertico-buffer-frame--preview-auto-pixel-size (parent)
@@ -2294,7 +2435,7 @@ The result is (BUFFER LOCATION EXTERNAL-BUFFER), where LOCATION may be
 
 (defun vertico-buffer-frame--refresh-preview ()
   "Refresh the preview for the current minibuffer buffer."
-  (if (and vertico-buffer-frame-mode
+  (if (and (vertico-buffer-frame--active-p)
            vertico-buffer-frame-preview
            (vertico-buffer-frame--completion-active-p)
            (vertico-buffer-frame--child-frames-supported-p
@@ -2347,7 +2488,7 @@ When STATE matches the pending timer state, keep the existing timer."
 (defun vertico-buffer-frame--preview-post-command ()
   "Schedule a delayed preview refresh after Vertico candidate refresh."
   (condition-case-unless-debug error
-      (if (and vertico-buffer-frame-mode
+      (if (and (vertico-buffer-frame--active-p)
                vertico-buffer-frame-preview
                (vertico-buffer-frame--completion-active-p))
           (vertico-buffer-frame--schedule-preview
