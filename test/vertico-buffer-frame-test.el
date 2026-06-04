@@ -465,25 +465,32 @@
         (should (equal (alist-get 'alpha parameters) 100))
         (should (equal (alist-get 'alpha-background parameters) 100))))))
 
-(ert-deftest vertico-buffer-frame-base-parameters-make-candidate-interactive ()
+(ert-deftest vertico-buffer-frame-base-parameters-honor-candidate-focus-option ()
   (cl-letf (((symbol-function #'vertico-buffer-frame--default-background)
              (lambda (_frame)
                nil))
             ((symbol-function #'vertico-buffer-frame--default-foreground)
              (lambda (_frame)
                nil)))
-    (let ((candidate-parameters
-           (vertico-buffer-frame--base-parameters
-            'parent "name" 80 10 'candidate))
-          (preview-parameters
-           (vertico-buffer-frame--base-parameters
-            'parent "name" 80 10 'preview)))
-      (should-not (alist-get 'visibility candidate-parameters))
-      (should-not (alist-get 'no-accept-focus candidate-parameters))
-      (should (equal (alist-get 'no-focus-on-map candidate-parameters) t))
-      (should-not (alist-get 'visibility preview-parameters))
-      (should (equal (alist-get 'no-accept-focus preview-parameters)
-                     t)))))
+    (let ((vertico-buffer-frame-candidate-accept-focus t))
+      (let ((candidate-parameters
+             (vertico-buffer-frame--base-parameters
+              'parent "name" 80 10 'candidate))
+            (preview-parameters
+             (vertico-buffer-frame--base-parameters
+              'parent "name" 80 10 'preview)))
+        (should-not (alist-get 'visibility candidate-parameters))
+        (should-not (alist-get 'no-accept-focus candidate-parameters))
+        (should (equal (alist-get 'no-focus-on-map candidate-parameters) t))
+        (should-not (alist-get 'visibility preview-parameters))
+        (should (equal (alist-get 'no-accept-focus preview-parameters)
+                       t))))
+    (let ((vertico-buffer-frame-candidate-accept-focus nil))
+      (let ((candidate-parameters
+             (vertico-buffer-frame--base-parameters
+              'parent "name" 80 10 'candidate)))
+        (should (equal (alist-get 'no-accept-focus candidate-parameters)
+                       t))))))
 
 (ert-deftest vertico-buffer-frame-base-parameters-use-parent-minibuffer-window ()
   (cl-letf (((symbol-function #'vertico-buffer-frame--default-background)

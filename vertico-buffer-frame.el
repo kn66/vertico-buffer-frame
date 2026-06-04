@@ -113,6 +113,19 @@ golden rectangle fitting in the parent frame.  Values at or above the golden
 ratio use the full fitting golden rectangle."
   :type 'number)
 
+(defconst vertico-buffer-frame--pgtk-focused-child-delete-bug-p
+  (and (>= emacs-major-version 30)
+       (string-match-p "\\bPGTK\\b" system-configuration-features))
+  "Non-nil when focused child-frame deletion can lose PGTK input focus.")
+
+(defcustom vertico-buffer-frame-candidate-accept-focus
+  (not vertico-buffer-frame--pgtk-focused-child-delete-bug-p)
+  "Non-nil means candidate child frames may accept input focus.
+This allows `vertico-mouse' clicks and wheel events in the candidate child
+frame.  Emacs 30+ PGTK builds can lose input focus after deleting a focused
+child frame, so this option defaults to nil on those builds."
+  :type 'boolean)
+
 (defcustom vertico-buffer-frame-parameters nil
   "Additional child frame parameters.
 These parameters are appended to the package defaults before calling
@@ -326,7 +339,9 @@ useful when diagnosing backend-specific child-frame failures."
        (height . ,height)
        (visibility . nil)
        (undecorated . t)
-       (no-accept-focus . ,(not (eq role 'candidate)))
+       (no-accept-focus
+        . ,(or (not (eq role 'candidate))
+               (not vertico-buffer-frame-candidate-accept-focus)))
        (no-focus-on-map . t)
        (skip-taskbar . t)
        (unsplittable . t)

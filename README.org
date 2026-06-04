@@ -50,9 +50,13 @@ in the usual Vertico way:
   (vertico-mouse-mode 1)
 #+end_src
 
-Candidate child frames accept mouse focus so the ~vertico-mouse~ candidate text
-properties can handle clicks and wheel events when ~vertico-mouse-mode~ is
-active.  Preview child frames keep the non-focusable behavior.
+Candidate child frames normally accept mouse focus so the ~vertico-mouse~
+candidate text properties can handle clicks and wheel events when
+~vertico-mouse-mode~ is active.  On Emacs 30+ PGTK builds,
+~vertico-buffer-frame-candidate-accept-focus~ defaults to nil to avoid losing
+input focus after deleting a focused child frame.  Set it to non-nil if you want
+the mouse behavior on those builds.  Preview child frames keep the non-focusable
+behavior.
 
 When testing a checkout while another copy is installed via ~package.el~, add
 the checkout directory to ~load-path~ after ~package-initialize~, or load the
