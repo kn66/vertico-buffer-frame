@@ -6,11 +6,9 @@ This repository is an Emacs Lisp package for displaying Vertico completions in
 child frames. Source files live at the repository root:
 
 - `vertico-buffer-frame.el`: main minor mode, child-frame display action, layout,
-  lifecycle, and cleanup.
-- `vertico-buffer-frame-preview.el`: preview target resolution and rendering.
-- `vertico-buffer-frame-consult.el`: Consult-specific preview adapters.
+  fallback, lifecycle, and cleanup.
 - `test/vertico-buffer-frame-test.el`: ERT coverage for mode behavior, cleanup,
-  preview targets, and compatibility cases.
+  fallback, and child-frame display cases.
 - `gif/`: README demonstration assets.
 
 Keep README-facing behavior documented in `README.org`.
@@ -46,15 +44,13 @@ matters; avoid comments that restate the code.
 Tests use ERT and live in `test/vertico-buffer-frame-test.el`. Name tests with
 the package prefix and the behavior under test, for example
 `vertico-buffer-frame-mode-restores-state`. Add focused coverage when changing
-cleanup, layout, preview target resolution, caching, or defensive error
-handling. Run `make test` for focused validation and `make check` before
-submitting broader changes.
+cleanup, layout, fallback, or child-frame display behavior. Run `make test` for
+focused validation and `make check` before submitting broader changes.
 
 ## Commit & Pull Request Guidelines
 
-Recent commits use short, imperative summaries such as `Improve fallback display
-and file position previews`. Keep commits focused on one behavioral change when
-practical.
+Recent commits use short, imperative summaries. Keep commits focused on one
+behavioral change when practical.
 
 Pull requests should describe the user-visible behavior, list validation
 commands run, and call out any GUI or child-frame smoke testing performed. Add
@@ -65,4 +61,4 @@ behavior changes.
 
 Prefer readable, domain-shaped code over mechanical deduplication. Split
 functions around named responsibilities such as child-frame layout, minibuffer
-ownership, cleanup, preview target resolution, or compatibility handling.
+ownership, cleanup, fallback, or compatibility handling.
