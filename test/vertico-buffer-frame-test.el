@@ -347,6 +347,59 @@
       (should (equal (alist-get 'share-child-frame parameters)
                      '(owner preview))))))
 
+(ert-deftest vertico-buffer-frame-delete-frame-clears-owner-first ()
+  (let (cleared-owner
+        deleted)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (_frame) t))
+              ((symbol-function #'modify-frame-parameters)
+               (lambda (_frame parameters)
+                 (setq cleared-owner
+                       (assq vertico-buffer-frame--owner-buffer-parameter
+                             parameters))))
+              ((symbol-function #'delete-frame)
+               (lambda (_frame &optional force)
+                 (should (equal cleared-owner
+                                (cons
+                                 vertico-buffer-frame--owner-buffer-parameter
+                                 nil)))
+                 (should force)
+                 (setq deleted t))))
+      (vertico-buffer-frame--delete-frame 'frame)
+      (should deleted))))
+
+(ert-deftest vertico-buffer-frame-delete-frame-avoids-reentrant-owner-delete ()
+  (let ((owner 'owner)
+        (owner-parameter 'owner)
+        (live t)
+        (delete-calls 0))
+    (cl-letf (((symbol-function #'frame-list)
+               (lambda ()
+                 '(child)))
+              ((symbol-function #'frame-live-p)
+               (lambda (frame)
+                 (and (eq frame 'child) live)))
+              ((symbol-function #'frame-parameter)
+               (lambda (frame parameter)
+                 (when (and (eq frame 'child)
+                            (eq parameter
+                                vertico-buffer-frame--owner-buffer-parameter))
+                   owner-parameter)))
+              ((symbol-function #'modify-frame-parameters)
+               (lambda (frame parameters)
+                 (when (eq frame 'child)
+                   (setq owner-parameter
+                         (alist-get
+                          vertico-buffer-frame--owner-buffer-parameter
+                          parameters)))))
+              ((symbol-function #'delete-frame)
+               (lambda (_frame &optional _force)
+                 (setq delete-calls (1+ delete-calls))
+                 (vertico-buffer-frame--delete-frames-owned-by-buffer owner)
+                 (setq live nil))))
+      (vertico-buffer-frame--delete-frame 'child)
+      (should (= delete-calls 1)))))
+
 (ert-deftest vertico-buffer-frame-minibuffer-setup-installs-hooks ()
   (vertico-buffer-frame-test--with-clean-state
    (with-temp-buffer

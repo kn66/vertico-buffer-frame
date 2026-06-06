@@ -258,6 +258,9 @@ SHARE is the `share-child-frame' value used for child-frame reuse."
   "Delete FRAME if it is live."
   (ignore-errors
     (when (frame-live-p frame)
+      (modify-frame-parameters
+       frame
+       `((,vertico-buffer-frame--owner-buffer-parameter . nil)))
       (delete-frame frame t))))
 
 (defun vertico-buffer-frame--delete-frames-owned-by-buffer (buffer)
