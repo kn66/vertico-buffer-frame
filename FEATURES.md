@@ -19,6 +19,8 @@ code, or `README.org`.
   keep it centered as the parent frame changes size.
 - When Consult is loaded, mirror Consult's active window preview in a preview
   child frame overlaid on the lower-right of the candidate frame.
+- Mirror Consult's window-local insertion preview overlays, such as
+  `consult-yank-from-kill-ring` previews, in the preview child frame.
 - Size the Consult preview frame from the candidate frame using the golden
   ratio.
 - Provide customization only for golden-ratio scale, border width, focus

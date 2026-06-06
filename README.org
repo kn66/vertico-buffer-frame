@@ -12,6 +12,8 @@ child frames are unavailable or fail.
 When Consult is loaded, Consult's ordinary preview is mirrored in a second
 non-focusable child frame.  The preview frame is overlaid on the lower-right of
 the candidate frame and sized from the candidate frame using the golden ratio.
+Consult insertion previews, such as ~consult-yank-from-kill-ring~, are mirrored
+from Consult's window-local preview overlay.
 
 * GIF
 
@@ -67,7 +69,8 @@ the parent frame.  Additional frame parameters can be added with
 ~vertico-buffer-frame-consult-preview~ controls whether Consult previews are
 mirrored in the preview child frame.  Consult still performs its normal preview
 logic in the original window; this package mirrors the resulting buffer and
-window position into the child frame.
+window position into the child frame.  Window-local insertion preview overlays
+are mirrored as part of that preview.
 
 * Commands
 

@@ -540,7 +540,8 @@
         set-buffer
         synced
         copied
-        highlighted)
+        highlighted
+        mirrored)
     (unwind-protect
         (with-current-buffer owner
           (let ((vertico-buffer-frame-mode t)
@@ -584,6 +585,10 @@
                        (lambda (source target)
                          (setq copied (list source target))))
                       ((symbol-function
+                        #'vertico-buffer-frame--mirror-preview-overlays)
+                       (lambda (source target)
+                         (setq mirrored (list source target))))
+                      ((symbol-function
                         #'vertico-buffer-frame--highlight-preview-line)
                        (lambda (window)
                          (setq highlighted window))))
@@ -594,7 +599,51 @@
                              (list 'preview-window source-buffer)))
               (should synced)
               (should (equal copied '(source-window preview-window)))
+              (should (equal mirrored '(source-window preview-window)))
               (should (eq highlighted 'preview-window)))))
+      (dolist (buffer (list owner source-buffer))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest vertico-buffer-frame-consult-mirrors-insertion-overlays ()
+  (let ((owner (generate-new-buffer " *vbf-consult-owner*"))
+        (source-buffer (generate-new-buffer " *vbf-consult-source*"))
+        source-overlay
+        unrelated-overlay)
+    (unwind-protect
+        (progn
+          (with-current-buffer source-buffer
+            (insert "alpha beta gamma")
+            (setq source-overlay (make-overlay 7 7 source-buffer))
+            (overlay-put source-overlay 'window 'source-window)
+            (overlay-put source-overlay 'before-string "inserted")
+            (overlay-put source-overlay 'invisible t)
+            (setq unrelated-overlay (make-overlay 1 6 source-buffer))
+            (overlay-put unrelated-overlay 'window 'source-window)
+            (overlay-put unrelated-overlay 'face 'bold))
+          (with-current-buffer owner
+            (setq-local vertico-buffer-frame--preview-overlays nil)
+            (cl-letf (((symbol-function #'window-start)
+                       (lambda (_window) 1))
+                      ((symbol-function #'window-end)
+                       (lambda (_window &optional _update) 18))
+                      ((symbol-function #'window-point)
+                       (lambda (_window) 7))
+                      ((symbol-function #'window-buffer)
+                       (lambda (_window) source-buffer)))
+              (vertico-buffer-frame--mirror-preview-overlays
+               'source-window 'preview-window))
+            (should (= (length vertico-buffer-frame--preview-overlays) 1))
+            (let ((copy (car vertico-buffer-frame--preview-overlays)))
+              (should (= (overlay-start copy) 7))
+              (should (= (overlay-end copy) 7))
+              (should (eq (overlay-buffer copy) source-buffer))
+              (should (eq (overlay-get copy 'window) 'preview-window))
+              (should (equal (overlay-get copy 'before-string) "inserted"))
+              (should (overlay-get copy 'invisible))
+              (should-not (eq copy source-overlay))
+              (should-not (memq unrelated-overlay
+                                vertico-buffer-frame--preview-overlays)))))
       (dolist (buffer (list owner source-buffer))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))

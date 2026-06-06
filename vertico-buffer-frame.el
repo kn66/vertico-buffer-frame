@@ -98,6 +98,10 @@ These parameters are appended to the package defaults before calling
 (defconst vertico-buffer-frame--golden-ratio (/ (+ 1.0 (sqrt 5.0)) 2.0)
   "Golden ratio used for automatic child-frame layout.")
 
+(defconst vertico-buffer-frame--mirrored-overlay-properties
+  '(before-string after-string display invisible face category priority)
+  "Overlay properties copied into the Consult preview child frame.")
+
 ;;;###autoload
 (defun vertico-buffer-frame-display-action ()
   "Return the display action used by `vertico-buffer-frame-mode'."
@@ -534,10 +538,53 @@ frame that should own the candidate child frame."
     (ignore-errors
       (set-window-hscroll target (window-hscroll source)))))
 
+(defun vertico-buffer-frame--preview-overlay-p (overlay source-window)
+  "Return non-nil when OVERLAY should be mirrored from SOURCE-WINDOW."
+  (and (eq (overlay-get overlay 'window) source-window)
+       (or (overlay-get overlay 'before-string)
+           (overlay-get overlay 'after-string)
+           (overlay-get overlay 'display)
+           (overlay-get overlay 'invisible))))
+
+(defun vertico-buffer-frame--source-window-overlays (source-window)
+  "Return visible window-local preview overlays from SOURCE-WINDOW."
+  (let ((buffer (window-buffer source-window))
+        (start (window-start source-window))
+        (end (window-end source-window t))
+        (point (window-point source-window))
+        overlays)
+    (with-current-buffer buffer
+      (dolist (overlay (append (overlays-in start end)
+                               (overlays-at point)))
+        (when (and (vertico-buffer-frame--preview-overlay-p
+                    overlay source-window)
+                   (not (memq overlay overlays)))
+          (push overlay overlays))))
+    (nreverse overlays)))
+
+(defun vertico-buffer-frame--copy-overlay-properties (source target)
+  "Copy supported preview overlay properties from SOURCE to TARGET."
+  (dolist (property vertico-buffer-frame--mirrored-overlay-properties)
+    (when (overlay-get source property)
+      (overlay-put target property (overlay-get source property)))))
+
+(defun vertico-buffer-frame--mirror-preview-overlays
+    (source-window target-window)
+  "Mirror visible Consult preview overlays from SOURCE-WINDOW to TARGET-WINDOW."
+  (let ((target-buffer (window-buffer target-window)))
+    (dolist (overlay (vertico-buffer-frame--source-window-overlays
+                      source-window))
+      (let ((copy (make-overlay (overlay-start overlay)
+                                (overlay-end overlay)
+                                target-buffer
+                                nil t)))
+        (vertico-buffer-frame--copy-overlay-properties overlay copy)
+        (overlay-put copy 'window target-window)
+        (push copy vertico-buffer-frame--preview-overlays)))))
+
 (defun vertico-buffer-frame--highlight-preview-line (window)
   "Highlight WINDOW's current line in the Consult preview child frame."
   (let (overlay)
-    (vertico-buffer-frame--clear-preview-overlays)
     (with-current-buffer (window-buffer window)
       (save-excursion
         (goto-char (window-point window))
@@ -553,7 +600,8 @@ frame that should own the candidate child frame."
                          'consult-preview-line
                        'highlight))))
     (setq-local vertico-buffer-frame--preview-overlays
-                (and overlay (list overlay)))))
+                (and overlay
+                     (cons overlay vertico-buffer-frame--preview-overlays)))))
 
 (defun vertico-buffer-frame-consult-preview-hide ()
   "Hide the active Consult preview child frame."
@@ -585,8 +633,11 @@ frame that should own the candidate child frame."
                    (featurep 'tty-child-frames)))
           (let ((window (vertico-buffer-frame--ensure-preview-window
                          buffer vertico-buffer-frame--parent)))
+            (vertico-buffer-frame--clear-preview-overlays)
             (vertico-buffer-frame--set-preview-window-buffer window buffer)
             (vertico-buffer-frame--copy-window-view source-window window)
+            (vertico-buffer-frame--mirror-preview-overlays
+             source-window window)
             (vertico-buffer-frame--highlight-preview-line window)
             (vertico-buffer-frame--sync-preview-frame)
             window)
