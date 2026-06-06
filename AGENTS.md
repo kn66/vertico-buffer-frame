@@ -9,6 +9,8 @@ child frames. Source files live at the repository root:
   fallback, lifecycle, and cleanup.
 - `test/vertico-buffer-frame-test.el`: ERT coverage for mode behavior, cleanup,
   fallback, and child-frame display cases.
+- `FEATURES.md`: required behavior, explicit non-goals, and feature-scoped
+  simplicity constraints.
 - `gif/`: README demonstration assets.
 
 Keep README-facing behavior documented in `README.org`.
@@ -62,3 +64,14 @@ behavior changes.
 Prefer readable, domain-shaped code over mechanical deduplication. Split
 functions around named responsibilities such as child-frame layout, minibuffer
 ownership, cleanup, fallback, or compatibility handling.
+
+Before making non-trivial code changes, read `FEATURES.md` and keep the
+implementation limited to the listed behavior. When adding or changing
+behavior, update `FEATURES.md` first or in the same change so the required
+functionality remains explicit.
+
+Implement the simplest maintainable code that satisfies `FEATURES.md`. Do not
+add abstractions, options, compatibility paths, optimizations, or unrelated
+refactors unless they are needed for a listed feature. Treat performance
+requirements as features, and document the reason or target when an optimization
+adds complexity.
