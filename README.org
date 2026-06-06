@@ -9,6 +9,10 @@ golden-ratio-sized candidate frame per minibuffer session, cleanup on
 minibuffer exit, and fallback to the previous Vertico buffer display action when
 child frames are unavailable or fail.
 
+When Consult is loaded, Consult's ordinary preview is mirrored in a second
+non-focusable child frame.  The preview frame is overlaid on the lower-right of
+the candidate frame and sized from the candidate frame using the golden ratio.
+
 * GIF
 
 ** normal
@@ -51,6 +55,7 @@ alive.
 - ~vertico-buffer-frame-border-width~
 - ~vertico-buffer-frame-golden-ratio-scale~
 - ~vertico-buffer-frame-candidate-accept-focus~
+- ~vertico-buffer-frame-consult-preview~
 - ~vertico-buffer-frame-parameters~
 
 The frame size is derived from the parent frame using the golden ratio and
@@ -58,6 +63,11 @@ rounded to character cells.  With the default scale of 1.0, the candidate frame
 is one golden-ratio step smaller than the largest golden rectangle fitting in
 the parent frame.  Additional frame parameters can be added with
 ~vertico-buffer-frame-parameters~.
+
+~vertico-buffer-frame-consult-preview~ controls whether Consult previews are
+mirrored in the preview child frame.  Consult still performs its normal preview
+logic in the original window; this package mirrors the resulting buffer and
+window position into the child frame.
 
 * Commands
 
@@ -69,10 +79,10 @@ minibuffer sessions.  Cleanup is safe to call repeatedly.
 
 * Scope
 
-This lightweight version deliberately does not include preview support,
-Consult-specific adapters, per-command local mode, fixed-size display, or
-candidate-width auto-resizing.  Those features made the package more capable,
-but they also made the core display path much larger.
+This lightweight version deliberately does not include per-command local mode,
+fixed-size display, candidate-width auto-resizing, or per-command Consult
+preview adapters.  Consult preview support mirrors Consult's existing window
+preview instead of resolving every Consult command's candidates separately.
 
 * Development
 

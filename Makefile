@@ -9,7 +9,7 @@ BATCH = $(EMACS) --batch -Q \
 	--eval "(add-to-list 'load-path default-directory)" \
 	-L .
 
-SOURCES = vertico-buffer-frame.el
+SOURCES = vertico-buffer-frame.el vertico-buffer-frame-consult.el
 
 TESTS = test/vertico-buffer-frame-test.el
 
