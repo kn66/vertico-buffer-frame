@@ -34,6 +34,21 @@ Add this directory to ~load-path~, then:
   (vertico-buffer-frame-mode 1)
 #+end_src
 
+For per-command or per-category use with ~vertico-multiform-mode~, enable the
+local mode from a multiform rule instead of enabling the global mode:
+
+#+begin_src elisp
+  (require 'vertico-buffer-frame)
+  (setq vertico-multiform-commands
+        '((consult-line buffer-frame-local))
+        vertico-multiform-categories
+        '((file buffer-frame-local)))
+  (vertico-multiform-mode 1)
+#+end_src
+
+The symbol ~buffer-frame-local~ resolves to
+~vertico-buffer-frame-local-mode~ in Vertico multiform rules.
+
 The candidate frame does not accept focus by default.  This avoids backend
 issues where deleting a focused child frame loses Emacs input focus.  If you
 want mouse clicks or wheel events in the candidate frame, enable focus
@@ -75,17 +90,28 @@ are mirrored as part of that preview.
 * Commands
 
 - ~vertico-buffer-frame-cleanup~
+- ~vertico-buffer-frame-local-mode~
 - ~vertico-buffer-frame-mode~
+- ~vertico-buffer-frame-toggle-preview~
 
 ~vertico-buffer-frame-cleanup~ releases child frames owned by active
 minibuffer sessions.  Cleanup is safe to call repeatedly.
 
+~vertico-buffer-frame-local-mode~ enables the child-frame display only for the
+current minibuffer session.  It is intended for ~vertico-multiform-mode~ rules
+and restores the previous local Vertico display state when disabled.
+
+~vertico-buffer-frame-toggle-preview~ toggles Consult preview mirroring.  When
+called from an active minibuffer, the change is local to that minibuffer
+session.  Outside the minibuffer, it changes the global default.
+
 * Scope
 
-This lightweight version deliberately does not include per-command local mode,
-fixed-size display, candidate-width auto-resizing, or per-command Consult
-preview adapters.  Consult preview support mirrors Consult's existing window
-preview instead of resolving every Consult command's candidates separately.
+This lightweight version deliberately does not include fixed-size display,
+candidate-width auto-resizing, built-in candidate preview resolvers, or
+per-command Consult preview adapters.  Consult preview support mirrors
+Consult's existing window preview instead of resolving every Consult command's
+candidates separately.
 
 * Development
 

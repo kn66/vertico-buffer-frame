@@ -15,6 +15,8 @@ code, or `README.org`.
   Vertico state when `vertico-buffer-frame-mode` is disabled.
 - Support recursive minibuffer sessions without reusing or deleting another
   session's candidate child frame.
+- Provide `vertico-buffer-frame-local-mode` so `vertico-multiform-mode` can
+  enable the child-frame display per command or completion category.
 - Size the candidate frame from the parent frame using the golden ratio, and
   keep it centered as the parent frame changes size.
 - When Consult is loaded, mirror Consult's active window preview in a preview
@@ -23,6 +25,8 @@ code, or `README.org`.
   `consult-yank-from-kill-ring` previews, in the preview child frame.
 - Size the Consult preview frame from the candidate frame using the golden
   ratio.
+- Allow Consult preview mirroring to be toggled globally or for the current
+  minibuffer session.
 - Provide customization only for golden-ratio scale, border width, focus
   acceptance, Consult preview enablement, and extra frame parameters.
 - Keep the core display path small: one candidate frame and at most one Consult
@@ -30,7 +34,7 @@ code, or `README.org`.
 
 ## Non-Goals
 
-- Per-command local mode, fixed-size display, candidate-width auto-resizing, and
-  per-command Consult preview adapters.
+- Fixed-size display, candidate-width auto-resizing, built-in candidate preview
+  resolvers, and per-command Consult preview adapters.
 - Speculative options, compatibility paths, refactors, or optimizations without
   a listed behavior, clear bug, or measured target.

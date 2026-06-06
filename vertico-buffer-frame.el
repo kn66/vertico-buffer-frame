@@ -4,7 +4,7 @@
 
 ;; Author: Nobuyuki Kamimoto
 ;; Assisted-by: OpenAI Codex:GPT-5
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "29.1") (vertico "2.8"))
 ;; Keywords: convenience, frames, minibuffer
 ;; URL: https://github.com/kn66/vertico-buffer-frame
@@ -83,6 +83,8 @@ These parameters are appended to the package defaults before calling
   "Plist storing Vertico state saved while frame mode is enabled.")
 (defvar vertico-buffer-frame--minibuffers nil)
 (defvar vertico-buffer-frame-mode)
+(defvar-local vertico-buffer-frame-local-mode nil)
+(defvar consult--preview-function)
 
 (defvar-local vertico-buffer-frame--frame nil)
 (defvar-local vertico-buffer-frame--window nil)
@@ -90,6 +92,7 @@ These parameters are appended to the package defaults before calling
 (defvar-local vertico-buffer-frame--preview-frame nil)
 (defvar-local vertico-buffer-frame--preview-window nil)
 (defvar-local vertico-buffer-frame--preview-overlays nil)
+(defvar-local vertico-buffer-frame--local-saved-state nil)
 
 (defconst vertico-buffer-frame--owner-buffer-parameter
   'vertico-buffer-frame-owner-buffer
@@ -106,6 +109,11 @@ These parameters are appended to the package defaults before calling
 (defun vertico-buffer-frame-display-action ()
   "Return the display action used by `vertico-buffer-frame-mode'."
   '(vertico-buffer-frame--display-buffer))
+
+(defun vertico-buffer-frame--enabled-p ()
+  "Return non-nil when global or local frame display is enabled."
+  (or vertico-buffer-frame-mode
+      (bound-and-true-p vertico-buffer-frame-local-mode)))
 
 (defun vertico-buffer-frame--parent-frame ()
   "Return the parent frame for a candidate child frame."
@@ -413,14 +421,25 @@ frame that should own the candidate child frame."
     (vertico-buffer-frame--sync-frame)
     window))
 
+(defun vertico-buffer-frame--saved-action-entry (state)
+  "Return a cons whose cdr is STATE's saved display action."
+  (when state
+    (let ((action (plist-get state :display-action)))
+      (unless (equal action (vertico-buffer-frame-display-action))
+        (cons t action)))))
+
+(defun vertico-buffer-frame--fallback-action-entry ()
+  "Return a cons whose cdr is the saved fallback display action."
+  (or (vertico-buffer-frame--saved-action-entry
+       vertico-buffer-frame--local-saved-state)
+      (vertico-buffer-frame--saved-action-entry
+       vertico-buffer-frame--saved-state)))
+
 (defun vertico-buffer-frame--fallback-action ()
   "Return the display action to use when child frames are unavailable."
-  (let ((saved-action
-         (plist-get vertico-buffer-frame--saved-state :display-action)))
-    (if (and vertico-buffer-frame--saved-state
-             (not (equal saved-action
-                         (vertico-buffer-frame-display-action))))
-        saved-action
+  (let ((entry (vertico-buffer-frame--fallback-action-entry)))
+    (if entry
+        (cdr entry)
       '(display-buffer-use-least-recent-window))))
 
 (defun vertico-buffer-frame--display-buffer-fallback (buffer alist)
@@ -617,7 +636,7 @@ frame that should own the candidate child frame."
 
 (defun vertico-buffer-frame-consult-preview-mirror-window (source-window)
   "Mirror Consult preview SOURCE-WINDOW in a lower-right child frame."
-  (when-let* (((and vertico-buffer-frame-mode
+  (when-let* (((and (vertico-buffer-frame--enabled-p)
                    vertico-buffer-frame-consult-preview))
               ((window-live-p source-window))
               (minibuffer-window (active-minibuffer-window))
@@ -665,13 +684,17 @@ ALIST is the display action alist passed by `display-buffer'."
        (vertico-buffer-frame--release-display-state-for-fallback owner)
        (vertico-buffer-frame--display-buffer-fallback buffer alist)))))
 
+(defun vertico-buffer-frame--setup-minibuffer-session ()
+  "Install child-frame cleanup hooks for the current minibuffer session."
+  (setq-local mode-line-format nil
+              header-line-format nil
+              tab-line-format nil)
+  (vertico-buffer-frame--install-cleanup))
+
 (defun vertico-buffer-frame--setup-minibuffer ()
-  "Install child-frame cleanup hooks for the current minibuffer."
+  "Install child-frame cleanup hooks for global frame mode."
   (when vertico-buffer-frame-mode
-    (setq-local mode-line-format nil
-                header-line-format nil
-                tab-line-format nil)
-    (vertico-buffer-frame--install-cleanup)))
+    (vertico-buffer-frame--setup-minibuffer-session)))
 
 (defun vertico-buffer-frame--save-state ()
   "Save Vertico state while `vertico-buffer-frame-mode' is enabled."
@@ -697,6 +720,105 @@ ALIST is the display action alist passed by `display-buffer'."
       (when (and using-frame-action (not saved-buffer-mode))
         (vertico-buffer-mode -1)))
     (setq vertico-buffer-frame--saved-state nil)))
+
+;;;###autoload
+(defun vertico-buffer-frame-toggle-preview (&optional arg)
+  "Toggle Consult preview mirroring.
+With prefix ARG, enable preview mirroring if ARG is positive, otherwise disable
+it.  Inside an active minibuffer, the change is buffer-local to that session."
+  (interactive "P")
+  (let* ((local (minibufferp))
+         (enabled (if arg
+                      (> (prefix-numeric-value arg) 0)
+                    (not (if local
+                             vertico-buffer-frame-consult-preview
+                           (default-value
+                            'vertico-buffer-frame-consult-preview))))))
+    (if local
+        (setq-local vertico-buffer-frame-consult-preview enabled)
+      (setq-default vertico-buffer-frame-consult-preview enabled))
+    (if enabled
+        (when (and local
+                   (boundp 'consult--preview-function)
+                   consult--preview-function)
+          (funcall consult--preview-function))
+      (vertico-buffer-frame-consult-preview-hide))))
+
+(defun vertico-buffer-frame--set-local-variable (symbol value)
+  "Set SYMBOL's buffer-local value to VALUE."
+  (set (make-local-variable symbol) value))
+
+(defun vertico-buffer-frame--restore-local-variable
+    (symbol local-p value)
+  "Restore SYMBOL to VALUE when LOCAL-P, otherwise remove its local binding."
+  (if local-p
+      (vertico-buffer-frame--set-local-variable symbol value)
+    (kill-local-variable symbol)))
+
+(defun vertico-buffer-frame--set-local-mode-state ()
+  "Set buffer-local Vertico display state for local frame mode."
+  (unless vertico-buffer-frame--local-saved-state
+    (setq-local
+     vertico-buffer-frame--local-saved-state
+     (list :display-action vertico-buffer-display-action
+           :display-action-local-p
+           (local-variable-p 'vertico-buffer-display-action)
+           :buffer-mode (bound-and-true-p vertico-buffer-mode)
+           :buffer-mode-local-p
+           (local-variable-p 'vertico-buffer-mode))))
+  (setq-local vertico-buffer-mode t
+              vertico-buffer-display-action
+              (vertico-buffer-frame-display-action)))
+
+(defun vertico-buffer-frame--restore-local-mode-state ()
+  "Restore buffer-local Vertico display state saved by local frame mode."
+  (when vertico-buffer-frame--local-saved-state
+    (let ((state vertico-buffer-frame--local-saved-state))
+      (vertico-buffer-frame--restore-local-variable
+       'vertico-buffer-display-action
+       (plist-get state :display-action-local-p)
+       (plist-get state :display-action))
+      (vertico-buffer-frame--restore-local-variable
+       'vertico-buffer-mode
+       (plist-get state :buffer-mode-local-p)
+       (plist-get state :buffer-mode)))
+    (setq-local vertico-buffer-frame--local-saved-state nil)))
+
+(defun vertico-buffer-frame--restore-vertico-buffer-window ()
+  "Restore Vertico's buffer window when local frame mode is disabled early."
+  (when (and (boundp 'vertico-buffer--restore)
+             vertico-buffer--restore)
+    (ignore-errors
+      (funcall vertico-buffer--restore))))
+
+(defun vertico-buffer-frame--maybe-setup-vertico-buffer-window ()
+  "Set up Vertico's buffer window when local mode is toggled interactively."
+  (when (and (bound-and-true-p vertico--input)
+             (boundp 'vertico-buffer--restore)
+             (not vertico-buffer--restore))
+    (ignore-errors
+      (vertico-buffer--setup))))
+
+;;;###autoload
+(define-minor-mode vertico-buffer-frame-local-mode
+  "Display Vertico candidates in child frames for this minibuffer.
+This local mode is intended for `vertico-multiform-mode' per-command and
+per-category rules.  It does not change global Vertico display state."
+  :global nil
+  :group 'vertico-buffer-frame
+  (if vertico-buffer-frame-local-mode
+      (if (minibufferp)
+          (progn
+            (vertico-buffer-frame--set-local-mode-state)
+            (vertico-buffer-frame--setup-minibuffer-session)
+            (vertico-buffer-frame--maybe-setup-vertico-buffer-window))
+        (setq vertico-buffer-frame-local-mode nil)
+        (user-error
+         "`vertico-buffer-frame-local-mode' must be enabled in a minibuffer"))
+    (vertico-buffer-frame--restore-vertico-buffer-window)
+    (when (minibufferp)
+      (vertico-buffer-frame--cleanup-minibuffer (current-buffer)))
+    (vertico-buffer-frame--restore-local-mode-state)))
 
 ;;;###autoload
 (define-minor-mode vertico-buffer-frame-mode
