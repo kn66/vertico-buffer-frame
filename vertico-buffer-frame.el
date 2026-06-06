@@ -93,10 +93,15 @@ These parameters are appended to the package defaults before calling
 (defvar-local vertico-buffer-frame--preview-window nil)
 (defvar-local vertico-buffer-frame--preview-overlays nil)
 (defvar-local vertico-buffer-frame--local-saved-state nil)
+(defvar-local vertico-buffer-frame--session nil)
 
 (defconst vertico-buffer-frame--owner-buffer-parameter
   'vertico-buffer-frame-owner-buffer
   "Frame parameter storing the minibuffer buffer that owns a child frame.")
+
+(defconst vertico-buffer-frame--owner-session-parameter
+  'vertico-buffer-frame-owner-session
+  "Frame parameter storing the minibuffer session that owns a child frame.")
 
 (defconst vertico-buffer-frame--golden-ratio (/ (+ 1.0 (sqrt 5.0)) 2.0)
   "Golden ratio used for automatic child-frame layout.")
@@ -244,40 +249,104 @@ SIZE is a cons of width and height in characters.  ROLE is `candidate' or
   (set-window-fringes window 0 0 nil)
   (set-window-scroll-bars window nil nil nil nil))
 
+(defun vertico-buffer-frame--start-session ()
+  "Start a new child-frame ownership session."
+  (setq-local vertico-buffer-frame--session
+              (make-symbol "vertico-buffer-frame-session")))
+
+(defun vertico-buffer-frame--ensure-session ()
+  "Return the current child-frame ownership session."
+  (or vertico-buffer-frame--session
+      (vertico-buffer-frame--start-session)))
+
 (defun vertico-buffer-frame--set-frame-owner-buffer (frame buffer &optional share)
   "Mark FRAME as owned by minibuffer BUFFER.
 SHARE is the `share-child-frame' value used for child-frame reuse."
   (when (frame-live-p frame)
-    (modify-frame-parameters
-     frame
-     `((,vertico-buffer-frame--owner-buffer-parameter . ,buffer)
-       (minibuffer-exit . nil)
-       (share-child-frame . ,(or share buffer))))))
+    (let ((session (and (buffer-live-p buffer)
+                        (buffer-local-value
+                         'vertico-buffer-frame--session buffer))))
+      (modify-frame-parameters
+       frame
+       `((,vertico-buffer-frame--owner-buffer-parameter . ,buffer)
+         (,vertico-buffer-frame--owner-session-parameter . ,session)
+         (minibuffer-exit . nil)
+         (share-child-frame . ,(or share buffer)))))))
+
+(defun vertico-buffer-frame--clear-vertico-overlay-window (window)
+  "Clear Vertico overlay window state when it points at WINDOW."
+  (dolist (symbol '(vertico--candidates-ov vertico--count-ov))
+    (when (and (boundp symbol)
+               (overlayp (symbol-value symbol))
+               (eq (overlay-get (symbol-value symbol) 'window)
+                   window))
+      (overlay-put (symbol-value symbol) 'window nil))))
+
+(defun vertico-buffer-frame--clear-vertico-overlays-for-frame (frame)
+  "Clear Vertico overlay window state before deleting FRAME."
+  (let ((owner (ignore-errors
+                 (and (frame-live-p frame)
+                      (frame-parameter
+                       frame
+                       vertico-buffer-frame--owner-buffer-parameter))))
+        (window (ignore-errors
+                  (and (frame-live-p frame)
+                       (frame-root-window frame)))))
+    (when (and (buffer-live-p owner)
+               window)
+      (with-current-buffer owner
+        (vertico-buffer-frame--clear-vertico-overlay-window window)))))
 
 (defun vertico-buffer-frame--delete-frame (frame)
   "Delete FRAME if it is live."
   (ignore-errors
     (when (frame-live-p frame)
+      (vertico-buffer-frame--clear-vertico-overlays-for-frame frame)
       (modify-frame-parameters
        frame
-       `((,vertico-buffer-frame--owner-buffer-parameter . nil)))
+       `((,vertico-buffer-frame--owner-buffer-parameter . nil)
+         (,vertico-buffer-frame--owner-session-parameter . nil)))
       (delete-frame frame t))))
 
-(defun vertico-buffer-frame--delete-frames-owned-by-buffer (buffer)
-  "Delete child frames owned by minibuffer BUFFER."
+(defun vertico-buffer-frame--hide-frame (frame)
+  "Hide FRAME if it is live."
+  (ignore-errors
+    (when (frame-live-p frame)
+      (vertico-buffer-frame--clear-vertico-overlays-for-frame frame)
+      (make-frame-invisible frame t))))
+
+(defun vertico-buffer-frame--hide-frame-state ()
+  "Hide child frames recorded in the current minibuffer state."
+  (vertico-buffer-frame--hide-frame vertico-buffer-frame--preview-frame)
+  (vertico-buffer-frame--hide-frame vertico-buffer-frame--frame))
+
+(defun vertico-buffer-frame--delete-frames-owned-by-buffer
+    (buffer &optional session)
+  "Delete child frames owned by minibuffer BUFFER.
+When SESSION is non-nil, only delete frames owned by that minibuffer session."
   (dolist (frame (frame-list))
-    (when (eq (frame-parameter frame vertico-buffer-frame--owner-buffer-parameter)
-              buffer)
+    (when (and (eq (frame-parameter
+                    frame vertico-buffer-frame--owner-buffer-parameter)
+                   buffer)
+               (let ((owner-session
+                      (frame-parameter
+                       frame
+                       vertico-buffer-frame--owner-session-parameter)))
+                 (or (null session)
+                     (eq owner-session session)
+                     ;; Delete frames created before session ownership existed.
+                     (null owner-session))))
       (vertico-buffer-frame--delete-frame frame))))
 
-(defun vertico-buffer-frame--delete-frames-owned-by-buffer-later (buffer)
-  "Delete child frames owned by minibuffer BUFFER after teardown."
+(defun vertico-buffer-frame--delete-frames-owned-by-buffer-later
+    (buffer session)
+  "Delete child frames owned by minibuffer BUFFER and SESSION after teardown."
   ;; `minibuffer-exit-hook' can run before Emacs restores the pre-minibuffer
   ;; window configuration.  Deleting child frames there may run zero-delay
   ;; timers, including Embark's deferred collect/export display, too early.
   (run-at-time 0 nil
                #'vertico-buffer-frame--delete-frames-owned-by-buffer
-               buffer))
+               buffer session))
 
 (defun vertico-buffer-frame--delete-owned-frames ()
   "Delete all child frames owned by `vertico-buffer-frame'."
@@ -301,17 +370,24 @@ SHARE is the `share-child-frame' value used for child-frame reuse."
 (defun vertico-buffer-frame--cleanup-minibuffer (buffer &optional delay-delete)
   "Clean up child frames owned by minibuffer BUFFER.
 When DELAY-DELETE is non-nil, delete owned frames after minibuffer teardown."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (remove-hook 'minibuffer-exit-hook
-                   #'vertico-buffer-frame--minibuffer-exit t)
-      (vertico-buffer-frame--clear-preview-overlays)
-      (vertico-buffer-frame--clear-frame-state)))
-  (if delay-delete
-      (vertico-buffer-frame--delete-frames-owned-by-buffer-later buffer)
-    (vertico-buffer-frame--delete-frames-owned-by-buffer buffer))
-  (setq vertico-buffer-frame--minibuffers
-        (delq buffer vertico-buffer-frame--minibuffers)))
+  (let ((session (and (buffer-live-p buffer)
+                      (buffer-local-value
+                       'vertico-buffer-frame--session buffer))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (remove-hook 'minibuffer-exit-hook
+                     #'vertico-buffer-frame--minibuffer-exit t)
+        (vertico-buffer-frame--clear-preview-overlays)
+        (when delay-delete
+          (vertico-buffer-frame--hide-frame-state))
+        (vertico-buffer-frame--clear-frame-state)
+        (setq-local vertico-buffer-frame--session nil)))
+    (if delay-delete
+        (vertico-buffer-frame--delete-frames-owned-by-buffer-later
+         buffer session)
+      (vertico-buffer-frame--delete-frames-owned-by-buffer buffer session))
+    (setq vertico-buffer-frame--minibuffers
+          (delq buffer vertico-buffer-frame--minibuffers))))
 
 ;;;###autoload
 (defun vertico-buffer-frame-cleanup ()
@@ -322,6 +398,7 @@ When DELAY-DELETE is non-nil, delete owned frames after minibuffer teardown."
 
 (defun vertico-buffer-frame--install-cleanup ()
   "Install cleanup hooks for the current minibuffer buffer."
+  (vertico-buffer-frame--ensure-session)
   (cl-pushnew (current-buffer) vertico-buffer-frame--minibuffers)
   (add-hook 'minibuffer-exit-hook
             #'vertico-buffer-frame--minibuffer-exit 90 t))
@@ -378,6 +455,7 @@ ALIST is appended to the display action passed to
 `vertico-buffer-frame--base-parameters'."
   (let ((frame nil)
         (success nil))
+    (vertico-buffer-frame--ensure-session)
     (unwind-protect
         (let* ((role (or role 'candidate))
                (owner (current-buffer))
@@ -704,6 +782,7 @@ ALIST is the display action alist passed by `display-buffer'."
   (setq-local mode-line-format nil
               header-line-format nil
               tab-line-format nil)
+  (vertico-buffer-frame--start-session)
   (vertico-buffer-frame--install-cleanup))
 
 (defun vertico-buffer-frame--setup-minibuffer ()

@@ -347,8 +347,24 @@
       (should (equal (alist-get 'share-child-frame parameters)
                      '(owner preview))))))
 
+(ert-deftest vertico-buffer-frame-owner-records-current-session ()
+  (let (parameters)
+    (with-temp-buffer
+      (setq-local vertico-buffer-frame--session 'session)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (_frame) t))
+                ((symbol-function #'modify-frame-parameters)
+                 (lambda (_frame params)
+                   (setq parameters params))))
+        (vertico-buffer-frame--set-frame-owner-buffer
+         'frame (current-buffer))
+        (should (eq (alist-get vertico-buffer-frame--owner-session-parameter
+                               parameters)
+                    'session))))))
+
 (ert-deftest vertico-buffer-frame-delete-frame-clears-owner-first ()
   (let (cleared-owner
+        cleared-session
         deleted)
     (cl-letf (((symbol-function #'frame-live-p)
                (lambda (_frame) t))
@@ -356,6 +372,9 @@
                (lambda (_frame parameters)
                  (setq cleared-owner
                        (assq vertico-buffer-frame--owner-buffer-parameter
+                             parameters)
+                       cleared-session
+                       (assq vertico-buffer-frame--owner-session-parameter
                              parameters))))
               ((symbol-function #'delete-frame)
                (lambda (_frame &optional force)
@@ -363,10 +382,83 @@
                                 (cons
                                  vertico-buffer-frame--owner-buffer-parameter
                                  nil)))
+                 (should (equal cleared-session
+                                (cons
+                                 vertico-buffer-frame--owner-session-parameter
+                                 nil)))
                  (should force)
                  (setq deleted t))))
       (vertico-buffer-frame--delete-frame 'frame)
       (should deleted))))
+
+(ert-deftest vertico-buffer-frame-delete-frame-clears-vertico-overlays-first ()
+  (let ((owner (generate-new-buffer " *vbf-overlay-cleanup*"))
+        (window (selected-window))
+        deleted)
+    (unwind-protect
+        (with-current-buffer owner
+          (setq-local vertico--candidates-ov
+                      (make-overlay (point-min) (point-min))
+                      vertico--count-ov
+                      (make-overlay (point-min) (point-min)))
+          (overlay-put vertico--candidates-ov 'window window)
+          (overlay-put vertico--count-ov 'window window)
+          (cl-letf (((symbol-function #'frame-live-p)
+                     (lambda (_frame) t))
+                    ((symbol-function #'frame-parameter)
+                     (lambda (_frame parameter)
+                       (when (eq parameter
+                                 vertico-buffer-frame--owner-buffer-parameter)
+                         owner)))
+                    ((symbol-function #'frame-root-window)
+                     (lambda (_frame) window))
+                    ((symbol-function #'modify-frame-parameters)
+                     #'ignore)
+                    ((symbol-function #'delete-frame)
+                     (lambda (_frame &optional _force)
+                       (should-not
+                        (overlay-get vertico--candidates-ov 'window))
+                       (should-not
+                        (overlay-get vertico--count-ov 'window))
+                       (setq deleted t))))
+            (vertico-buffer-frame--delete-frame 'frame)
+            (should deleted)))
+      (when (buffer-live-p owner)
+        (kill-buffer owner)))))
+
+(ert-deftest vertico-buffer-frame-delete-frames-owned-by-buffer-respects-session ()
+  (let ((owner (generate-new-buffer " *vbf-session-owner*"))
+        deleted)
+    (unwind-protect
+        (cl-letf (((symbol-function #'frame-list)
+                   (lambda ()
+                     '(old new legacy other)))
+                  ((symbol-function #'frame-parameter)
+                   (lambda (frame parameter)
+                     (cond
+                      ((and (eq parameter
+                                vertico-buffer-frame--owner-buffer-parameter)
+                            (memq frame '(old new legacy)))
+                       owner)
+                      ((eq parameter
+                           vertico-buffer-frame--owner-buffer-parameter)
+                       'other-owner)
+                      ((and (eq frame 'old)
+                            (eq parameter
+                                vertico-buffer-frame--owner-session-parameter))
+                       'old-session)
+                      ((and (eq frame 'new)
+                            (eq parameter
+                                vertico-buffer-frame--owner-session-parameter))
+                       'new-session))))
+                  ((symbol-function #'vertico-buffer-frame--delete-frame)
+                   (lambda (frame)
+                     (push frame deleted))))
+          (vertico-buffer-frame--delete-frames-owned-by-buffer
+           owner 'old-session)
+          (should (equal deleted '(legacy old))))
+      (when (buffer-live-p owner)
+        (kill-buffer owner)))))
 
 (ert-deftest vertico-buffer-frame-delete-frame-avoids-reentrant-owner-delete ()
   (let ((owner 'owner)
@@ -409,6 +501,7 @@
        (should-not mode-line-format)
        (should-not header-line-format)
        (should-not tab-line-format)
+       (should vertico-buffer-frame--session)
        (should (memq #'vertico-buffer-frame--minibuffer-exit
                      minibuffer-exit-hook))
        (should (memq (current-buffer)
@@ -614,21 +707,23 @@
                       vertico-buffer-frame--window 'window
                       vertico-buffer-frame--parent 'parent
                       vertico-buffer-frame--preview-frame 'preview-frame
-                      vertico-buffer-frame--preview-window 'preview-window)
+                      vertico-buffer-frame--preview-window 'preview-window
+                      vertico-buffer-frame--session 'session)
           (add-hook 'minibuffer-exit-hook
                     #'vertico-buffer-frame--minibuffer-exit nil t)
           (setq vertico-buffer-frame--minibuffers (list buffer))
           (cl-letf (((symbol-function
                       #'vertico-buffer-frame--delete-frames-owned-by-buffer)
-                     (lambda (owner)
-                       (setq deleted-owner owner))))
+                     (lambda (owner &optional session)
+                       (setq deleted-owner (list owner session)))))
             (vertico-buffer-frame--cleanup-minibuffer buffer)
-            (should (eq deleted-owner buffer))
+            (should (equal deleted-owner (list buffer 'session)))
             (should-not vertico-buffer-frame--frame)
             (should-not vertico-buffer-frame--window)
             (should-not vertico-buffer-frame--parent)
             (should-not vertico-buffer-frame--preview-frame)
             (should-not vertico-buffer-frame--preview-window)
+            (should-not vertico-buffer-frame--session)
             (should-not (memq #'vertico-buffer-frame--minibuffer-exit
                               minibuffer-exit-hook))
             (should-not (memq buffer vertico-buffer-frame--minibuffers))))
@@ -638,36 +733,49 @@
 (ert-deftest vertico-buffer-frame-minibuffer-exit-delays-frame-deletion ()
   (let ((buffer (generate-new-buffer " *vbf-exit-cleanup*"))
         scheduled
-        deleted-owner)
+        deleted-owner
+        hidden)
     (unwind-protect
         (with-current-buffer buffer
           (setq vertico-buffer-frame--minibuffers (list buffer))
           (setq-local vertico-buffer-frame--frame 'frame
-                      vertico-buffer-frame--window 'window)
+                      vertico-buffer-frame--window 'window
+                      vertico-buffer-frame--preview-frame 'preview-frame
+                      vertico-buffer-frame--session 'session)
           (add-hook 'minibuffer-exit-hook
                     #'vertico-buffer-frame--minibuffer-exit nil t)
           (cl-letf (((symbol-function #'run-at-time)
                      (lambda (time repeat function &rest args)
                        (setq scheduled (list time repeat function args))
                        'timer))
+                    ((symbol-function #'frame-live-p)
+                     (lambda (frame)
+                       (memq frame '(frame preview-frame))))
+                    ((symbol-function #'make-frame-invisible)
+                     (lambda (frame &optional force)
+                       (push (list frame force) hidden)))
                     ((symbol-function
                       #'vertico-buffer-frame--delete-frames-owned-by-buffer)
-                     (lambda (owner)
-                       (setq deleted-owner owner))))
+                     (lambda (owner &optional session)
+                       (setq deleted-owner (list owner session)))))
             (vertico-buffer-frame--minibuffer-exit)
             (should-not deleted-owner)
             (should (= (nth 0 scheduled) 0))
             (should-not (nth 1 scheduled))
             (should (eq (nth 2 scheduled)
                         #'vertico-buffer-frame--delete-frames-owned-by-buffer))
-            (should (equal (nth 3 scheduled) (list buffer)))
+            (should (equal (nth 3 scheduled) (list buffer 'session)))
             (should-not vertico-buffer-frame--frame)
             (should-not vertico-buffer-frame--window)
+            (should-not vertico-buffer-frame--preview-frame)
+            (should-not vertico-buffer-frame--session)
+            (should (equal hidden
+                           '((frame t) (preview-frame t))))
             (should-not (memq #'vertico-buffer-frame--minibuffer-exit
                               minibuffer-exit-hook))
             (should-not (memq buffer vertico-buffer-frame--minibuffers))
             (apply (nth 2 scheduled) (nth 3 scheduled))
-            (should (eq deleted-owner buffer))))
+            (should (equal deleted-owner (list buffer 'session)))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
@@ -677,11 +785,11 @@
     (kill-buffer buffer)
     (cl-letf (((symbol-function
                 #'vertico-buffer-frame--delete-frames-owned-by-buffer)
-               (lambda (owner)
-                 (setq deleted-owner owner))))
+               (lambda (owner &optional session)
+                 (setq deleted-owner (list owner session)))))
       (setq vertico-buffer-frame--minibuffers (list buffer))
       (vertico-buffer-frame--cleanup-minibuffer buffer)
-      (should (eq deleted-owner buffer))
+      (should (equal deleted-owner (list buffer nil)))
       (should-not (memq buffer vertico-buffer-frame--minibuffers)))))
 
 (ert-deftest vertico-buffer-frame-mode-disable-deletes-owned-frames ()
