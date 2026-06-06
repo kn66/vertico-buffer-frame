@@ -4,10 +4,10 @@ Child-frame display for Vertico's ~vertico-buffer-mode~.
 
 Vertico and ~vertico-buffer-mode~ render the candidates.  This package only
 changes ~vertico-buffer-display-action~ so the Vertico buffer appears in a
-centered child frame.  The implementation intentionally stays small: one fixed
-candidate frame per minibuffer session, cleanup on minibuffer exit, and fallback
-to the previous Vertico buffer display action when child frames are unavailable
-or fail.
+centered child frame.  The implementation intentionally stays small: one
+golden-ratio-sized candidate frame per minibuffer session, cleanup on
+minibuffer exit, and fallback to the previous Vertico buffer display action when
+child frames are unavailable or fail.
 
 * GIF
 
@@ -49,13 +49,15 @@ alive.
 * Options
 
 - ~vertico-buffer-frame-border-width~
-- ~vertico-buffer-frame-width~
-- ~vertico-buffer-frame-height~
+- ~vertico-buffer-frame-golden-ratio-scale~
 - ~vertico-buffer-frame-candidate-accept-focus~
 - ~vertico-buffer-frame-parameters~
 
-The frame size is fixed in character cells.  Additional frame parameters can be
-added with ~vertico-buffer-frame-parameters~.
+The frame size is derived from the parent frame using the golden ratio and
+rounded to character cells.  With the default scale of 1.0, the candidate frame
+is one golden-ratio step smaller than the largest golden rectangle fitting in
+the parent frame.  Additional frame parameters can be added with
+~vertico-buffer-frame-parameters~.
 
 * Commands
 
@@ -68,7 +70,7 @@ minibuffer sessions.  Cleanup is safe to call repeatedly.
 * Scope
 
 This lightweight version deliberately does not include preview support,
-Consult-specific adapters, per-command local mode, golden-ratio sizing, or
+Consult-specific adapters, per-command local mode, fixed-size display, or
 candidate-width auto-resizing.  Those features made the package more capable,
 but they also made the core display path much larger.
 

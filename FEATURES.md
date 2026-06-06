@@ -15,14 +15,16 @@ code, or `README.org`.
   Vertico state when `vertico-buffer-frame-mode` is disabled.
 - Support recursive minibuffer sessions without reusing or deleting another
   session's candidate child frame.
-- Provide customization only for frame size, border width, focus acceptance, and
-  extra frame parameters.
-- Keep the core display path small: one fixed candidate frame per minibuffer
-  session, reused while live.
+- Size the candidate frame from the parent frame using the golden ratio, and
+  keep it centered as the parent frame changes size.
+- Provide customization only for golden-ratio scale, border width, focus
+  acceptance, and extra frame parameters.
+- Keep the core display path small: one candidate frame per minibuffer session,
+  reused while live.
 
 ## Non-Goals
 
-- Preview support, Consult-specific adapters, per-command local mode,
-  golden-ratio sizing, and candidate-width auto-resizing.
+- Preview support, Consult-specific adapters, per-command local mode, fixed-size
+  display, and candidate-width auto-resizing.
 - Speculative options, compatibility paths, refactors, or optimizations without
   a listed behavior, clear bug, or measured target.

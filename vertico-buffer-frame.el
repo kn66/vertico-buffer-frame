@@ -31,8 +31,8 @@
 ;; candidate buffer in a centered child frame.
 ;;
 ;; Vertico renders the candidates.  This package only installs a
-;; `vertico-buffer-display-action', creates one fixed-size child frame per
-;; minibuffer session, falls back to the previous display action when child
+;; `vertico-buffer-display-action', creates one golden-ratio-sized child frame
+;; per minibuffer session, falls back to the previous display action when child
 ;; frames are unavailable, and deletes owned child frames when the minibuffer
 ;; exits.
 
@@ -47,13 +47,12 @@
   :group 'vertico
   :prefix "vertico-buffer-frame-")
 
-(defcustom vertico-buffer-frame-width 90
-  "Width of the Vertico child frame in characters."
-  :type 'natnum)
-
-(defcustom vertico-buffer-frame-height 14
-  "Height of the Vertico child frame in characters."
-  :type 'natnum)
+(defcustom vertico-buffer-frame-golden-ratio-scale 1.0
+  "Scale factor applied to the golden-ratio child frame size.
+A value of 1.0 uses a frame one golden-ratio step smaller than the largest
+golden rectangle fitting in the parent frame.  Values at or above the golden
+ratio use the full fitting golden rectangle."
+  :type 'number)
 
 (defcustom vertico-buffer-frame-border-width 1
   "Width of the child frame border in pixels."
@@ -85,6 +84,9 @@ These parameters are appended to the package defaults before calling
   'vertico-buffer-frame-owner-buffer
   "Frame parameter storing the minibuffer buffer that owns a child frame.")
 
+(defconst vertico-buffer-frame--golden-ratio (/ (+ 1.0 (sqrt 5.0)) 2.0)
+  "Golden ratio used for automatic child-frame layout.")
+
 ;;;###autoload
 (defun vertico-buffer-frame-display-action ()
   "Return the display action used by `vertico-buffer-frame-mode'."
@@ -97,36 +99,93 @@ These parameters are appended to the package defaults before calling
          (minibuffer-selected-window))
        (selected-window))))
 
+(defun vertico-buffer-frame--number-or (value fallback)
+  "Return VALUE as a float when it is numeric, otherwise FALLBACK."
+  (float (if (numberp value) value fallback)))
+
+(defun vertico-buffer-frame--positive-pixels (value)
+  "Return VALUE rounded to a positive pixel count."
+  (max 1 (round value)))
+
+(defun vertico-buffer-frame--pixels-to-chars (pixels char-size)
+  "Return PIXELS rounded to a positive character count using CHAR-SIZE."
+  (max 1 (round (/ (float (max 1 pixels))
+                   (max 1 char-size)))))
+
+(defun vertico-buffer-frame--parent-pixel-size (parent)
+  "Return PARENT frame size in pixels."
+  (cons (max 1 (frame-pixel-width parent))
+        (max 1 (frame-pixel-height parent))))
+
+(defun vertico-buffer-frame--golden-pixel-size (parent)
+  "Return golden-ratio child frame size for PARENT in pixels."
+  (let* ((parent-size (vertico-buffer-frame--parent-pixel-size parent))
+         (parent-width (car parent-size))
+         (parent-height (cdr parent-size))
+         (parent-ratio (/ (float parent-width) parent-height))
+         (golden-width (if (> parent-ratio
+                              vertico-buffer-frame--golden-ratio)
+                           (* parent-height
+                              vertico-buffer-frame--golden-ratio)
+                         parent-width))
+         (golden-height (if (> parent-ratio
+                               vertico-buffer-frame--golden-ratio)
+                            parent-height
+                          (/ parent-width
+                             vertico-buffer-frame--golden-ratio)))
+         (scale (min 1.0
+                     (max 0.0
+                          (/ (max 0.0
+                                  (vertico-buffer-frame--number-or
+                                   vertico-buffer-frame-golden-ratio-scale
+                                   1.0))
+                             vertico-buffer-frame--golden-ratio)))))
+    (cons (vertico-buffer-frame--positive-pixels
+           (* golden-width scale))
+          (vertico-buffer-frame--positive-pixels
+           (* golden-height scale)))))
+
+(defun vertico-buffer-frame--candidate-frame-size (parent)
+  "Return child frame size parameters for PARENT in characters."
+  (let ((size (vertico-buffer-frame--golden-pixel-size parent)))
+    (cons (vertico-buffer-frame--pixels-to-chars
+           (car size)
+           (frame-char-width parent))
+          (vertico-buffer-frame--pixels-to-chars
+           (cdr size)
+           (frame-char-height parent)))))
+
 (defun vertico-buffer-frame--base-parameters (parent name)
   "Return child frame parameters for PARENT with frame NAME."
-  (append
-   `((parent-frame . ,parent)
-     (name . ,name)
-     (title . "")
-     (minibuffer . ,(minibuffer-window parent))
-     (width . ,vertico-buffer-frame-width)
-     (height . ,vertico-buffer-frame-height)
-     (visibility . nil)
-     (undecorated . t)
-     (no-accept-focus . ,(not vertico-buffer-frame-candidate-accept-focus))
-     (no-focus-on-map . t)
-     (skip-taskbar . t)
-     (unsplittable . t)
-     (border-width . 0)
-     (child-frame-border-width . ,vertico-buffer-frame-border-width)
-     (internal-border-width . 0)
-     (left-fringe . 0)
-     (right-fringe . 0)
-     (right-divider-width . 0)
-     (bottom-divider-width . 0)
-     (vertical-scroll-bars . nil)
-     (horizontal-scroll-bars . nil)
-     (menu-bar-lines . 0)
-     (tool-bar-lines . 0)
-     (tab-bar-lines . 0)
-     (line-spacing . 0))
-   (and (proper-list-p vertico-buffer-frame-parameters)
-        vertico-buffer-frame-parameters)))
+  (let ((size (vertico-buffer-frame--candidate-frame-size parent)))
+    (append
+     `((parent-frame . ,parent)
+       (name . ,name)
+       (title . "")
+       (minibuffer . ,(minibuffer-window parent))
+       (width . ,(car size))
+       (height . ,(cdr size))
+       (visibility . nil)
+       (undecorated . t)
+       (no-accept-focus . ,(not vertico-buffer-frame-candidate-accept-focus))
+       (no-focus-on-map . t)
+       (skip-taskbar . t)
+       (unsplittable . t)
+       (border-width . 0)
+       (child-frame-border-width . ,vertico-buffer-frame-border-width)
+       (internal-border-width . 0)
+       (left-fringe . 0)
+       (right-fringe . 0)
+       (right-divider-width . 0)
+       (bottom-divider-width . 0)
+       (vertical-scroll-bars . nil)
+       (horizontal-scroll-bars . nil)
+       (menu-bar-lines . 0)
+       (tool-bar-lines . 0)
+       (tab-bar-lines . 0)
+       (line-spacing . 0))
+     (and (proper-list-p vertico-buffer-frame-parameters)
+          vertico-buffer-frame-parameters))))
 
 (defun vertico-buffer-frame--prepare-window (window)
   "Remove chrome and spacing from child frame WINDOW."
@@ -203,11 +262,14 @@ These parameters are appended to the package defaults before calling
   "Resize, center, and show the current child frame."
   (when (and (frame-live-p vertico-buffer-frame--frame)
              (frame-live-p vertico-buffer-frame--parent))
-    (let ((width vertico-buffer-frame-width)
-          (height vertico-buffer-frame-height)
-          (window-min-height 1)
-          (window-min-width 1)
-          (inhibit-redisplay t))
+    (let* ((size
+            (vertico-buffer-frame--candidate-frame-size
+             vertico-buffer-frame--parent))
+           (width (car size))
+           (height (cdr size))
+           (window-min-height 1)
+           (window-min-width 1)
+           (inhibit-redisplay t))
       (unless (and (= (frame-width vertico-buffer-frame--frame) width)
                    (= (frame-height vertico-buffer-frame--frame) height))
         (set-frame-size vertico-buffer-frame--frame width height))
