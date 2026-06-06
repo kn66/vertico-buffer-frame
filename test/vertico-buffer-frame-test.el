@@ -46,8 +46,6 @@
   `(let ((old-frame-mode vertico-buffer-frame-mode)
          (old-buffer-mode (bound-and-true-p vertico-buffer-mode))
          (old-action vertico-buffer-display-action)
-         (old-saved-action vertico-buffer-frame--saved-display-action)
-         (old-saved-buffer-mode vertico-buffer-frame--saved-buffer-mode)
          (old-saved-state vertico-buffer-frame--saved-state)
          (old-minibuffers vertico-buffer-frame--minibuffers)
          (old-minibuffer-setup-hook minibuffer-setup-hook))
@@ -55,17 +53,13 @@
          (progn
            (when vertico-buffer-frame-mode
              (vertico-buffer-frame-mode -1))
-           (setq vertico-buffer-frame--saved-display-action nil
-                 vertico-buffer-frame--saved-buffer-mode nil
-                 vertico-buffer-frame--saved-state nil
+           (setq vertico-buffer-frame--saved-state nil
                  vertico-buffer-frame--minibuffers nil)
            ,@body)
        (when vertico-buffer-frame-mode
          (vertico-buffer-frame-mode -1))
        (vertico-buffer-frame-cleanup)
        (setq vertico-buffer-display-action old-action
-             vertico-buffer-frame--saved-display-action old-saved-action
-             vertico-buffer-frame--saved-buffer-mode old-saved-buffer-mode
              vertico-buffer-frame--saved-state old-saved-state
              vertico-buffer-frame--minibuffers old-minibuffers
              minibuffer-setup-hook old-minibuffer-setup-hook)
@@ -126,6 +120,7 @@
       (should (equal (alist-get 'height parameters) 11))
       (should (equal (alist-get 'child-frame-border-width parameters) 2))
       (should (eq (alist-get 'no-accept-focus parameters) t))
+      (should-not (assq 'minibuffer-exit parameters))
       (should (equal (alist-get 'alpha parameters) 95)))))
 
 (ert-deftest vertico-buffer-frame-base-parameters-honor-focus-option ()
@@ -134,6 +129,20 @@
      (alist-get 'no-accept-focus
                 (vertico-buffer-frame--base-parameters
                  (selected-frame) "Vertico test")))))
+
+(ert-deftest vertico-buffer-frame-owner-disables-minibuffer-exit-parameter ()
+  (let (parameters)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (_frame) t))
+              ((symbol-function #'modify-frame-parameters)
+               (lambda (_frame params)
+                 (setq parameters params))))
+      (vertico-buffer-frame--set-frame-owner-buffer 'frame 'owner)
+      (should (eq (alist-get vertico-buffer-frame--owner-buffer-parameter
+                             parameters)
+                  'owner))
+      (should-not (alist-get 'minibuffer-exit parameters))
+      (should (eq (alist-get 'share-child-frame parameters) 'owner)))))
 
 (ert-deftest vertico-buffer-frame-minibuffer-setup-installs-hooks ()
   (vertico-buffer-frame-test--with-clean-state
@@ -160,9 +169,9 @@
                     (lambda (buffer action)
                       (setq displayed (list buffer action))
                       'fallback-window)))
-           (setq vertico-buffer-frame--saved-state t
-                 vertico-buffer-frame--saved-display-action
-                 '(display-buffer-at-bottom))
+           (setq vertico-buffer-frame--saved-state
+                 '(:display-action (display-buffer-at-bottom)
+                   :buffer-mode nil))
            (should (eq (vertico-buffer-frame--display-buffer
                         buffer '((reusable-frames . visible)))
                        'fallback-window))
@@ -201,9 +210,52 @@
                (should (eq owner-recorded owner))
                (should synced)
                (should (assq 'child-frame-parameters captured-action))
+               (should (eq (alist-get
+                            'share-child-frame
+                            (alist-get 'child-frame-parameters
+                                       captured-action))
+                           owner))
                (should (memq owner vertico-buffer-frame--minibuffers)))))
        (when (buffer-live-p buffer)
          (kill-buffer buffer))))))
+
+(ert-deftest vertico-buffer-frame-recursive-minibuffers-use-distinct-frames ()
+  (vertico-buffer-frame-test--with-clean-state
+   (let ((outer-owner (generate-new-buffer " *vbf-outer-owner*"))
+         (inner-owner (generate-new-buffer " *vbf-inner-owner*"))
+         (candidate (generate-new-buffer " *vbf-recursive-candidate*"))
+         (parent (selected-frame))
+         actions
+         owners)
+     (unwind-protect
+         (cl-letf (((symbol-function #'display-buffer-in-child-frame)
+                    (lambda (_buffer action)
+                      (push action actions)
+                      (selected-window)))
+                   ((symbol-function
+                     #'vertico-buffer-frame--set-frame-owner-buffer)
+                    (lambda (_frame owner)
+                      (push owner owners))))
+           (dolist (owner (list outer-owner inner-owner))
+             (with-current-buffer owner
+               (vertico-buffer-frame--display-buffer-in-child-frame
+                candidate parent "Vertico recursive" nil)))
+           (setq actions (nreverse actions)
+                 owners (nreverse owners))
+           (should (equal owners (list outer-owner inner-owner)))
+           (should (eq (alist-get
+                        'share-child-frame
+                        (alist-get 'child-frame-parameters
+                                   (nth 0 actions)))
+                       outer-owner))
+           (should (eq (alist-get
+                        'share-child-frame
+                        (alist-get 'child-frame-parameters
+                                   (nth 1 actions)))
+                       inner-owner)))
+       (dolist (buffer (list outer-owner inner-owner candidate))
+         (when (buffer-live-p buffer)
+           (kill-buffer buffer)))))))
 
 (ert-deftest vertico-buffer-frame-display-buffer-falls-back-on-error ()
   (vertico-buffer-frame-test--with-clean-state
@@ -219,9 +271,9 @@
                     (lambda (buffer action)
                       (setq displayed (list buffer action))
                       'fallback-window)))
-           (setq vertico-buffer-frame--saved-state t
-                 vertico-buffer-frame--saved-display-action
-                 '(display-buffer-pop-up-window))
+           (setq vertico-buffer-frame--saved-state
+                 '(:display-action (display-buffer-pop-up-window)
+                   :buffer-mode nil))
            (should (eq (vertico-buffer-frame--display-buffer buffer nil)
                        'fallback-window))
            (should (equal displayed
@@ -230,31 +282,28 @@
        (when (buffer-live-p buffer)
          (kill-buffer buffer))))))
 
-(ert-deftest vertico-buffer-frame-cleanup-minibuffer-deletes-frame ()
+(ert-deftest vertico-buffer-frame-cleanup-minibuffer-deletes-owned-frames ()
   (let ((buffer (generate-new-buffer " *vbf-cleanup*"))
-        deleted
         deleted-owner)
     (unwind-protect
         (with-current-buffer buffer
           (setq-local vertico-buffer-frame--frame 'frame
                       vertico-buffer-frame--window 'window
-                      vertico-buffer-frame--parent 'parent
-                      vertico-buffer-frame--cleanup-installed t)
+                      vertico-buffer-frame--parent 'parent)
+          (add-hook 'minibuffer-exit-hook
+                    #'vertico-buffer-frame--minibuffer-exit nil t)
           (setq vertico-buffer-frame--minibuffers (list buffer))
-          (cl-letf (((symbol-function #'vertico-buffer-frame--delete-frame)
-                     (lambda (frame)
-                       (setq deleted frame)))
-                    ((symbol-function
+          (cl-letf (((symbol-function
                       #'vertico-buffer-frame--delete-frames-owned-by-buffer)
                      (lambda (owner)
                        (setq deleted-owner owner))))
             (vertico-buffer-frame--cleanup-minibuffer buffer)
-            (should (eq deleted 'frame))
             (should (eq deleted-owner buffer))
             (should-not vertico-buffer-frame--frame)
             (should-not vertico-buffer-frame--window)
             (should-not vertico-buffer-frame--parent)
-            (should-not vertico-buffer-frame--cleanup-installed)
+            (should-not (memq #'vertico-buffer-frame--minibuffer-exit
+                              minibuffer-exit-hook))
             (should-not (memq buffer vertico-buffer-frame--minibuffers))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))

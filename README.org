@@ -42,6 +42,10 @@ When child frames are unavailable or display fails, the package falls back to
 the ~vertico-buffer-display-action~ that was active before
 ~vertico-buffer-frame-mode~ was enabled.
 
+Recursive minibuffers get separate owned candidate frames.  Exiting a nested
+minibuffer deletes only that nested frame and leaves the outer minibuffer frame
+alive.
+
 * Options
 
 - ~vertico-buffer-frame-border-width~

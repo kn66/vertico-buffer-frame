@@ -72,16 +72,14 @@ These parameters are appended to the package defaults before calling
 `display-buffer-in-child-frame'."
   :type '(alist :key-type symbol :value-type sexp))
 
-(defvar vertico-buffer-frame--saved-display-action nil)
-(defvar vertico-buffer-frame--saved-buffer-mode nil)
-(defvar vertico-buffer-frame--saved-state nil)
+(defvar vertico-buffer-frame--saved-state nil
+  "Plist storing Vertico state saved while frame mode is enabled.")
 (defvar vertico-buffer-frame--minibuffers nil)
 (defvar vertico-buffer-frame-mode)
 
 (defvar-local vertico-buffer-frame--frame nil)
 (defvar-local vertico-buffer-frame--window nil)
 (defvar-local vertico-buffer-frame--parent nil)
-(defvar-local vertico-buffer-frame--cleanup-installed nil)
 
 (defconst vertico-buffer-frame--owner-buffer-parameter
   'vertico-buffer-frame-owner-buffer
@@ -109,16 +107,13 @@ These parameters are appended to the package defaults before calling
      (width . ,vertico-buffer-frame-width)
      (height . ,vertico-buffer-frame-height)
      (visibility . nil)
-     (minibuffer-exit . t)
      (undecorated . t)
      (no-accept-focus . ,(not vertico-buffer-frame-candidate-accept-focus))
      (no-focus-on-map . t)
      (skip-taskbar . t)
      (unsplittable . t)
      (border-width . 0)
-     (child-frame-border-width . ,(if (natnump vertico-buffer-frame-border-width)
-                                      vertico-buffer-frame-border-width
-                                    1))
+     (child-frame-border-width . ,vertico-buffer-frame-border-width)
      (internal-border-width . 0)
      (left-fringe . 0)
      (right-fringe . 0)
@@ -148,7 +143,8 @@ These parameters are appended to the package defaults before calling
     (modify-frame-parameters
      frame
      `((,vertico-buffer-frame--owner-buffer-parameter . ,buffer)
-       (vertico-buffer-frame-owner . t)))))
+       (minibuffer-exit . nil)
+       (share-child-frame . ,buffer)))))
 
 (defun vertico-buffer-frame--delete-frame (frame)
   "Delete FRAME if it is live."
@@ -166,27 +162,23 @@ These parameters are appended to the package defaults before calling
 (defun vertico-buffer-frame--delete-owned-frames ()
   "Delete all child frames owned by `vertico-buffer-frame'."
   (dolist (frame (frame-list))
-    (when (or (frame-parameter frame 'vertico-buffer-frame-owner)
-              (frame-parameter frame vertico-buffer-frame--owner-buffer-parameter))
+    (when (frame-parameter frame vertico-buffer-frame--owner-buffer-parameter)
       (vertico-buffer-frame--delete-frame frame))))
 
 (defun vertico-buffer-frame--clear-frame-state ()
   "Clear buffer-local child-frame state."
   (setq-local vertico-buffer-frame--frame nil
               vertico-buffer-frame--window nil
-              vertico-buffer-frame--parent nil
-              vertico-buffer-frame--cleanup-installed nil))
+              vertico-buffer-frame--parent nil))
 
 (defun vertico-buffer-frame--cleanup-minibuffer (buffer)
   "Clean up child frames owned by minibuffer BUFFER."
-  (if (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (remove-hook 'minibuffer-exit-hook
-                     #'vertico-buffer-frame--minibuffer-exit t)
-        (vertico-buffer-frame--delete-frame vertico-buffer-frame--frame)
-        (vertico-buffer-frame--delete-frames-owned-by-buffer buffer)
-        (vertico-buffer-frame--clear-frame-state))
-    (vertico-buffer-frame--delete-frames-owned-by-buffer buffer))
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (remove-hook 'minibuffer-exit-hook
+                   #'vertico-buffer-frame--minibuffer-exit t)
+      (vertico-buffer-frame--clear-frame-state)))
+  (vertico-buffer-frame--delete-frames-owned-by-buffer buffer)
   (setq vertico-buffer-frame--minibuffers
         (delq buffer vertico-buffer-frame--minibuffers)))
 
@@ -199,11 +191,9 @@ These parameters are appended to the package defaults before calling
 
 (defun vertico-buffer-frame--install-cleanup ()
   "Install cleanup hooks for the current minibuffer buffer."
-  (unless vertico-buffer-frame--cleanup-installed
-    (setq-local vertico-buffer-frame--cleanup-installed t)
-    (cl-pushnew (current-buffer) vertico-buffer-frame--minibuffers)
-    (add-hook 'minibuffer-exit-hook
-              #'vertico-buffer-frame--minibuffer-exit 90 t)))
+  (cl-pushnew (current-buffer) vertico-buffer-frame--minibuffers)
+  (add-hook 'minibuffer-exit-hook
+            #'vertico-buffer-frame--minibuffer-exit 90 t))
 
 (defun vertico-buffer-frame--minibuffer-exit ()
   "Clean up the child frame owned by the current minibuffer."
@@ -253,23 +243,25 @@ ALIST is appended to the display action passed to
   (let ((frame nil)
         (success nil))
     (unwind-protect
-        (let ((window
-               (display-buffer-in-child-frame
-                buffer
+        (let* ((owner (current-buffer))
+               (parameters
                 (append
-                 `((child-frame-parameters
-                    . ,(append
-                        (vertico-buffer-frame--base-parameters parent name)
-                        `((vertico-buffer-frame-role . candidate))))
-                   (inhibit-switch-frame . t))
-                 alist))))
+                 `((share-child-frame . ,owner))
+                 (vertico-buffer-frame--base-parameters parent name)
+                 '((vertico-buffer-frame-role . candidate))))
+               (action
+                (append `((child-frame-parameters . ,parameters)
+                          (inhibit-switch-frame . t))
+                        alist))
+               (window
+                (display-buffer-in-child-frame buffer action)))
           (unless (window-live-p window)
             (error "Child frame display did not return a live window"))
           (setq frame (window-frame window))
           (unless (frame-live-p frame)
             (error "Child frame window did not have a live frame"))
           (vertico-buffer-frame--prepare-window window)
-          (vertico-buffer-frame--set-frame-owner-buffer frame (current-buffer))
+          (vertico-buffer-frame--set-frame-owner-buffer frame owner)
           (setq success t)
           window)
       (unless success
@@ -296,22 +288,25 @@ ALIST is the display action alist passed by `display-buffer'.  PARENT is the
 frame that should own the candidate child frame."
   (let ((window (vertico-buffer-frame--ensure-window buffer parent alist)))
     (vertico-buffer-frame--install-cleanup)
-    (vertico-buffer-frame--set-frame-owner-buffer
-     vertico-buffer-frame--frame (current-buffer))
-    (unless (eq (window-buffer vertico-buffer-frame--window) buffer)
-      (set-window-dedicated-p vertico-buffer-frame--window nil)
-      (set-window-buffer vertico-buffer-frame--window buffer))
+    (unless (eq (window-buffer window) buffer)
+      (set-window-dedicated-p window nil)
+      (set-window-buffer window buffer))
     (vertico-buffer-frame--sync-frame)
     window))
 
+(defun vertico-buffer-frame--fallback-action ()
+  "Return the display action to use when child frames are unavailable."
+  (let ((saved-action
+         (plist-get vertico-buffer-frame--saved-state :display-action)))
+    (if (and vertico-buffer-frame--saved-state
+             (not (equal saved-action
+                         (vertico-buffer-frame-display-action))))
+        saved-action
+      '(display-buffer-use-least-recent-window))))
+
 (defun vertico-buffer-frame--display-buffer-fallback (buffer alist)
   "Display BUFFER with the saved Vertico display action plus ALIST."
-  (let* ((saved-action vertico-buffer-frame--saved-display-action)
-         (action (if (and vertico-buffer-frame--saved-state
-                          (not (equal saved-action
-                                      (vertico-buffer-frame-display-action))))
-                     saved-action
-                   '(display-buffer-use-least-recent-window))))
+  (let ((action (vertico-buffer-frame--fallback-action)))
     (display-buffer
      buffer
      (cond
@@ -339,14 +334,13 @@ ALIST is the display action alist passed by `display-buffer'."
     (condition-case-unless-debug _error
         (with-current-buffer owner
           (let ((parent (vertico-buffer-frame--parent-frame)))
-            (if (not (or (display-graphic-p parent)
-                         (featurep 'tty-child-frames)))
-                (progn
-                  (vertico-buffer-frame--release-display-state-for-fallback
-                   owner)
-                  (vertico-buffer-frame--display-buffer-fallback buffer alist))
-              (vertico-buffer-frame--display-buffer-in-candidate-frame
-               buffer alist parent))))
+            (if (or (display-graphic-p parent)
+                    (featurep 'tty-child-frames))
+                (vertico-buffer-frame--display-buffer-in-candidate-frame
+                 buffer alist parent)
+              (vertico-buffer-frame--release-display-state-for-fallback
+               owner)
+              (vertico-buffer-frame--display-buffer-fallback buffer alist))))
       (error
        (vertico-buffer-frame--release-display-state-for-fallback owner)
        (vertico-buffer-frame--display-buffer-fallback buffer alist)))))
@@ -359,6 +353,31 @@ ALIST is the display action alist passed by `display-buffer'."
                 tab-line-format nil)
     (vertico-buffer-frame--install-cleanup)))
 
+(defun vertico-buffer-frame--save-state ()
+  "Save Vertico state while `vertico-buffer-frame-mode' is enabled."
+  (unless vertico-buffer-frame--saved-state
+    (setq vertico-buffer-frame--saved-state
+          (list :display-action vertico-buffer-display-action
+                :buffer-mode (bound-and-true-p vertico-buffer-mode)))))
+
+(defun vertico-buffer-frame--using-display-action-p ()
+  "Return non-nil when Vertico still uses this package's display action."
+  (equal vertico-buffer-display-action
+         (vertico-buffer-frame-display-action)))
+
+(defun vertico-buffer-frame--restore-state ()
+  "Restore Vertico state saved by `vertico-buffer-frame--save-state'."
+  (when vertico-buffer-frame--saved-state
+    (let* ((saved-state vertico-buffer-frame--saved-state)
+           (saved-action (plist-get saved-state :display-action))
+           (saved-buffer-mode (plist-get saved-state :buffer-mode))
+           (using-frame-action (vertico-buffer-frame--using-display-action-p)))
+      (when using-frame-action
+        (setq vertico-buffer-display-action saved-action))
+      (when (and using-frame-action (not saved-buffer-mode))
+        (vertico-buffer-mode -1)))
+    (setq vertico-buffer-frame--saved-state nil)))
+
 ;;;###autoload
 (define-minor-mode vertico-buffer-frame-mode
   "Display `vertico-buffer-mode' candidates in child frames."
@@ -366,12 +385,7 @@ ALIST is the display action alist passed by `display-buffer'."
   :group 'vertico-buffer-frame
   (if vertico-buffer-frame-mode
       (progn
-        (unless vertico-buffer-frame--saved-state
-          (setq vertico-buffer-frame--saved-display-action
-                vertico-buffer-display-action
-                vertico-buffer-frame--saved-buffer-mode
-                (bound-and-true-p vertico-buffer-mode)
-                vertico-buffer-frame--saved-state t))
+        (vertico-buffer-frame--save-state)
         (setq vertico-buffer-display-action
               (vertico-buffer-frame-display-action))
         (add-hook 'minibuffer-setup-hook
@@ -381,19 +395,7 @@ ALIST is the display action alist passed by `display-buffer'."
                  #'vertico-buffer-frame--setup-minibuffer)
     (vertico-buffer-frame-cleanup)
     (vertico-buffer-frame--delete-owned-frames)
-    (when vertico-buffer-frame--saved-state
-      (let ((using-frame-action
-             (equal vertico-buffer-display-action
-                    (vertico-buffer-frame-display-action))))
-        (when using-frame-action
-          (setq vertico-buffer-display-action
-                vertico-buffer-frame--saved-display-action))
-        (unless (or vertico-buffer-frame--saved-buffer-mode
-                    (not using-frame-action))
-          (vertico-buffer-mode -1)))
-      (setq vertico-buffer-frame--saved-display-action nil
-            vertico-buffer-frame--saved-buffer-mode nil
-            vertico-buffer-frame--saved-state nil))))
+    (vertico-buffer-frame--restore-state)))
 
 (provide 'vertico-buffer-frame)
 ;;; vertico-buffer-frame.el ends here
