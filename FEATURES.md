@@ -23,6 +23,8 @@ code, or `README.org`.
   child frame overlaid on the lower-right of the candidate frame.
 - Mirror Consult's window-local insertion preview overlays, such as
   `consult-yank-from-kill-ring` previews, in the preview child frame.
+- Keep Embark collect/export buffers visible after the minibuffer exits, like
+  they are when Vertico's buffer display is not shown in a child frame.
 - Size the Consult preview frame from the candidate frame using the golden
   ratio.
 - Allow Consult preview mirroring to be toggled globally or for the current

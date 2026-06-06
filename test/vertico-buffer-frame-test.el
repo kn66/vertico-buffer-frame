@@ -582,6 +582,42 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest vertico-buffer-frame-minibuffer-exit-delays-frame-deletion ()
+  (let ((buffer (generate-new-buffer " *vbf-exit-cleanup*"))
+        scheduled
+        deleted-owner)
+    (unwind-protect
+        (with-current-buffer buffer
+          (setq vertico-buffer-frame--minibuffers (list buffer))
+          (setq-local vertico-buffer-frame--frame 'frame
+                      vertico-buffer-frame--window 'window)
+          (add-hook 'minibuffer-exit-hook
+                    #'vertico-buffer-frame--minibuffer-exit nil t)
+          (cl-letf (((symbol-function #'run-at-time)
+                     (lambda (time repeat function &rest args)
+                       (setq scheduled (list time repeat function args))
+                       'timer))
+                    ((symbol-function
+                      #'vertico-buffer-frame--delete-frames-owned-by-buffer)
+                     (lambda (owner)
+                       (setq deleted-owner owner))))
+            (vertico-buffer-frame--minibuffer-exit)
+            (should-not deleted-owner)
+            (should (= (nth 0 scheduled) 0))
+            (should-not (nth 1 scheduled))
+            (should (eq (nth 2 scheduled)
+                        #'vertico-buffer-frame--delete-frames-owned-by-buffer))
+            (should (equal (nth 3 scheduled) (list buffer)))
+            (should-not vertico-buffer-frame--frame)
+            (should-not vertico-buffer-frame--window)
+            (should-not (memq #'vertico-buffer-frame--minibuffer-exit
+                              minibuffer-exit-hook))
+            (should-not (memq buffer vertico-buffer-frame--minibuffers))
+            (apply (nth 2 scheduled) (nth 3 scheduled))
+            (should (eq deleted-owner buffer))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest vertico-buffer-frame-cleanup-dead-minibuffer-deletes-owned-frames ()
   (let ((buffer (generate-new-buffer " *vbf-dead-cleanup*"))
         deleted-owner)

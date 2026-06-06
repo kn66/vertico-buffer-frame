@@ -267,6 +267,15 @@ SHARE is the `share-child-frame' value used for child-frame reuse."
               buffer)
       (vertico-buffer-frame--delete-frame frame))))
 
+(defun vertico-buffer-frame--delete-frames-owned-by-buffer-later (buffer)
+  "Delete child frames owned by minibuffer BUFFER after teardown."
+  ;; `minibuffer-exit-hook' can run before Emacs restores the pre-minibuffer
+  ;; window configuration.  Deleting child frames there may run zero-delay
+  ;; timers, including Embark's deferred collect/export display, too early.
+  (run-at-time 0 nil
+               #'vertico-buffer-frame--delete-frames-owned-by-buffer
+               buffer))
+
 (defun vertico-buffer-frame--delete-owned-frames ()
   "Delete all child frames owned by `vertico-buffer-frame'."
   (dolist (frame (frame-list))
@@ -286,15 +295,18 @@ SHARE is the `share-child-frame' value used for child-frame reuse."
   (mapc #'delete-overlay vertico-buffer-frame--preview-overlays)
   (setq-local vertico-buffer-frame--preview-overlays nil))
 
-(defun vertico-buffer-frame--cleanup-minibuffer (buffer)
-  "Clean up child frames owned by minibuffer BUFFER."
+(defun vertico-buffer-frame--cleanup-minibuffer (buffer &optional delay-delete)
+  "Clean up child frames owned by minibuffer BUFFER.
+When DELAY-DELETE is non-nil, delete owned frames after minibuffer teardown."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (remove-hook 'minibuffer-exit-hook
                    #'vertico-buffer-frame--minibuffer-exit t)
       (vertico-buffer-frame--clear-preview-overlays)
       (vertico-buffer-frame--clear-frame-state)))
-  (vertico-buffer-frame--delete-frames-owned-by-buffer buffer)
+  (if delay-delete
+      (vertico-buffer-frame--delete-frames-owned-by-buffer-later buffer)
+    (vertico-buffer-frame--delete-frames-owned-by-buffer buffer))
   (setq vertico-buffer-frame--minibuffers
         (delq buffer vertico-buffer-frame--minibuffers)))
 
@@ -313,7 +325,7 @@ SHARE is the `share-child-frame' value used for child-frame reuse."
 
 (defun vertico-buffer-frame--minibuffer-exit ()
   "Clean up the child frame owned by the current minibuffer."
-  (vertico-buffer-frame--cleanup-minibuffer (current-buffer)))
+  (vertico-buffer-frame--cleanup-minibuffer (current-buffer) t))
 
 (defun vertico-buffer-frame--sync-frame ()
   "Resize, center, and show the current child frame."

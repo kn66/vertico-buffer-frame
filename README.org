@@ -67,6 +67,10 @@ Recursive minibuffers get separate owned candidate frames.  Exiting a nested
 minibuffer deletes only that nested frame and leaves the outer minibuffer frame
 alive.
 
+Embark collect and export buffers remain visible after the minibuffer exits,
+matching their behavior when Vertico's candidates are not displayed in a child
+frame.
+
 * Options
 
 - ~vertico-buffer-frame-border-width~
