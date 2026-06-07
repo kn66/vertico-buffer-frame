@@ -83,7 +83,9 @@ The frame size is derived from the parent frame using the golden ratio and
 rounded to character cells.  With the default scale of 1.0, the candidate frame
 is one golden-ratio step smaller than the largest golden rectangle fitting in
 the parent frame.  Additional frame parameters can be added with
-~vertico-buffer-frame-parameters~.
+~vertico-buffer-frame-parameters~.  Candidate and Consult preview child frames
+are opaque by default; set ~alpha~ or ~alpha-background~ in
+~vertico-buffer-frame-parameters~ only if you want child-frame transparency.
 
 ~vertico-buffer-frame-consult-preview~ controls whether Consult previews are
 mirrored in the preview child frame.  Consult still performs its normal preview

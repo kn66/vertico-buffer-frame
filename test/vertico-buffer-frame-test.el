@@ -202,7 +202,8 @@
   (let ((vertico-buffer-frame-golden-ratio-scale 1.0)
         (vertico-buffer-frame-border-width 2)
         (vertico-buffer-frame-candidate-accept-focus nil)
-        (vertico-buffer-frame-parameters '((alpha . 95))))
+        (vertico-buffer-frame-parameters '((alpha . 95)
+                                           (alpha-background . 90))))
     (cl-letf (((symbol-function #'frame-pixel-width)
                (lambda (_frame) 1920))
               ((symbol-function #'frame-pixel-height)
@@ -219,7 +220,15 @@
         (should (equal (alist-get 'child-frame-border-width parameters) 2))
         (should (eq (alist-get 'no-accept-focus parameters) t))
         (should-not (assq 'minibuffer-exit parameters))
-        (should (equal (alist-get 'alpha parameters) 95))))))
+        (should (equal (alist-get 'alpha parameters) 95))
+        (should (equal (alist-get 'alpha-background parameters) 90))))))
+
+(ert-deftest vertico-buffer-frame-base-parameters-are-opaque-by-default ()
+  (let ((parameters
+         (vertico-buffer-frame--base-parameters
+          (selected-frame) "Vertico test" '(20 . 10))))
+    (should (equal (alist-get 'alpha parameters) 100))
+    (should (equal (alist-get 'alpha-background parameters) 100))))
 
 (ert-deftest vertico-buffer-frame-base-parameters-honor-focus-option ()
   (let ((vertico-buffer-frame-candidate-accept-focus t))

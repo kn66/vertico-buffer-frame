@@ -76,7 +76,8 @@ overlaid on the lower-right of the Vertico candidate frame."
 (defcustom vertico-buffer-frame-parameters nil
   "Additional child frame parameters.
 These parameters are appended to the package defaults before calling
-`display-buffer-in-child-frame'."
+`display-buffer-in-child-frame'.  When a parameter name is already present in
+the defaults, the value in this option replaces the default value."
   :type '(alist :key-type symbol :value-type sexp))
 
 (defvar vertico-buffer-frame--saved-state nil
@@ -208,37 +209,46 @@ SCALE-VALUE is interpreted like `vertico-buffer-frame-golden-ratio-scale'."
   "Return child frame parameters for PARENT with frame NAME.
 SIZE is a cons of width and height in characters.  ROLE is `candidate' or
 `preview'; nil means `candidate'."
-  (let ((size (or size (vertico-buffer-frame--candidate-frame-size parent))))
+  (let* ((size (or size (vertico-buffer-frame--candidate-frame-size parent)))
+         (extra (and (proper-list-p vertico-buffer-frame-parameters)
+                     vertico-buffer-frame-parameters))
+         (defaults
+          `((parent-frame . ,parent)
+            (name . ,name)
+            (title . "")
+            (minibuffer . ,(minibuffer-window parent))
+            (width . ,(car size))
+            (height . ,(cdr size))
+            (visibility . nil)
+            (alpha . 100)
+            (alpha-background . 100)
+            (undecorated . t)
+            (no-accept-focus
+             . ,(or (eq role 'preview)
+                    (not vertico-buffer-frame-candidate-accept-focus)))
+            (no-focus-on-map . t)
+            (skip-taskbar . t)
+            (unsplittable . t)
+            (border-width . 0)
+            (child-frame-border-width . ,vertico-buffer-frame-border-width)
+            (internal-border-width . 0)
+            (left-fringe . 0)
+            (right-fringe . 0)
+            (right-divider-width . 0)
+            (bottom-divider-width . 0)
+            (vertical-scroll-bars . nil)
+            (horizontal-scroll-bars . nil)
+            (menu-bar-lines . 0)
+            (tool-bar-lines . 0)
+            (tab-bar-lines . 0)
+            (line-spacing . 0))))
     (append
-     `((parent-frame . ,parent)
-       (name . ,name)
-       (title . "")
-       (minibuffer . ,(minibuffer-window parent))
-       (width . ,(car size))
-       (height . ,(cdr size))
-       (visibility . nil)
-       (undecorated . t)
-       (no-accept-focus
-        . ,(or (eq role 'preview)
-               (not vertico-buffer-frame-candidate-accept-focus)))
-       (no-focus-on-map . t)
-       (skip-taskbar . t)
-       (unsplittable . t)
-       (border-width . 0)
-       (child-frame-border-width . ,vertico-buffer-frame-border-width)
-       (internal-border-width . 0)
-       (left-fringe . 0)
-       (right-fringe . 0)
-       (right-divider-width . 0)
-       (bottom-divider-width . 0)
-       (vertical-scroll-bars . nil)
-       (horizontal-scroll-bars . nil)
-       (menu-bar-lines . 0)
-       (tool-bar-lines . 0)
-       (tab-bar-lines . 0)
-       (line-spacing . 0))
-     (and (proper-list-p vertico-buffer-frame-parameters)
-          vertico-buffer-frame-parameters))))
+     (if extra
+         (cl-remove-if (lambda (parameter)
+                         (assq (car-safe parameter) extra))
+                       defaults)
+       defaults)
+     extra)))
 
 (defun vertico-buffer-frame--prepare-window (window)
   "Remove chrome and spacing from child frame WINDOW."

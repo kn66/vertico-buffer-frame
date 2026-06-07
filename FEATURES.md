@@ -19,6 +19,8 @@ code, or `README.org`.
   enable the child-frame display per command or completion category.
 - Size the candidate frame from the parent frame using the golden ratio, and
   keep it centered as the parent frame changes size.
+- Keep candidate and Consult preview child frames opaque by default, even when
+  ordinary frames are configured as transparent.
 - When Consult is loaded, mirror Consult's active window preview in a preview
   child frame overlaid on the lower-right of the candidate frame.
 - Mirror Consult's window-local insertion preview overlays, such as
