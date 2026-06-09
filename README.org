@@ -77,6 +77,7 @@ frame.
 - ~vertico-buffer-frame-golden-ratio-scale~
 - ~vertico-buffer-frame-candidate-accept-focus~
 - ~vertico-buffer-frame-consult-preview~
+- ~vertico-buffer-frame-auto-width~
 - ~vertico-buffer-frame-parameters~
 
 The frame size is derived from the parent frame using the golden ratio and
@@ -92,6 +93,22 @@ mirrored in the preview child frame.  Consult still performs its normal preview
 logic in the original window; this package mirrors the resulting buffer and
 window position into the child frame.  Window-local insertion preview overlays
 are mirrored as part of that preview.
+
+~vertico-buffer-frame-auto-width~ controls whether the candidate frame grows to
+fit the widest visible candidate.  By default the frame keeps its golden-ratio
+width and long candidate lines are clipped at the frame edge.  When non-nil, the
+frame width grows to fit the widest visible candidate and stays centered.  The
+width is capped below the parent frame width so a margin always remains (it
+never fills the parent edge to edge), and it never shrinks below the
+golden-ratio width:
+
+#+begin_src elisp
+  (setq vertico-buffer-frame-auto-width t)
+#+end_src
+
+Prompt and input line wrapping is left to ~vertico-buffer-mode~, which wraps
+that line while the cursor is past the frame width, exactly as it does when the
+Vertico buffer is not shown in a child frame.
 
 * Commands
 
@@ -114,10 +131,9 @@ session.  Outside the minibuffer, it changes the global default.
 * Scope
 
 This lightweight version deliberately does not include fixed-size display,
-candidate-width auto-resizing, built-in candidate preview resolvers, or
-per-command Consult preview adapters.  Consult preview support mirrors
-Consult's existing window preview instead of resolving every Consult command's
-candidates separately.
+built-in candidate preview resolvers, or per-command Consult preview adapters.
+Consult preview support mirrors Consult's existing window preview instead of
+resolving every Consult command's candidates separately.
 
 * Development
 

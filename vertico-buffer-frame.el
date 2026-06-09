@@ -73,6 +73,13 @@ the resulting buffer, point, and window start in a non-focusable child frame
 overlaid on the lower-right of the Vertico candidate frame."
   :type 'boolean)
 
+(defcustom vertico-buffer-frame-auto-width nil
+  "Non-nil means grow the candidate frame to fit the widest visible candidate.
+The width grows up to the parent frame width and never shrinks below the
+golden-ratio width.  Prompt and input wrapping is left to `vertico-buffer-mode',
+which wraps that line while the cursor is past the frame width."
+  :type 'boolean)
+
 (defcustom vertico-buffer-frame-parameters nil
   "Additional child frame parameters.
 These parameters are appended to the package defaults before calling
@@ -95,6 +102,10 @@ the defaults, the value in this option replaces the default value."
 (defvar-local vertico-buffer-frame--preview-overlays nil)
 (defvar-local vertico-buffer-frame--local-saved-state nil)
 (defvar-local vertico-buffer-frame--session nil)
+(defvar-local vertico-buffer-frame--auto-width-floor nil
+  "Widest auto-width applied to the candidate frame this session.
+With `vertico-buffer-frame-auto-width', the frame grows to fit candidates but
+never shrinks below this floor until the frame is recreated.")
 
 (defconst vertico-buffer-frame--owner-buffer-parameter
   'vertico-buffer-frame-owner-buffer
@@ -106,6 +117,11 @@ the defaults, the value in this option replaces the default value."
 
 (defconst vertico-buffer-frame--golden-ratio (/ (+ 1.0 (sqrt 5.0)) 2.0)
   "Golden ratio used for automatic child-frame layout.")
+
+(defconst vertico-buffer-frame--auto-width-max-ratio 0.9
+  "Maximum auto-width candidate frame width as a fraction of the parent frame.
+Auto-width never grows past this fraction, so the frame stays smaller than the
+parent frame and keeps a centered margin instead of filling it edge to edge.")
 
 (defconst vertico-buffer-frame--mirrored-overlay-properties
   '(before-string after-string display invisible face category priority)
@@ -192,18 +208,114 @@ SCALE-VALUE is interpreted like `vertico-buffer-frame-golden-ratio-scale'."
            (cdr size)
            (frame-char-height parent)))))
 
+(defun vertico-buffer-frame--visible-candidates ()
+  "Return the currently visible Vertico candidates as a list of strings."
+  (when (and (boundp 'vertico--candidates)
+             (listp vertico--candidates)
+             vertico--candidates)
+    (let* ((scroll (if (boundp 'vertico--scroll) (or vertico--scroll 0) 0))
+           (count (if (boundp 'vertico-count) (or vertico-count 10) 10))
+           (total (length vertico--candidates))
+           (start (max 0 (min scroll total)))
+           (end (min total (+ start (max 1 count)))))
+      (when (< start end)
+        (cl-subseq vertico--candidates start end)))))
+
+(defun vertico-buffer-frame--content-pixel-width ()
+  "Return the widest pixel width of visible Vertico candidate lines, or nil.
+Both the rendered candidate overlay and the raw visible candidates are measured
+because `vertico-buffer-mode' clips the rendered lines to the current frame
+width, hiding the natural width that drives auto-width growth."
+  (let (widths)
+    (when (and (boundp 'vertico--candidates-ov)
+               (overlayp vertico--candidates-ov))
+      (let ((rendered (overlay-get vertico--candidates-ov 'before-string)))
+        (when (and (stringp rendered) (> (length rendered) 0))
+          (push (string-pixel-width rendered) widths))))
+    (let* ((visible (vertico-buffer-frame--visible-candidates))
+           (text (and visible
+                      (mapconcat (lambda (candidate)
+                                   (if (stringp candidate) candidate ""))
+                                 visible "\n"))))
+      (when (and text (> (length text) 0))
+        (push (string-pixel-width text) widths)))
+    (and widths (apply #'max widths))))
+
+(defun vertico-buffer-frame--candidate-target-width (parent golden-width)
+  "Return the candidate frame width in characters for PARENT.
+GOLDEN-WIDTH is the golden-ratio width in characters.  When
+`vertico-buffer-frame-auto-width' is non-nil, grow the width to fit the widest
+visible candidate, capped below the PARENT frame width so a centered margin
+remains, and never below GOLDEN-WIDTH."
+  (if (not vertico-buffer-frame-auto-width)
+      golden-width
+    (let ((pixels (vertico-buffer-frame--content-pixel-width)))
+      (if (not pixels)
+          golden-width
+        (let* ((char-width (frame-char-width parent))
+               ;; Margin covers the column reserve `vertico-buffer-mode' keeps
+               ;; for truncation plus pixel-to-character rounding slack.
+               (content-width
+                (+ 6 (vertico-buffer-frame--pixels-to-chars pixels char-width)))
+               (parent-width
+                (vertico-buffer-frame--pixels-to-chars
+                 (frame-pixel-width parent) char-width))
+               ;; Stay below the parent width so the frame keeps a margin and
+               ;; can be centered instead of filling the parent edge to edge.
+               (max-width
+                (max golden-width
+                     (floor (* parent-width
+                               vertico-buffer-frame--auto-width-max-ratio)))))
+          (max golden-width (min content-width max-width)))))))
+
+(defun vertico-buffer-frame--effective-target-width (parent golden-width)
+  "Return the candidate frame width for PARENT, ratcheted when auto-width is on.
+GOLDEN-WIDTH is the golden-ratio width in characters.  With
+`vertico-buffer-frame-auto-width', the width never drops below the widest value
+already applied this session, so the frame grows to fit candidates but does not
+shrink back; the floor resets when the frame is recreated."
+  (let ((target (vertico-buffer-frame--candidate-target-width
+                 parent golden-width)))
+    (if (not vertico-buffer-frame-auto-width)
+        target
+      (setq-local vertico-buffer-frame--auto-width-floor
+                  (max (or vertico-buffer-frame--auto-width-floor 0)
+                       target)))))
+
+(defun vertico-buffer-frame--frame-pixel-size-from-chars (frame)
+  "Return FRAME's pixel size derived from its character dimensions.
+This tracks a fresh `set-frame-size' immediately, unlike `frame-pixel-width',
+which can return a stale value until the next redisplay."
+  (cons (* (frame-width frame) (frame-char-width frame))
+        (* (frame-height frame) (frame-char-height frame))))
+
 (defun vertico-buffer-frame--preview-frame-size (parent candidate-frame)
-  "Return Consult preview child frame size for PARENT and CANDIDATE-FRAME."
-  (let ((size (vertico-buffer-frame--golden-pixel-size-from-size
-               (frame-pixel-width candidate-frame)
-               (frame-pixel-height candidate-frame)
-               1.0)))
+  "Return Consult preview child frame size for PARENT and CANDIDATE-FRAME.
+The preview is CANDIDATE-FRAME scaled down by the inverse golden ratio in both
+dimensions.  Scaling both dimensions keeps the candidate's aspect ratio and
+makes the preview width track the candidate width, so the preview resizes with
+auto-width instead of staying fixed at a height-bound golden rectangle."
+  (let* ((candidate-pixels
+          (vertico-buffer-frame--frame-pixel-size-from-chars candidate-frame))
+         (scale (/ 1.0 vertico-buffer-frame--golden-ratio)))
     (cons (vertico-buffer-frame--pixels-to-chars
-           (car size)
+           (* (car candidate-pixels) scale)
            (frame-char-width parent))
           (vertico-buffer-frame--pixels-to-chars
-           (cdr size)
+           (* (cdr candidate-pixels) scale)
            (frame-char-height parent)))))
+
+(defun vertico-buffer-frame--apply-border (frame)
+  "Draw a simple visible border around child FRAME.
+Themes often leave the `child-frame-border' face unspecified, which blends the
+border into the background and hides it.  Setting the per-frame border faces to
+FRAME's `default' foreground draws a plain line that follows the active theme
+without affecting any other frame."
+  (when-let* (((frame-live-p frame))
+              (color (face-foreground 'default frame t)))
+    (dolist (face '(child-frame-border internal-border))
+      (when (facep face)
+        (set-face-background face color frame)))))
 
 (defun vertico-buffer-frame--base-parameters (parent name &optional size role)
   "Return child frame parameters for PARENT with frame NAME.
@@ -258,6 +370,29 @@ SIZE is a cons of width and height in characters.  ROLE is `candidate' or
   (set-window-margins window 0 0)
   (set-window-fringes window 0 0 nil)
   (set-window-scroll-bars window nil nil nil nil))
+
+(defun vertico-buffer-frame--auto-width-redisplay (_window)
+  "Resize the candidate child frame to fit the visible candidates.
+`vertico-buffer-mode' updates candidates through overlays without re-running
+the display action, so this runs from `pre-redisplay-functions' to keep the
+auto-width frame sized to its content.  The frame is only synced when the
+target width changes, so a settled frame triggers no further resizing."
+  (when (and vertico-buffer-frame-auto-width
+             (vertico-buffer-frame--enabled-p)
+             (frame-live-p vertico-buffer-frame--frame)
+             (frame-live-p vertico-buffer-frame--parent))
+    (let* ((golden (car (vertico-buffer-frame--candidate-frame-size
+                         vertico-buffer-frame--parent)))
+           (target (vertico-buffer-frame--effective-target-width
+                    vertico-buffer-frame--parent golden)))
+      (unless (= (frame-width vertico-buffer-frame--frame) target)
+        (vertico-buffer-frame--sync-frame)
+        ;; Resizing the candidate frame restacks it above the Consult preview
+        ;; frame, so re-sync the visible preview to follow the new geometry and
+        ;; return it to the front.
+        (when (and (frame-live-p vertico-buffer-frame--preview-frame)
+                   (eq (frame-visible-p vertico-buffer-frame--preview-frame) t))
+          (vertico-buffer-frame--sync-preview-frame))))))
 
 (defun vertico-buffer-frame--start-session ()
   "Start a new child-frame ownership session."
@@ -370,7 +505,8 @@ When SESSION is non-nil, only delete frames owned by that minibuffer session."
               vertico-buffer-frame--window nil
               vertico-buffer-frame--parent nil
               vertico-buffer-frame--preview-frame nil
-              vertico-buffer-frame--preview-window nil))
+              vertico-buffer-frame--preview-window nil
+              vertico-buffer-frame--auto-width-floor nil))
 
 (defun vertico-buffer-frame--clear-preview-overlays ()
   "Delete Consult preview overlays owned by the current minibuffer."
@@ -421,27 +557,28 @@ When DELAY-DELETE is non-nil, delete owned frames after minibuffer teardown."
   "Resize, center, and show the current child frame."
   (when (and (frame-live-p vertico-buffer-frame--frame)
              (frame-live-p vertico-buffer-frame--parent))
-    (let* ((size
-            (vertico-buffer-frame--candidate-frame-size
-             vertico-buffer-frame--parent))
-           (width (car size))
+    (let* ((parent vertico-buffer-frame--parent)
+           (frame vertico-buffer-frame--frame)
+           (size (vertico-buffer-frame--candidate-frame-size parent))
+           (width (vertico-buffer-frame--effective-target-width
+                   parent (car size)))
            (height (cdr size))
+           ;; Derive the pixel size from the characters being set so centering
+           ;; does not read a stale `frame-pixel-width' right after a resize.
+           (target-pixel-width (* width (frame-char-width parent)))
+           (target-pixel-height (* height (frame-char-height parent)))
            (window-min-height 1)
            (window-min-width 1)
            (inhibit-redisplay t))
-      (unless (and (= (frame-width vertico-buffer-frame--frame) width)
-                   (= (frame-height vertico-buffer-frame--frame) height))
-        (set-frame-size vertico-buffer-frame--frame width height))
+      (unless (and (= (frame-width frame) width)
+                   (= (frame-height frame) height))
+        (set-frame-size frame width height))
       (set-frame-position
-       vertico-buffer-frame--frame
-       (max 0 (/ (- (frame-pixel-width vertico-buffer-frame--parent)
-                    (frame-pixel-width vertico-buffer-frame--frame))
-                 2))
-       (max 0 (/ (- (frame-pixel-height vertico-buffer-frame--parent)
-                    (frame-pixel-height vertico-buffer-frame--frame))
-                 2)))
-      (unless (eq (frame-visible-p vertico-buffer-frame--frame) t)
-        (make-frame-visible vertico-buffer-frame--frame)))))
+       frame
+       (max 0 (/ (- (frame-pixel-width parent) target-pixel-width) 2))
+       (max 0 (/ (- (frame-pixel-height parent) target-pixel-height) 2)))
+      (unless (eq (frame-visible-p frame) t)
+        (make-frame-visible frame)))))
 
 (defun vertico-buffer-frame--candidate-frame-current-p (parent)
   "Return non-nil when the current child frame can be reused under PARENT."
@@ -488,6 +625,7 @@ ALIST is appended to the display action passed to
           (setq frame (window-frame window))
           (unless (frame-live-p frame)
             (error "Child frame window did not have a live frame"))
+          (vertico-buffer-frame--apply-border frame)
           (vertico-buffer-frame--prepare-window window)
           (if (eq role 'candidate)
               (vertico-buffer-frame--set-frame-owner-buffer frame owner)
@@ -586,18 +724,22 @@ frame that should own the candidate child frame."
               vertico-buffer-frame--preview-window nil))
 
 (defun vertico-buffer-frame--preview-frame-position ()
-  "Return lower-right overlay position for the current Consult preview frame."
-  (let ((candidate-position (frame-position vertico-buffer-frame--frame)))
+  "Return lower-right overlay position for the current Consult preview frame.
+Pixel sizes are derived from character dimensions so the position follows a
+fresh resize of either frame instead of a stale `frame-pixel-width'."
+  (let ((candidate-position (frame-position vertico-buffer-frame--frame))
+        (candidate-pixels
+         (vertico-buffer-frame--frame-pixel-size-from-chars
+          vertico-buffer-frame--frame))
+        (preview-pixels
+         (vertico-buffer-frame--frame-pixel-size-from-chars
+          vertico-buffer-frame--preview-frame)))
     (cons (+ (vertico-buffer-frame--number-position
               (car candidate-position))
-             (max 0 (- (frame-pixel-width vertico-buffer-frame--frame)
-                       (frame-pixel-width
-                        vertico-buffer-frame--preview-frame))))
+             (max 0 (- (car candidate-pixels) (car preview-pixels))))
           (+ (vertico-buffer-frame--number-position
               (cdr candidate-position))
-             (max 0 (- (frame-pixel-height vertico-buffer-frame--frame)
-                       (frame-pixel-height
-                        vertico-buffer-frame--preview-frame)))))))
+             (max 0 (- (cdr candidate-pixels) (cdr preview-pixels)))))))
 
 (defun vertico-buffer-frame--sync-preview-frame ()
   "Resize, place, and show the current Consult preview frame."
@@ -623,7 +765,11 @@ frame that should own the candidate child frame."
          (max 0 (car position))
          (max 0 (cdr position))))
       (unless (eq (frame-visible-p vertico-buffer-frame--preview-frame) t)
-        (make-frame-visible vertico-buffer-frame--preview-frame)))))
+        (make-frame-visible vertico-buffer-frame--preview-frame))
+      ;; Keep the preview stacked above the candidate frame, which is restacked
+      ;; to the front whenever it is resized (for example by auto-width).
+      (ignore-errors
+        (raise-frame vertico-buffer-frame--preview-frame)))))
 
 (defun vertico-buffer-frame--ensure-preview-window (buffer parent)
   "Return a live Consult preview child-frame window for BUFFER under PARENT."
@@ -740,7 +886,7 @@ frame that should own the candidate child frame."
 (defun vertico-buffer-frame-consult-preview-mirror-window (source-window)
   "Mirror Consult preview SOURCE-WINDOW in a lower-right child frame."
   (when-let* (((and (vertico-buffer-frame--enabled-p)
-                   vertico-buffer-frame-consult-preview))
+                    vertico-buffer-frame-consult-preview))
               ((window-live-p source-window))
               (minibuffer-window (active-minibuffer-window))
               ((window-live-p minibuffer-window))
@@ -792,6 +938,10 @@ ALIST is the display action alist passed by `display-buffer'."
   (setq-local mode-line-format nil
               header-line-format nil
               tab-line-format nil)
+  ;; Depth 90 runs after `vertico-buffer--redisplay' (added at the default
+  ;; depth), so it resizes the frame once the candidate overlay is up to date.
+  (add-hook 'pre-redisplay-functions
+            #'vertico-buffer-frame--auto-width-redisplay 90 t)
   (vertico-buffer-frame--start-session)
   (vertico-buffer-frame--install-cleanup))
 

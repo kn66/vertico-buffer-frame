@@ -183,20 +183,139 @@
       (should (equal (vertico-buffer-frame--candidate-frame-size 'parent)
                      '(108 . 33))))))
 
+(ert-deftest vertico-buffer-frame-target-width-disabled-keeps-golden ()
+  (let ((vertico-buffer-frame-auto-width nil))
+    (cl-letf (((symbol-function #'vertico-buffer-frame--content-pixel-width)
+               (lambda () 2000)))
+      (should (= (vertico-buffer-frame--candidate-target-width 'parent 80)
+                 80)))))
+
+(ert-deftest vertico-buffer-frame-target-width-grows-to-content ()
+  (let ((vertico-buffer-frame-auto-width t))
+    (cl-letf (((symbol-function #'vertico-buffer-frame--content-pixel-width)
+               (lambda () 900))
+              ((symbol-function #'frame-char-width)
+               (lambda (_frame) 10))
+              ((symbol-function #'frame-pixel-width)
+               (lambda (_frame) 1920)))
+      ;; 900px / 10px = 90 columns, plus the 6-column margin.
+      (should (= (vertico-buffer-frame--candidate-target-width 'parent 80)
+                 96)))))
+
+(ert-deftest vertico-buffer-frame-target-width-never-below-golden ()
+  (let ((vertico-buffer-frame-auto-width t))
+    (cl-letf (((symbol-function #'vertico-buffer-frame--content-pixel-width)
+               (lambda () 200))
+              ((symbol-function #'frame-char-width)
+               (lambda (_frame) 10))
+              ((symbol-function #'frame-pixel-width)
+               (lambda (_frame) 1920)))
+      (should (= (vertico-buffer-frame--candidate-target-width 'parent 80)
+                 80)))))
+
+(ert-deftest vertico-buffer-frame-target-width-caps-below-parent-with-margin ()
+  (let ((vertico-buffer-frame-auto-width t))
+    (cl-letf (((symbol-function #'vertico-buffer-frame--content-pixel-width)
+               (lambda () 5000))
+              ((symbol-function #'frame-char-width)
+               (lambda (_frame) 10))
+              ((symbol-function #'frame-pixel-width)
+               (lambda (_frame) 1920)))
+      ;; Parent is 1920px / 10px = 192 columns; the cap keeps a centered margin
+      ;; at `vertico-buffer-frame--auto-width-max-ratio' (0.9), so 172 columns.
+      (should (= (vertico-buffer-frame--candidate-target-width 'parent 80)
+                 172)))))
+
+(ert-deftest vertico-buffer-frame-target-width-without-content-keeps-golden ()
+  (let ((vertico-buffer-frame-auto-width t))
+    (cl-letf (((symbol-function #'vertico-buffer-frame--content-pixel-width)
+               (lambda () nil)))
+      (should (= (vertico-buffer-frame--candidate-target-width 'parent 80)
+                 80)))))
+
+(ert-deftest vertico-buffer-frame-effective-width-grows-but-never-shrinks ()
+  (with-temp-buffer
+    (let ((vertico-buffer-frame-auto-width t))
+      (setq-local vertico-buffer-frame--auto-width-floor nil)
+      (cl-letf (((symbol-function
+                  #'vertico-buffer-frame--candidate-target-width)
+                 (lambda (_parent _golden) 80)))
+        ;; First grows to the content width.
+        (should (= (vertico-buffer-frame--effective-target-width 'parent 40)
+                   80)))
+      (cl-letf (((symbol-function
+                  #'vertico-buffer-frame--candidate-target-width)
+                 (lambda (_parent _golden) 50)))
+        ;; Shorter candidates do not shrink the frame below the floor.
+        (should (= (vertico-buffer-frame--effective-target-width 'parent 40)
+                   80)))
+      (cl-letf (((symbol-function
+                  #'vertico-buffer-frame--candidate-target-width)
+                 (lambda (_parent _golden) 100)))
+        ;; A wider candidate still grows the frame further.
+        (should (= (vertico-buffer-frame--effective-target-width 'parent 40)
+                   100))))))
+
+(ert-deftest vertico-buffer-frame-effective-width-disabled-ignores-floor ()
+  (with-temp-buffer
+    (let ((vertico-buffer-frame-auto-width nil))
+      (setq-local vertico-buffer-frame--auto-width-floor 80)
+      (cl-letf (((symbol-function
+                  #'vertico-buffer-frame--candidate-target-width)
+                 (lambda (_parent golden) golden)))
+        (should (= (vertico-buffer-frame--effective-target-width 'parent 40)
+                   40))))))
+
+(ert-deftest vertico-buffer-frame-clear-frame-state-resets-width-floor ()
+  (with-temp-buffer
+    (setq-local vertico-buffer-frame--auto-width-floor 120)
+    (vertico-buffer-frame--clear-frame-state)
+    (should-not vertico-buffer-frame--auto-width-floor)))
+
+(ert-deftest vertico-buffer-frame-visible-candidates-returns-scrolled-slice ()
+  (with-temp-buffer
+    (setq-local vertico--candidates '("a" "b" "c" "d" "e" "f"))
+    (setq-local vertico--scroll 2)
+    (setq-local vertico-count 3)
+    (should (equal (vertico-buffer-frame--visible-candidates)
+                   '("c" "d" "e")))))
+
 (ert-deftest vertico-buffer-frame-preview-size-uses-candidate-frame ()
-  (cl-letf (((symbol-function #'frame-pixel-width)
-             (lambda (frame)
-               (if (eq frame 'candidate) 1080 1920)))
-            ((symbol-function #'frame-pixel-height)
-             (lambda (frame)
-               (if (eq frame 'candidate) 667 1080)))
+  ;; The candidate pixel size is derived from its character dimensions
+  ;; (108*10 = 1080 wide, 33*20 = 660 tall).  Scaling by 1/golden-ratio gives
+  ;; 1080/1.618 = 667px -> 67 cols and 660/1.618 = 408px -> 20 rows.
+  (cl-letf (((symbol-function #'frame-width)
+             (lambda (frame) (if (eq frame 'candidate) 108 1)))
+            ((symbol-function #'frame-height)
+             (lambda (frame) (if (eq frame 'candidate) 33 1)))
             ((symbol-function #'frame-char-width)
              (lambda (_frame) 10))
             ((symbol-function #'frame-char-height)
              (lambda (_frame) 20)))
     (should (equal (vertico-buffer-frame--preview-frame-size
                     'parent 'candidate)
-                   '(67 . 21)))))
+                   '(67 . 20)))))
+
+(ert-deftest vertico-buffer-frame-preview-width-tracks-candidate-width ()
+  ;; The candidate height is fixed (auto-width only changes width); the preview
+  ;; width must grow with the candidate width while the height stays constant.
+  (cl-letf (((symbol-function #'frame-height)
+             (lambda (frame) (if (eq frame 'candidate) 33 1)))
+            ((symbol-function #'frame-char-width)
+             (lambda (_frame) 10))
+            ((symbol-function #'frame-char-height)
+             (lambda (_frame) 20)))
+    (let (narrow wide)
+      (cl-letf (((symbol-function #'frame-width)
+                 (lambda (frame) (if (eq frame 'candidate) 108 1))))
+        (setq narrow (vertico-buffer-frame--preview-frame-size
+                      'parent 'candidate)))
+      (cl-letf (((symbol-function #'frame-width)
+                 (lambda (frame) (if (eq frame 'candidate) 156 1))))
+        (setq wide (vertico-buffer-frame--preview-frame-size
+                    'parent 'candidate)))
+      (should (> (car wide) (car narrow)))
+      (should (= (cdr wide) (cdr narrow))))))
 
 (ert-deftest vertico-buffer-frame-base-parameters-use-golden-size ()
   (let ((vertico-buffer-frame-golden-ratio-scale 1.0)
@@ -275,13 +394,103 @@
                    (setq visible frame))))
         (vertico-buffer-frame--sync-frame)
         (should (equal set-size '(child 108 33)))
-        (should (equal set-position '(child 420 206)))
+        ;; Centered from the character size being set: width 108*10 = 1080px
+        ;; gives left (1920-1080)/2 = 420; height 33*20 = 660px gives top
+        ;; (1080-660)/2 = 210.
+        (should (equal set-position '(child 420 210)))
         (should (eq visible 'child))))))
+
+(ert-deftest vertico-buffer-frame-sync-frame-centers-auto-width ()
+  (let ((vertico-buffer-frame-golden-ratio-scale 1.0)
+        (vertico-buffer-frame-auto-width t)
+        set-size
+        set-position)
+    (with-temp-buffer
+      (setq-local vertico-buffer-frame--frame 'child
+                  vertico-buffer-frame--parent 'parent)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame) (memq frame '(child parent))))
+                ((symbol-function #'vertico-buffer-frame--content-pixel-width)
+                 (lambda () 1500))
+                ((symbol-function #'frame-pixel-width)
+                 (lambda (frame) (if (eq frame 'parent) 1920 1080)))
+                ((symbol-function #'frame-pixel-height)
+                 (lambda (frame) (if (eq frame 'parent) 1080 667)))
+                ((symbol-function #'frame-char-width) (lambda (_frame) 10))
+                ((symbol-function #'frame-char-height) (lambda (_frame) 20))
+                ((symbol-function #'frame-width) (lambda (_frame) 1))
+                ((symbol-function #'frame-height) (lambda (_frame) 1))
+                ((symbol-function #'set-frame-size)
+                 (lambda (frame width height)
+                   (setq set-size (list frame width height))))
+                ((symbol-function #'set-frame-position)
+                 (lambda (frame left top)
+                   (setq set-position (list frame left top))))
+                ((symbol-function #'frame-visible-p) (lambda (_frame) t))
+                ((symbol-function #'make-frame-visible) #'ignore))
+        (vertico-buffer-frame--sync-frame)
+        ;; 1500px / 10px = 150 columns plus the 6-column slack = 156, under the
+        ;; 0.9 cap (172).  Centered: 156*10 = 1560px gives left
+        ;; (1920-1560)/2 = 180.
+        (should (equal set-size '(child 156 33)))
+        (should (equal set-position '(child 180 210)))))))
+
+(ert-deftest vertico-buffer-frame-auto-width-resyncs-visible-preview ()
+  (let ((vertico-buffer-frame-mode t)
+        (vertico-buffer-frame-auto-width t)
+        synced-frame
+        synced-preview)
+    (with-temp-buffer
+      (setq-local vertico-buffer-frame--frame 'child
+                  vertico-buffer-frame--parent 'parent
+                  vertico-buffer-frame--preview-frame 'preview)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame) (memq frame '(child parent preview))))
+                ((symbol-function #'vertico-buffer-frame--candidate-frame-size)
+                 (lambda (_parent) '(80 . 33)))
+                ((symbol-function #'vertico-buffer-frame--candidate-target-width)
+                 (lambda (_parent _golden) 120))
+                ((symbol-function #'frame-width) (lambda (_frame) 80))
+                ((symbol-function #'frame-visible-p) (lambda (_frame) t))
+                ((symbol-function #'vertico-buffer-frame--sync-frame)
+                 (lambda () (setq synced-frame t)))
+                ((symbol-function #'vertico-buffer-frame--sync-preview-frame)
+                 (lambda () (setq synced-preview t))))
+        (vertico-buffer-frame--auto-width-redisplay nil)
+        (should synced-frame)
+        (should synced-preview)))))
+
+(ert-deftest vertico-buffer-frame-auto-width-skips-hidden-preview ()
+  (let ((vertico-buffer-frame-mode t)
+        (vertico-buffer-frame-auto-width t)
+        synced-frame
+        synced-preview)
+    (with-temp-buffer
+      (setq-local vertico-buffer-frame--frame 'child
+                  vertico-buffer-frame--parent 'parent
+                  vertico-buffer-frame--preview-frame 'preview)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame) (memq frame '(child parent preview))))
+                ((symbol-function #'vertico-buffer-frame--candidate-frame-size)
+                 (lambda (_parent) '(80 . 33)))
+                ((symbol-function #'vertico-buffer-frame--candidate-target-width)
+                 (lambda (_parent _golden) 120))
+                ((symbol-function #'frame-width) (lambda (_frame) 80))
+                ((symbol-function #'frame-visible-p) (lambda (_frame) nil))
+                ((symbol-function #'vertico-buffer-frame--sync-frame)
+                 (lambda () (setq synced-frame t)))
+                ((symbol-function #'vertico-buffer-frame--sync-preview-frame)
+                 (lambda () (setq synced-preview t))))
+        (vertico-buffer-frame--auto-width-redisplay nil)
+        (should synced-frame)
+        (should-not synced-preview)))))
 
 (ert-deftest vertico-buffer-frame-sync-preview-overlays-candidate-lower-right ()
   (let (set-size
         set-position
-        visible)
+        visible
+        (preview-w 1)
+        (preview-h 1))
     (with-temp-buffer
       (setq-local vertico-buffer-frame--frame 'candidate
                   vertico-buffer-frame--preview-frame 'preview
@@ -289,31 +498,26 @@
       (cl-letf (((symbol-function #'frame-live-p)
                  (lambda (frame)
                    (memq frame '(candidate preview parent))))
-                ((symbol-function #'frame-pixel-width)
-                 (lambda (frame)
-                   (pcase frame
-                     ('candidate 1080)
-                     ('preview 667)
-                     (_ 1920))))
-                ((symbol-function #'frame-pixel-height)
-                 (lambda (frame)
-                   (pcase frame
-                     ('candidate 667)
-                     ('preview 412)
-                     (_ 1080))))
                 ((symbol-function #'frame-char-width)
                  (lambda (_frame) 10))
                 ((symbol-function #'frame-char-height)
                  (lambda (_frame) 20))
+                ;; Candidate is 108x33 chars (1080x660px).  The preview frame
+                ;; size tracks `set-frame-size' so the position step reads the
+                ;; freshly-set 66x20 chars (660x400px).
                 ((symbol-function #'frame-width)
-                 (lambda (_frame) 1))
+                 (lambda (frame)
+                   (pcase frame ('candidate 108) ('preview preview-w) (_ 1))))
                 ((symbol-function #'frame-height)
-                 (lambda (_frame) 1))
+                 (lambda (frame)
+                   (pcase frame ('candidate 33) ('preview preview-h) (_ 1))))
                 ((symbol-function #'frame-position)
-                 (lambda (_frame) '(420 . 206)))
+                 (lambda (_frame) '(420 . 210)))
                 ((symbol-function #'set-frame-size)
                  (lambda (frame width height)
-                   (setq set-size (list frame width height))))
+                   (setq set-size (list frame width height)
+                         preview-w width
+                         preview-h height)))
                 ((symbol-function #'set-frame-position)
                  (lambda (frame left top)
                    (setq set-position (list frame left top))))
@@ -321,10 +525,13 @@
                  (lambda (_frame) nil))
                 ((symbol-function #'make-frame-visible)
                  (lambda (frame)
-                   (setq visible frame))))
+                   (setq visible frame)))
+                ((symbol-function #'raise-frame) #'ignore))
         (vertico-buffer-frame--sync-preview-frame)
-        (should (equal set-size '(preview 67 21)))
-        (should (equal set-position '(preview 833 461)))
+        (should (equal set-size '(preview 67 20)))
+        ;; Preview is 67x20 chars (670x400px).  Lower-right of the candidate:
+        ;; left 420 + (1080-670) = 830; top 210 + (660-400) = 470.
+        (should (equal set-position '(preview 830 470)))
         (should (eq visible 'preview))))))
 
 (ert-deftest vertico-buffer-frame-owner-disables-minibuffer-exit-parameter ()
@@ -513,6 +720,8 @@
        (should vertico-buffer-frame--session)
        (should (memq #'vertico-buffer-frame--minibuffer-exit
                      minibuffer-exit-hook))
+       (should (memq #'vertico-buffer-frame--auto-width-redisplay
+                     pre-redisplay-functions))
        (should (memq (current-buffer)
                      vertico-buffer-frame--minibuffers))))))
 
@@ -529,7 +738,7 @@
                       'fallback-window)))
            (setq vertico-buffer-frame--saved-state
                  '(:display-action (display-buffer-at-bottom)
-                   :buffer-mode nil))
+                                   :buffer-mode nil))
            (should (eq (vertico-buffer-frame--display-buffer
                         buffer '((reusable-frames . visible)))
                        'fallback-window))
@@ -548,9 +757,9 @@
          (with-temp-buffer
            (setq-local vertico-buffer-frame--local-saved-state
                        '(:display-action nil
-                         :display-action-local-p nil
-                         :buffer-mode nil
-                         :buffer-mode-local-p nil))
+                                         :display-action-local-p nil
+                                         :buffer-mode nil
+                                         :buffer-mode-local-p nil))
            (cl-letf (((symbol-function #'display-graphic-p)
                       (lambda (&optional _frame) nil))
                      ((symbol-function #'display-buffer)
@@ -698,7 +907,7 @@
                       'fallback-window)))
            (setq vertico-buffer-frame--saved-state
                  '(:display-action (display-buffer-pop-up-window)
-                   :buffer-mode nil))
+                                   :buffer-mode nil))
            (should (eq (vertico-buffer-frame--display-buffer buffer nil)
                        'fallback-window))
            (should (equal displayed

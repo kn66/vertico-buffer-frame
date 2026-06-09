@@ -32,13 +32,19 @@ code, or `README.org`.
 - Allow Consult preview mirroring to be toggled globally or for the current
   minibuffer session.
 - Provide customization only for golden-ratio scale, border width, focus
-  acceptance, Consult preview enablement, and extra frame parameters.
+  acceptance, Consult preview enablement, candidate-width auto-resizing, and
+  extra frame parameters.
+- Optionally grow the candidate frame width to fit the widest visible
+  candidate, keeping the frame centered, capped below the parent frame width so
+  a margin remains, and never below the golden-ratio width.
 - Keep the core display path small: one candidate frame and at most one Consult
   preview frame per minibuffer session, reused while live.
 
 ## Non-Goals
 
-- Fixed-size display, candidate-width auto-resizing, built-in candidate preview
-  resolvers, and per-command Consult preview adapters.
+- Fixed-size display, built-in candidate preview resolvers, and per-command
+  Consult preview adapters.
+- Custom prompt or input line wrapping; the prompt line follows
+  `vertico-buffer-mode`'s own truncation and wrapping behavior unchanged.
 - Speculative options, compatibility paths, refactors, or optimizations without
   a listed behavior, clear bug, or measured target.
