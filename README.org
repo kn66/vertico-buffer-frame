@@ -116,9 +116,18 @@ Vertico buffer is not shown in a child frame.
 - ~vertico-buffer-frame-local-mode~
 - ~vertico-buffer-frame-mode~
 - ~vertico-buffer-frame-toggle-preview~
+- ~vertico-buffer-frame-warmup~
 
 ~vertico-buffer-frame-cleanup~ releases child frames owned by active
 minibuffer sessions.  Cleanup is safe to call repeatedly.
+
+~vertico-buffer-frame-warmup~ creates and discards a small child frame to warm
+up child-frame display.  The first child frame of an Emacs session realizes
+faces and fonts and initializes display-backend state, and paying that cost
+inside the first minibuffer session has crashed Emacs on some platforms.
+~vertico-buffer-frame-mode~ schedules this warm-up automatically once per
+session after startup (or when the first graphical client frame is created
+under a daemon), so calling it manually is normally unnecessary.
 
 ~vertico-buffer-frame-local-mode~ enables the child-frame display only for the
 current minibuffer session.  It is intended for ~vertico-multiform-mode~ rules

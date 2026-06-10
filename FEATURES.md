@@ -37,6 +37,10 @@ code, or `README.org`.
 - Optionally grow the candidate frame width to fit the widest visible
   candidate, keeping the frame centered, capped below the parent frame width so
   a margin remains, and never below the golden-ratio width.
+- Warm up child-frame display once per Emacs session in a quiet context after
+  startup, so the first minibuffer session does not pay first-child-frame face,
+  font, and display-backend initialization, which has crashed Emacs on some
+  platforms.
 - Keep the core display path small: one candidate frame and at most one Consult
   preview frame per minibuffer session, reused while live.
 

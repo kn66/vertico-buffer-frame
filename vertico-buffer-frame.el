@@ -59,6 +59,43 @@ ratio use the full fitting golden rectangle."
   "Width of the child frame border in pixels."
   :type 'natnum)
 
+(defcustom vertico-buffer-frame-fringes 'inherit
+  "Fringe widths of the candidate child frame.
+The value controls the left and right fringes so they need not be configured
+individually:
+
+  `inherit'  Use the parent frame's fringe widths.  This is the default and
+             lets candidate formatting that relies on the fringe work without
+             extra setup, such as a `left-fringe' display specification marking
+             the current candidate.
+  nil        Hide both fringes (the compact look of earlier versions).
+  NUMBER     Use NUMBER pixels for both fringes.
+  (LEFT . RIGHT)  Use LEFT and RIGHT pixels respectively.
+
+The Consult preview child frame is unaffected and keeps no fringe."
+  :type '(choice (const :tag "Inherit from parent frame" inherit)
+                 (const :tag "No fringe" nil)
+                 (natnum :tag "Both fringes (pixels)")
+                 (cons :tag "Left and right (pixels)"
+                       (natnum :tag "Left")
+                       (natnum :tag "Right"))))
+
+(defcustom vertico-buffer-frame-margins 'inherit
+  "Window margins of the candidate child frame.
+Like `vertico-buffer-frame-fringes', this avoids configuring the left and right
+margins individually:
+
+  `inherit'  Use the parent window's margins (default).
+  nil        Use no margins.
+  NUMBER     Use NUMBER columns for both margins.
+  (LEFT . RIGHT)  Use LEFT and RIGHT columns respectively."
+  :type '(choice (const :tag "Inherit from parent window" inherit)
+                 (const :tag "No margin" nil)
+                 (natnum :tag "Both margins (columns)")
+                 (cons :tag "Left and right (columns)"
+                       (natnum :tag "Left")
+                       (natnum :tag "Right"))))
+
 (defcustom vertico-buffer-frame-candidate-accept-focus nil
   "Non-nil means candidate child frames may accept input focus.
 This allows `vertico-mouse' clicks and wheel events in the candidate child
@@ -305,6 +342,35 @@ auto-width instead of staying fixed at a height-bound golden rectangle."
            (* (cdr candidate-pixels) scale)
            (frame-char-height parent)))))
 
+(defun vertico-buffer-frame--pair-spec (spec)
+  "Return SPEC as a cons of LEFT and RIGHT explicit values, or nil to inherit.
+SPEC follows `vertico-buffer-frame-fringes' or `vertico-buffer-frame-margins'.
+A return value of nil means the caller should inherit from the parent."
+  (cond
+   ((eq spec 'inherit) nil)
+   ((null spec) (cons 0 0))
+   ((numberp spec) (cons spec spec))
+   ((consp spec) (cons (or (car spec) 0) (or (cdr spec) 0)))
+   (t (cons 0 0))))
+
+(defun vertico-buffer-frame--candidate-fringes (parent)
+  "Return (LEFT . RIGHT) fringe pixel widths for a candidate frame on PARENT.
+With the default `inherit' setting, the widths follow PARENT's own fringes so
+fringe-based candidate indicators render without extra configuration."
+  (or (vertico-buffer-frame--pair-spec vertico-buffer-frame-fringes)
+      (let ((fringes (window-fringes (frame-selected-window parent))))
+        (cons (or (nth 0 fringes) 0)
+              (or (nth 1 fringes) 0)))))
+
+(defun vertico-buffer-frame--candidate-margins (parent)
+  "Return (LEFT . RIGHT) margin columns for a candidate frame on PARENT.
+With the default `inherit' setting, the margins follow PARENT's selected
+window margins."
+  (or (vertico-buffer-frame--pair-spec vertico-buffer-frame-margins)
+      (let ((margins (window-margins (frame-selected-window parent))))
+        (cons (or (car margins) 0)
+              (or (cdr margins) 0)))))
+
 (defun vertico-buffer-frame--apply-border (frame)
   "Draw a simple visible border around child FRAME.
 Themes often leave the `child-frame-border' face unspecified, which blends the
@@ -322,6 +388,9 @@ without affecting any other frame."
 SIZE is a cons of width and height in characters.  ROLE is `candidate' or
 `preview'; nil means `candidate'."
   (let* ((size (or size (vertico-buffer-frame--candidate-frame-size parent)))
+         (fringes (if (eq role 'preview)
+                      (cons 0 0)
+                    (vertico-buffer-frame--candidate-fringes parent)))
          (extra (and (proper-list-p vertico-buffer-frame-parameters)
                      vertico-buffer-frame-parameters))
          (defaults
@@ -344,8 +413,8 @@ SIZE is a cons of width and height in characters.  ROLE is `candidate' or
             (border-width . 0)
             (child-frame-border-width . ,vertico-buffer-frame-border-width)
             (internal-border-width . 0)
-            (left-fringe . 0)
-            (right-fringe . 0)
+            (left-fringe . ,(car fringes))
+            (right-fringe . ,(cdr fringes))
             (right-divider-width . 0)
             (bottom-divider-width . 0)
             (vertical-scroll-bars . nil)
@@ -362,13 +431,17 @@ SIZE is a cons of width and height in characters.  ROLE is `candidate' or
        defaults)
      extra)))
 
-(defun vertico-buffer-frame--prepare-window (window)
-  "Remove chrome and spacing from child frame WINDOW."
+(defun vertico-buffer-frame--prepare-window (window &optional fringes margins)
+  "Remove chrome and spacing from child frame WINDOW.
+FRINGES is a cons of left and right fringe widths in pixels; MARGINS is a cons
+of left and right margin columns.  Either nil means no fringe or margin.  The
+frame parameters already request the fringes, but the window fringes and margins
+are set explicitly so a reused window does not keep stale values."
   (set-window-parameter window 'mode-line-format 'none)
   (set-window-parameter window 'header-line-format 'none)
   (set-window-parameter window 'tab-line-format 'none)
-  (set-window-margins window 0 0)
-  (set-window-fringes window 0 0 nil)
+  (set-window-margins window (car margins) (cdr margins))
+  (set-window-fringes window (car fringes) (cdr fringes) nil)
   (set-window-scroll-bars window nil nil nil nil))
 
 (defun vertico-buffer-frame--auto-width-redisplay (_window)
@@ -626,7 +699,12 @@ ALIST is appended to the display action passed to
           (unless (frame-live-p frame)
             (error "Child frame window did not have a live frame"))
           (vertico-buffer-frame--apply-border frame)
-          (vertico-buffer-frame--prepare-window window)
+          (if (eq role 'candidate)
+              (vertico-buffer-frame--prepare-window
+               window
+               (vertico-buffer-frame--candidate-fringes parent)
+               (vertico-buffer-frame--candidate-margins parent))
+            (vertico-buffer-frame--prepare-window window '(0 . 0) '(0 . 0)))
           (if (eq role 'candidate)
               (vertico-buffer-frame--set-frame-owner-buffer frame owner)
             (vertico-buffer-frame--set-frame-owner-buffer frame owner share))
@@ -1074,6 +1152,71 @@ per-category rules.  It does not change global Vertico display state."
       (vertico-buffer-frame--cleanup-minibuffer (current-buffer)))
     (vertico-buffer-frame--restore-local-mode-state)))
 
+(defvar vertico-buffer-frame--warmed-up nil
+  "Non-nil means a warm-up child frame was already created in this session.")
+
+(defun vertico-buffer-frame--warmup-parent-frame ()
+  "Return a frame suitable for warming up child-frame display, or nil."
+  (let ((frame (selected-frame)))
+    (and (frame-live-p frame)
+         (display-graphic-p frame)
+         (not (frame-parameter frame 'parent-frame))
+         (eq (frame-visible-p frame) t)
+         frame)))
+
+;;;###autoload
+(defun vertico-buffer-frame-warmup ()
+  "Create and discard a child frame to warm up child-frame display.
+The first child frame of an Emacs session realizes faces and fonts and
+initializes display-backend state for child frames.  Paying that cost
+inside the first minibuffer session has crashed Emacs on some platforms,
+so `vertico-buffer-frame-mode' runs this once in a quiet context after
+startup instead.  Return non-nil when a warm-up frame was created."
+  (interactive)
+  (when-let* ((parent (vertico-buffer-frame--warmup-parent-frame)))
+    (let ((frame nil))
+      (unwind-protect
+          (progn
+            (setq frame (make-frame
+                         (vertico-buffer-frame--base-parameters
+                          parent "Vertico warmup" '(2 . 2))))
+            (vertico-buffer-frame--apply-border frame)
+            (set-frame-position frame 0 0)
+            (make-frame-visible frame)
+            (redisplay t)
+            (setq vertico-buffer-frame--warmed-up t))
+        (vertico-buffer-frame--delete-frame frame)))))
+
+(defun vertico-buffer-frame--warmup-startup ()
+  "Run the child-frame warm-up once a graphical frame is available.
+This runs from startup hooks, an idle timer, and
+`server-after-make-frame-hook' because the warm-up needs a visible
+graphical frame, which may not exist when the mode is enabled.  The
+hooks deregister themselves once the warm-up has run or the mode has
+been disabled."
+  (if (and vertico-buffer-frame-mode
+           (not vertico-buffer-frame--warmed-up))
+      (when (vertico-buffer-frame--warmup-parent-frame)
+        (ignore-errors (vertico-buffer-frame-warmup))
+        (when vertico-buffer-frame--warmed-up
+          (vertico-buffer-frame--remove-warmup)))
+    (vertico-buffer-frame--remove-warmup)))
+
+(defun vertico-buffer-frame--install-warmup ()
+  "Schedule the child-frame warm-up for the current or next graphical frame."
+  (unless vertico-buffer-frame--warmed-up
+    (if after-init-time
+        (run-with-idle-timer 0 nil #'vertico-buffer-frame--warmup-startup)
+      (add-hook 'window-setup-hook #'vertico-buffer-frame--warmup-startup))
+    (add-hook 'server-after-make-frame-hook
+              #'vertico-buffer-frame--warmup-startup)))
+
+(defun vertico-buffer-frame--remove-warmup ()
+  "Remove the startup hooks installed for the child-frame warm-up."
+  (remove-hook 'window-setup-hook #'vertico-buffer-frame--warmup-startup)
+  (remove-hook 'server-after-make-frame-hook
+               #'vertico-buffer-frame--warmup-startup))
+
 ;;;###autoload
 (define-minor-mode vertico-buffer-frame-mode
   "Display `vertico-buffer-mode' candidates in child frames."
@@ -1086,9 +1229,11 @@ per-category rules.  It does not change global Vertico display state."
               (vertico-buffer-frame-display-action))
         (add-hook 'minibuffer-setup-hook
                   #'vertico-buffer-frame--setup-minibuffer)
+        (vertico-buffer-frame--install-warmup)
         (vertico-buffer-mode 1))
     (remove-hook 'minibuffer-setup-hook
                  #'vertico-buffer-frame--setup-minibuffer)
+    (vertico-buffer-frame--remove-warmup)
     (vertico-buffer-frame-cleanup)
     (vertico-buffer-frame--delete-owned-frames)
     (vertico-buffer-frame--restore-state)))
