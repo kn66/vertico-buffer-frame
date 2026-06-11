@@ -52,13 +52,15 @@
           (default-value 'vertico-buffer-frame-consult-preview))
          (old-saved-state vertico-buffer-frame--saved-state)
          (old-minibuffers vertico-buffer-frame--minibuffers)
+         (old-pool vertico-buffer-frame--pool)
          (old-minibuffer-setup-hook minibuffer-setup-hook))
      (unwind-protect
          (progn
            (when vertico-buffer-frame-mode
              (vertico-buffer-frame-mode -1))
            (setq vertico-buffer-frame--saved-state nil
-                 vertico-buffer-frame--minibuffers nil)
+                 vertico-buffer-frame--minibuffers nil
+                 vertico-buffer-frame--pool nil)
            ,@body)
        (when vertico-buffer-frame-mode
          (vertico-buffer-frame-mode -1))
@@ -67,6 +69,7 @@
              vertico-buffer-frame-consult-preview old-consult-preview
              vertico-buffer-frame--saved-state old-saved-state
              vertico-buffer-frame--minibuffers old-minibuffers
+             vertico-buffer-frame--pool old-pool
              minibuffer-setup-hook old-minibuffer-setup-hook)
        (setq-default vertico-buffer-frame-consult-preview old-consult-preview)
        (if old-buffer-mode
@@ -487,6 +490,138 @@
         (should synced-frame)
         (should-not synced-preview)))))
 
+(ert-deftest vertico-buffer-frame-redisplay-reasserts-lost-visibility ()
+  ;; A map request from `vertico-buffer-frame--sync-frame' can be dropped by
+  ;; the window-system backend for a frame previously hidden by the pool, so
+  ;; the redisplay hook re-requests visibility for a hidden candidate frame.
+  (let ((vertico-buffer-frame-mode t)
+        (vertico-buffer-frame-auto-width nil)
+        shown)
+    (with-temp-buffer
+      (setq-local vertico-buffer-frame--frame 'child
+                  vertico-buffer-frame--parent 'parent
+                  vertico-buffer-frame--window 'child-window
+                  vertico--candidates-ov (make-overlay (point-min) (point-min))
+                  vertico--count-ov (make-overlay (point-min) (point-min)))
+      (overlay-put vertico--candidates-ov 'window 'child-window)
+      (overlay-put vertico--count-ov 'window 'child-window)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame) (memq frame '(child parent))))
+                ((symbol-function #'window-live-p)
+                 (lambda (window) (eq window 'child-window)))
+                ((symbol-function #'window-buffer)
+                 (lambda (_window) (current-buffer)))
+                ((symbol-function #'frame-visible-p) (lambda (_frame) nil))
+                ((symbol-function #'make-frame-visible)
+                 (lambda (frame) (setq shown frame))))
+        (vertico-buffer-frame--redisplay nil)
+        (should (eq shown 'child))))))
+
+(ert-deftest vertico-buffer-frame-redisplay-raises-shown-candidate ()
+  (let ((vertico-buffer-frame-mode t)
+        (vertico-buffer-frame-auto-width nil)
+        raised)
+    (with-temp-buffer
+      (setq-local vertico-buffer-frame--frame 'child
+                  vertico-buffer-frame--parent 'parent
+                  vertico-buffer-frame--window 'child-window
+                  vertico--candidates-ov (make-overlay (point-min) (point-min)))
+      (overlay-put vertico--candidates-ov 'window 'child-window)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame) (memq frame '(child parent))))
+                ((symbol-function #'window-live-p)
+                 (lambda (window) (eq window 'child-window)))
+                ((symbol-function #'window-buffer)
+                 (lambda (_window) (current-buffer)))
+                ((symbol-function #'frame-visible-p) (lambda (_frame) nil))
+                ((symbol-function #'make-frame-visible) #'ignore)
+                ((symbol-function #'raise-frame)
+                 (lambda (frame) (setq raised frame))))
+        (vertico-buffer-frame--redisplay nil)
+        (should (eq raised 'child))))))
+
+(ert-deftest vertico-buffer-frame-redisplay-waits-for-vertico-overlays ()
+  (let ((vertico-buffer-frame-mode t)
+        (vertico-buffer-frame-auto-width nil)
+        shown)
+    (with-temp-buffer
+      (setq-local vertico-buffer-frame--frame 'child
+                  vertico-buffer-frame--parent 'parent
+                  vertico-buffer-frame--window 'child-window
+                  vertico--candidates-ov (make-overlay (point-min) (point-min)))
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame) (memq frame '(child parent))))
+                ((symbol-function #'window-live-p)
+                 (lambda (window) (eq window 'child-window)))
+                ((symbol-function #'window-buffer)
+                 (lambda (_window) (current-buffer)))
+                ((symbol-function #'frame-visible-p) (lambda (_frame) nil))
+                ((symbol-function #'make-frame-visible)
+                 (lambda (frame) (setq shown frame))))
+        (vertico-buffer-frame--redisplay nil)
+        (should-not shown)))))
+
+(ert-deftest vertico-buffer-frame-redisplay-waits-for-minibuffer-buffer ()
+  (let ((vertico-buffer-frame-mode t)
+        (vertico-buffer-frame-auto-width nil)
+        shown)
+    (with-temp-buffer
+      (setq-local vertico-buffer-frame--frame 'child
+                  vertico-buffer-frame--parent 'parent
+                  vertico-buffer-frame--window 'child-window
+                  vertico--candidates-ov (make-overlay (point-min) (point-min)))
+      (overlay-put vertico--candidates-ov 'window 'child-window)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame) (memq frame '(child parent))))
+                ((symbol-function #'window-live-p)
+                 (lambda (window) (eq window 'child-window)))
+                ((symbol-function #'window-buffer)
+                 (lambda (_window) 'old-buffer))
+                ((symbol-function #'frame-visible-p) (lambda (_frame) nil))
+                ((symbol-function #'make-frame-visible)
+                 (lambda (frame) (setq shown frame))))
+        (vertico-buffer-frame--redisplay nil)
+        (should-not shown)))))
+
+(ert-deftest vertico-buffer-frame-redisplay-skips-visible-frame ()
+  (let ((vertico-buffer-frame-mode t)
+        (vertico-buffer-frame-auto-width nil)
+        shown)
+    (with-temp-buffer
+      (setq-local vertico-buffer-frame--frame 'child
+                  vertico-buffer-frame--parent 'parent
+                  vertico-buffer-frame--window 'child-window
+                  vertico--candidates-ov (make-overlay (point-min) (point-min)))
+      (overlay-put vertico--candidates-ov 'window 'child-window)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame) (memq frame '(child parent))))
+                ((symbol-function #'window-live-p)
+                 (lambda (window) (eq window 'child-window)))
+                ((symbol-function #'window-buffer)
+                 (lambda (_window) (current-buffer)))
+                ((symbol-function #'frame-visible-p) (lambda (_frame) t))
+                ((symbol-function #'make-frame-visible)
+                 (lambda (frame) (setq shown frame))))
+        (vertico-buffer-frame--redisplay nil)
+        (should-not shown)))))
+
+(ert-deftest vertico-buffer-frame-redisplay-runs-auto-width ()
+  (let ((vertico-buffer-frame-mode t)
+        (vertico-buffer-frame-auto-width t)
+        auto-width-window)
+    (with-temp-buffer
+      (setq-local vertico-buffer-frame--frame 'child
+                  vertico-buffer-frame--parent 'parent)
+      (cl-letf (((symbol-function #'frame-live-p)
+                 (lambda (frame) (memq frame '(child parent))))
+                ((symbol-function #'window-live-p)
+                 (lambda (_window) nil))
+                ((symbol-function #'frame-visible-p) (lambda (_frame) t))
+                ((symbol-function #'vertico-buffer-frame--auto-width-redisplay)
+                 (lambda (window) (setq auto-width-window (list window)))))
+        (vertico-buffer-frame--redisplay 'minibuffer-window)
+        (should (equal auto-width-window '(minibuffer-window)))))))
+
 (ert-deftest vertico-buffer-frame-sync-preview-overlays-candidate-lower-right ()
   (let (set-size
         set-position
@@ -722,10 +857,24 @@
        (should vertico-buffer-frame--session)
        (should (memq #'vertico-buffer-frame--minibuffer-exit
                      minibuffer-exit-hook))
-       (should (memq #'vertico-buffer-frame--auto-width-redisplay
+       (should (memq #'vertico-buffer-frame--redisplay
                      pre-redisplay-functions))
        (should (memq (current-buffer)
                      vertico-buffer-frame--minibuffers))))))
+
+(ert-deftest vertico-buffer-frame-setup-session-preserves-existing-session ()
+  ;; `vertico--setup' runs before `vertico-buffer-frame--setup-minibuffer'
+  ;; and may already have created the session while displaying the candidate
+  ;; frame.  Replacing it here would orphan that frame at exit, where
+  ;; ownership is matched by session.
+  (vertico-buffer-frame-test--with-clean-state
+   (with-temp-buffer
+     (let ((vertico-buffer-frame-mode t)
+           (vertico-buffer-frame--minibuffers nil))
+       (vertico-buffer-frame--ensure-session)
+       (let ((session vertico-buffer-frame--session))
+         (vertico-buffer-frame--setup-minibuffer)
+         (should (eq vertico-buffer-frame--session session)))))))
 
 (ert-deftest vertico-buffer-frame-display-buffer-falls-back-when-unsupported ()
   (vertico-buffer-frame-test--with-clean-state
@@ -787,6 +936,7 @@
      (unwind-protect
          (with-temp-buffer
            (let ((owner (current-buffer)))
+             (setq-local vertico-buffer-frame--pending-show nil)
              (cl-letf (((symbol-function #'display-graphic-p)
                         (lambda (&optional _frame) t))
                        ((symbol-function #'display-buffer-in-child-frame)
@@ -798,19 +948,26 @@
                         (lambda (_frame buffer)
                           (setq owner-recorded buffer)))
                        ((symbol-function #'vertico-buffer-frame--sync-frame)
-                        (lambda ()
-                          (setq synced t))))
+                        (lambda (&optional defer-show)
+                          (setq synced defer-show))))
                (should (eq (vertico-buffer-frame--display-buffer
                             buffer nil)
                            (selected-window)))
                (should (eq owner-recorded owner))
                (should synced)
+               (should vertico-buffer-frame--pending-show)
                (should (assq 'child-frame-parameters captured-action))
                (should (eq (alist-get
                             'share-child-frame
                             (alist-get 'child-frame-parameters
                                        captured-action))
                            owner))
+               (should (equal (alist-get
+                               vertico-buffer-frame--pool-key-parameter
+                               (alist-get 'child-frame-parameters
+                                          captured-action))
+                              (vertico-buffer-frame--pool-key
+                               (vertico-buffer-frame--parent-frame))))
                (should (memq owner vertico-buffer-frame--minibuffers)))))
        (when (buffer-live-p buffer)
          (kill-buffer buffer))))))
@@ -849,6 +1006,8 @@
                                 (list owner 'preview)))
                  (should (eq (alist-get 'vertico-buffer-frame-role parameters)
                              'preview))
+                 (should-not (assq vertico-buffer-frame--pool-key-parameter
+                                   parameters))
                  (should (eq (alist-get 'no-accept-focus parameters) t))
                  (should (equal (alist-get 'width parameters) 20))
                  (should (equal (alist-get 'height parameters) 10))))))
@@ -950,10 +1109,10 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-(ert-deftest vertico-buffer-frame-minibuffer-exit-delays-frame-deletion ()
+(ert-deftest vertico-buffer-frame-minibuffer-exit-delays-frame-release ()
   (let ((buffer (generate-new-buffer " *vbf-exit-cleanup*"))
         scheduled
-        deleted-owner
+        released-owner
         hidden)
     (unwind-protect
         (with-current-buffer buffer
@@ -976,14 +1135,14 @@
                        (push (list frame force) hidden)))
                     ((symbol-function
                       #'vertico-buffer-frame--delete-frames-owned-by-buffer)
-                     (lambda (owner &optional session)
-                       (setq deleted-owner (list owner session)))))
+                     (lambda (owner &optional session release)
+                       (setq released-owner (list owner session release)))))
             (vertico-buffer-frame--minibuffer-exit)
-            (should-not deleted-owner)
+            (should-not released-owner)
             (should (= (nth 0 scheduled) 0))
             (should-not (nth 1 scheduled))
             (should (eq (nth 2 scheduled)
-                        #'vertico-buffer-frame--delete-frames-owned-by-buffer))
+                        #'vertico-buffer-frame--release-frames-owned-by-buffer))
             (should (equal (nth 3 scheduled) (list buffer 'session)))
             (should-not vertico-buffer-frame--frame)
             (should-not vertico-buffer-frame--window)
@@ -995,9 +1154,348 @@
                               minibuffer-exit-hook))
             (should-not (memq buffer vertico-buffer-frame--minibuffers))
             (apply (nth 2 scheduled) (nth 3 scheduled))
-            (should (equal deleted-owner (list buffer 'session)))))
+            (should (equal released-owner (list buffer 'session t)))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
+
+(ert-deftest vertico-buffer-frame-release-frame-parks-candidate ()
+  (let ((vertico-buffer-frame-reuse-frames t)
+        (vertico-buffer-frame--pool nil)
+        hidden
+        cleared
+        scrubbed)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (frame) (memq frame '(frame parent))))
+              ((symbol-function #'frame-parameter)
+               (lambda (_frame parameter)
+                 (cond
+                  ((eq parameter 'vertico-buffer-frame-role) 'candidate)
+                  ((eq parameter 'parent-frame) 'parent)
+                  ((eq parameter vertico-buffer-frame--pool-key-parameter)
+                   'key))))
+              ((symbol-function
+                #'vertico-buffer-frame--clear-vertico-overlays-for-frame)
+               #'ignore)
+              ((symbol-function #'make-frame-invisible)
+               (lambda (frame &optional force)
+                 (push (list frame force) hidden)))
+              ((symbol-function #'modify-frame-parameters)
+               (lambda (_frame parameters)
+                 (setq cleared parameters)))
+              ((symbol-function #'frame-root-window)
+               (lambda (_frame) 'win))
+              ((symbol-function #'window-live-p)
+               (lambda (_window) nil))
+              ((symbol-function #'vertico-buffer-frame--scrub-frame)
+               (lambda (frame) (setq scrubbed frame))))
+      (vertico-buffer-frame--release-frame 'frame)
+      (should (equal vertico-buffer-frame--pool '(frame)))
+      (should (equal hidden '((frame t))))
+      (should (eq scrubbed 'frame))
+      (should (assq vertico-buffer-frame--owner-buffer-parameter cleared))
+      (should-not (alist-get vertico-buffer-frame--owner-buffer-parameter
+                             cleared))
+      (should (assq 'share-child-frame cleared))
+      (should-not (alist-get 'share-child-frame cleared)))))
+
+(ert-deftest vertico-buffer-frame-scrub-frame-repaints-parked-frame ()
+  (let (calls)
+    (cl-letf (((symbol-function #'frame-parameter)
+               (lambda (_frame parameter)
+                 (when (eq parameter 'parent-frame) 'parent)))
+              ((symbol-function #'frame-live-p)
+               (lambda (frame) (eq frame 'parent)))
+              ((symbol-function #'frame-pixel-width)
+               (lambda (_frame) 800))
+              ((symbol-function #'frame-pixel-height)
+               (lambda (_frame) 600))
+              ((symbol-function #'set-frame-position)
+               (lambda (frame x y) (push (list 'position frame x y) calls)))
+              ((symbol-function #'make-frame-visible)
+               (lambda (frame) (push (list 'show frame) calls)))
+              ((symbol-function #'redisplay)
+               (lambda (&optional force) (push (list 'redisplay force) calls)))
+              ((symbol-function #'make-frame-invisible)
+               (lambda (frame &optional force)
+                 (push (list 'hide frame force) calls))))
+      (vertico-buffer-frame--scrub-frame 'frame)
+      ;; Reposition to leave one pixel clipped inside the parent, paint, then
+      ;; hide, in that order.
+      (should (equal (nreverse calls)
+                     '((position frame 799 599)
+                       (show frame)
+                       (redisplay t)
+                       (hide frame t)))))))
+
+(ert-deftest vertico-buffer-frame-scrub-frame-skips-dead-parent ()
+  (let (calls)
+    (cl-letf (((symbol-function #'frame-parameter)
+               (lambda (_frame parameter)
+                 (when (eq parameter 'parent-frame) 'parent)))
+              ((symbol-function #'frame-live-p) #'ignore)
+              ((symbol-function #'set-frame-position)
+               (lambda (&rest args) (push (cons 'position args) calls)))
+              ((symbol-function #'make-frame-visible)
+               (lambda (&rest args) (push (cons 'show args) calls)))
+              ((symbol-function #'make-frame-invisible)
+               (lambda (&rest args) (push (cons 'hide args) calls))))
+      (vertico-buffer-frame--scrub-frame 'frame)
+      (should-not calls))))
+
+(ert-deftest vertico-buffer-frame-release-frame-deletes-preview ()
+  (let ((vertico-buffer-frame-reuse-frames t)
+        (vertico-buffer-frame--pool nil)
+        deleted)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (_frame) t))
+              ((symbol-function #'frame-parameter)
+               (lambda (_frame parameter)
+                 (cond
+                  ((eq parameter 'vertico-buffer-frame-role) 'preview)
+                  ((eq parameter 'parent-frame) 'parent))))
+              ((symbol-function #'vertico-buffer-frame--delete-frame)
+               (lambda (frame) (setq deleted frame))))
+      (vertico-buffer-frame--release-frame 'frame)
+      (should (eq deleted 'frame))
+      (should-not vertico-buffer-frame--pool))))
+
+(ert-deftest vertico-buffer-frame-release-frame-deletes-when-reuse-disabled ()
+  (let ((vertico-buffer-frame-reuse-frames nil)
+        (vertico-buffer-frame--pool nil)
+        deleted)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (_frame) t))
+              ((symbol-function #'frame-parameter)
+               (lambda (_frame parameter)
+                 (cond
+                  ((eq parameter 'vertico-buffer-frame-role) 'candidate)
+                  ((eq parameter 'parent-frame) 'parent)
+                  ((eq parameter vertico-buffer-frame--pool-key-parameter)
+                   'key))))
+              ((symbol-function #'vertico-buffer-frame--delete-frame)
+               (lambda (frame) (setq deleted frame))))
+      (vertico-buffer-frame--release-frame 'frame)
+      (should (eq deleted 'frame))
+      (should-not vertico-buffer-frame--pool))))
+
+(ert-deftest vertico-buffer-frame-claim-frame-returns-matching-frame ()
+  (let* ((vertico-buffer-frame-reuse-frames t)
+         (vertico-buffer-frame-border-width 1)
+         (vertico-buffer-frame-fringes nil)
+         (vertico-buffer-frame-candidate-accept-focus nil)
+         (vertico-buffer-frame-parameters nil)
+         (key (vertico-buffer-frame--pool-key 'parent))
+         (vertico-buffer-frame--pool (list 'frame)))
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (frame) (eq frame 'frame)))
+              ((symbol-function #'frame-parameter)
+               (lambda (_frame parameter)
+                 (cond
+                  ((eq parameter 'parent-frame) 'parent)
+                  ((eq parameter vertico-buffer-frame--pool-key-parameter)
+                   key)))))
+      (should (eq (vertico-buffer-frame--claim-frame 'parent) 'frame))
+      (should-not vertico-buffer-frame--pool))))
+
+(ert-deftest vertico-buffer-frame-claim-frame-deletes-stale-frames ()
+  (let ((vertico-buffer-frame-reuse-frames t)
+        (vertico-buffer-frame-fringes nil)
+        (vertico-buffer-frame--pool (list 'stale))
+        deleted)
+    (cl-letf (((symbol-function #'frame-live-p)
+               (lambda (frame) (eq frame 'stale)))
+              ((symbol-function #'frame-parameter)
+               (lambda (_frame parameter)
+                 (cond
+                  ((eq parameter 'parent-frame) 'parent)
+                  ((eq parameter vertico-buffer-frame--pool-key-parameter)
+                   'old-key))))
+              ((symbol-function #'vertico-buffer-frame--delete-frame)
+               (lambda (frame) (setq deleted frame))))
+      (should-not (vertico-buffer-frame--claim-frame 'parent))
+      (should (eq deleted 'stale))
+      (should-not vertico-buffer-frame--pool))))
+
+(ert-deftest vertico-buffer-frame-claim-frame-respects-disabled-reuse ()
+  (let ((vertico-buffer-frame-reuse-frames nil)
+        (vertico-buffer-frame--pool (list 'frame)))
+    (should-not (vertico-buffer-frame--claim-frame 'parent))
+    (should (equal vertico-buffer-frame--pool '(frame)))))
+
+(ert-deftest vertico-buffer-frame-trim-pool-caps-per-parent ()
+  (let ((vertico-buffer-frame--pool '(f1 f2 f3 f4 f5 f6))
+        deleted)
+    (cl-letf (((symbol-function #'frame-parameter)
+               (lambda (_frame parameter)
+                 (when (eq parameter 'parent-frame) 'parent)))
+              ((symbol-function #'vertico-buffer-frame--delete-frame)
+               (lambda (frame) (push frame deleted))))
+      (vertico-buffer-frame--trim-pool 'parent)
+      (should (equal vertico-buffer-frame--pool '(f1 f2 f3 f4)))
+      (should (equal (nreverse deleted) '(f5 f6))))))
+
+(ert-deftest vertico-buffer-frame-cleanup-flushes-pool ()
+  (let ((vertico-buffer-frame--minibuffers nil)
+        (vertico-buffer-frame--pool '(pooled))
+        deleted)
+    (cl-letf (((symbol-function #'vertico-buffer-frame--delete-frame)
+               (lambda (frame) (push frame deleted))))
+      (vertico-buffer-frame-cleanup)
+      (should-not vertico-buffer-frame--pool)
+      (should (equal deleted '(pooled))))))
+
+(ert-deftest vertico-buffer-frame-clear-vertico-overlays-removes-stale-display ()
+  (with-temp-buffer
+    (let ((vertico--candidates-ov (make-overlay (point-min) (point-min)))
+          (vertico--count-ov (make-overlay (point-min) (point-min)))
+          (unrelated (make-overlay (point-min) (point-min))))
+      (dolist (overlay (list vertico--candidates-ov vertico--count-ov))
+        (overlay-put overlay 'window 'candidate-window)
+        (overlay-put overlay 'before-string "stale")
+        (overlay-put overlay 'after-string "stale-after"))
+      (overlay-put unrelated 'window 'other-window)
+      (overlay-put unrelated 'before-string "keep")
+      (vertico-buffer-frame--clear-vertico-overlay-window
+       'candidate-window)
+      (dolist (overlay (list vertico--candidates-ov vertico--count-ov))
+        (should-not (overlay-get overlay 'window))
+        (should-not (overlay-get overlay 'before-string))
+        (should-not (overlay-get overlay 'after-string)))
+      (should (eq (overlay-get unrelated 'window) 'other-window))
+      (should (equal (overlay-get unrelated 'before-string) "keep")))))
+
+(ert-deftest vertico-buffer-frame-clear-vertico-overlays-force-removes-stale-display ()
+  (with-temp-buffer
+    (let ((vertico--candidates-ov (make-overlay (point-min) (point-min)))
+          (vertico--count-ov (make-overlay (point-min) (point-min))))
+      (dolist (overlay (list vertico--candidates-ov vertico--count-ov))
+        (overlay-put overlay 'window nil)
+        (overlay-put overlay 'before-string "stale")
+        (overlay-put overlay 'after-string "stale-after"))
+      (vertico-buffer-frame--clear-vertico-overlay-window
+       'candidate-window t)
+      (dolist (overlay (list vertico--candidates-ov vertico--count-ov))
+        (should-not (overlay-get overlay 'window))
+        (should-not (overlay-get overlay 'before-string))
+        (should-not (overlay-get overlay 'after-string))))))
+
+(ert-deftest vertico-buffer-frame-reuse-frame-reattaches-window ()
+  (with-temp-buffer
+    (let (renamed prepared owner-set window-buffer-set)
+      (cl-letf (((symbol-function #'frame-root-window)
+                 (lambda (_frame) 'win))
+                ((symbol-function #'window-live-p)
+                 (lambda (window) (eq window 'win)))
+                ((symbol-function #'frame-visible-p) (lambda (_frame) nil))
+                ((symbol-function #'modify-frame-parameters)
+                 (lambda (_frame parameters)
+                   (setq renamed (alist-get 'name parameters))))
+                ((symbol-function #'vertico-buffer-frame--apply-border)
+                 #'ignore)
+                ((symbol-function #'vertico-buffer-frame--prepare-window)
+                 (lambda (window fringes margins)
+                   (setq prepared (list window fringes margins))))
+                ((symbol-function #'vertico-buffer-frame--candidate-fringes)
+                 (lambda (_parent) '(8 . 8)))
+                ((symbol-function #'vertico-buffer-frame--candidate-margins)
+                 (lambda (_parent) '(0 . 0)))
+                ((symbol-function #'set-window-dedicated-p) #'ignore)
+                ((symbol-function #'set-window-buffer)
+                 (lambda (window buffer)
+                   (setq window-buffer-set (list window buffer))))
+                ((symbol-function
+                  #'vertico-buffer-frame--set-frame-owner-buffer)
+                 (lambda (frame owner)
+                   (setq owner-set (list frame owner)))))
+        (should (eq (vertico-buffer-frame--reuse-frame 'pooled 'buffer 'parent)
+                    'win))
+        (should (stringp renamed))
+        (should (equal prepared '(win (8 . 8) (0 . 0))))
+        (should (equal window-buffer-set '(win buffer)))
+        (should (equal owner-set (list 'pooled (current-buffer))))
+        (should vertico-buffer-frame--session)))))
+
+(ert-deftest vertico-buffer-frame-reuse-frame-resets-stale-visibility ()
+  ;; On w32, deleting the sibling preview frame right after parking can flip
+  ;; the hidden pooled frame's visibility flag back to t without mapping it.
+  ;; Reuse must reset the stale flag so the later `make-frame-visible' from
+  ;; `vertico-buffer-frame--sync-frame' actually maps the frame.
+  (with-temp-buffer
+    (let (hidden)
+      (cl-letf (((symbol-function #'frame-root-window)
+                 (lambda (_frame) 'win))
+                ((symbol-function #'window-live-p)
+                 (lambda (window) (eq window 'win)))
+                ((symbol-function #'frame-visible-p) (lambda (_frame) t))
+                ((symbol-function #'make-frame-invisible)
+                 (lambda (frame &optional _force) (setq hidden frame)))
+                ((symbol-function #'modify-frame-parameters) #'ignore)
+                ((symbol-function #'vertico-buffer-frame--apply-border)
+                 #'ignore)
+                ((symbol-function #'vertico-buffer-frame--prepare-window)
+                 #'ignore)
+                ((symbol-function #'vertico-buffer-frame--candidate-fringes)
+                 (lambda (_parent) '(8 . 8)))
+                ((symbol-function #'vertico-buffer-frame--candidate-margins)
+                 (lambda (_parent) '(0 . 0)))
+                ((symbol-function #'set-window-dedicated-p) #'ignore)
+                ((symbol-function #'set-window-buffer) #'ignore)
+                ((symbol-function
+                  #'vertico-buffer-frame--set-frame-owner-buffer)
+                 #'ignore))
+        (should (eq (vertico-buffer-frame--reuse-frame 'pooled 'buffer 'parent)
+                    'win))
+        (should (eq hidden 'pooled))))))
+
+(ert-deftest vertico-buffer-frame-ensure-window-reuses-pooled-frame ()
+  (with-temp-buffer
+    (cl-letf (((symbol-function #'vertico-buffer-frame--claim-frame)
+               (lambda (_parent) 'pooled))
+              ((symbol-function #'vertico-buffer-frame--reuse-frame)
+               (lambda (frame _buffer _parent)
+                 (and (eq frame 'pooled) 'win)))
+              ((symbol-function #'window-frame)
+               (lambda (window) (and (eq window 'win) 'pooled)))
+              ((symbol-function #'window-live-p)
+               (lambda (window) (eq window 'win)))
+              ((symbol-function
+                #'vertico-buffer-frame--display-buffer-in-child-frame)
+               (lambda (&rest _args)
+                 (error "Pooled frame should have been reused"))))
+      (should (eq (vertico-buffer-frame--ensure-window 'buffer 'parent nil)
+                  'win))
+      (should (eq vertico-buffer-frame--frame 'pooled))
+      (should (eq vertico-buffer-frame--parent 'parent)))))
+
+(ert-deftest vertico-buffer-frame-ensure-window-deletes-unusable-claim ()
+  (with-temp-buffer
+    (let (deleted created)
+      (cl-letf (((symbol-function #'vertico-buffer-frame--claim-frame)
+                 (lambda (_parent) 'pooled))
+                ((symbol-function #'vertico-buffer-frame--reuse-frame)
+                 (lambda (_frame _buffer _parent) nil))
+                ((symbol-function #'vertico-buffer-frame--delete-frame)
+                 (lambda (frame) (setq deleted frame)))
+                ((symbol-function #'window-frame)
+                 (lambda (window) (and (eq window 'new-win) 'new-frame)))
+                ((symbol-function #'window-live-p)
+                 (lambda (window) (eq window 'new-win)))
+                ((symbol-function
+                  #'vertico-buffer-frame--display-buffer-in-child-frame)
+                 (lambda (&rest _args)
+                   (setq created t)
+                   'new-win)))
+        (should (eq (vertico-buffer-frame--ensure-window 'buffer 'parent nil)
+                    'new-win))
+        (should (eq deleted 'pooled))
+        (should created)
+        (should (eq vertico-buffer-frame--frame 'new-frame))))))
+
+(ert-deftest vertico-buffer-frame-base-parameters-skip-desktop-save ()
+  (should (eq (alist-get 'desktop-dont-save
+                         (vertico-buffer-frame--base-parameters
+                          (selected-frame) "Vertico test" '(20 . 10)))
+              t)))
 
 (ert-deftest vertico-buffer-frame-cleanup-dead-minibuffer-deletes-owned-frames ()
   (let ((buffer (generate-new-buffer " *vbf-dead-cleanup*"))
@@ -1144,23 +1642,27 @@
           (let ((vertico-buffer-frame-mode t)
                 (vertico-buffer-frame-consult-preview t))
             (setq-local vertico-buffer-frame--frame 'candidate
+                        vertico-buffer-frame--window 'candidate-window
                         vertico-buffer-frame--parent 'parent)
             (cl-letf (((symbol-function #'active-minibuffer-window)
                        (lambda () 'minibuffer-window))
                       ((symbol-function #'window-live-p)
                        (lambda (window)
                          (memq window
-                               '(minibuffer-window source-window
+                               '(minibuffer-window candidate-window source-window
                                                    preview-window))))
                       ((symbol-function #'window-buffer)
                        (lambda (window)
                          (pcase window
                            ('minibuffer-window owner)
+                           ('candidate-window owner)
                            ('source-window source-buffer)
                            ('preview-window source-buffer))))
                       ((symbol-function #'frame-live-p)
                        (lambda (frame)
                          (memq frame '(candidate parent))))
+                      ((symbol-function #'frame-visible-p)
+                       (lambda (_frame) t))
                       ((symbol-function #'display-graphic-p)
                        (lambda (&optional _frame) t))
                       ((symbol-function
@@ -1212,22 +1714,26 @@
                 (vertico-buffer-frame-consult-preview t))
             (setq-local vertico-buffer-frame-local-mode t
                         vertico-buffer-frame--frame 'candidate
+                        vertico-buffer-frame--window 'candidate-window
                         vertico-buffer-frame--parent 'parent)
             (cl-letf (((symbol-function #'active-minibuffer-window)
                        (lambda () 'minibuffer-window))
                       ((symbol-function #'window-live-p)
                        (lambda (window)
                          (memq window
-                               '(minibuffer-window source-window
+                               '(minibuffer-window candidate-window source-window
                                                    preview-window))))
                       ((symbol-function #'window-buffer)
                        (lambda (window)
                          (pcase window
                            ('minibuffer-window owner)
+                           ('candidate-window owner)
                            (_ source-buffer))))
                       ((symbol-function #'frame-live-p)
                        (lambda (frame)
                          (memq frame '(candidate parent))))
+                      ((symbol-function #'frame-visible-p)
+                       (lambda (_frame) t))
                       ((symbol-function #'display-graphic-p)
                        (lambda (&optional _frame) t))
                       ((symbol-function
@@ -1254,6 +1760,118 @@
                            'source-window)
                           'preview-window))
               (should (equal mirrored '(source-window preview-window))))))
+      (dolist (buffer (list owner source-buffer))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest vertico-buffer-frame-consult-preview-does-not-show-candidate ()
+  (let ((owner (generate-new-buffer " *vbf-consult-owner*"))
+        (source-buffer (generate-new-buffer " *vbf-consult-source*"))
+        candidate-shown)
+    (unwind-protect
+        (with-current-buffer owner
+          (let ((vertico-buffer-frame-mode t)
+                (vertico-buffer-frame-consult-preview t))
+            (setq-local vertico-buffer-frame--frame 'candidate
+                        vertico-buffer-frame--window 'candidate-window
+                        vertico-buffer-frame--parent 'parent)
+            (cl-letf (((symbol-function #'active-minibuffer-window)
+                       (lambda () 'minibuffer-window))
+                      ((symbol-function #'window-live-p)
+                       (lambda (window)
+                         (memq window
+                               '(minibuffer-window candidate-window
+                                                   source-window
+                                                   preview-window))))
+                      ((symbol-function #'window-buffer)
+                       (lambda (window)
+                         (pcase window
+                           ('minibuffer-window owner)
+                           ('candidate-window owner)
+                           ('source-window source-buffer)
+                           (_ source-buffer))))
+                      ((symbol-function #'frame-live-p)
+                       (lambda (frame)
+                         (memq frame '(candidate parent preview))))
+                      ((symbol-function #'frame-visible-p)
+                       (lambda (_frame) nil))
+                      ((symbol-function #'make-frame-visible)
+                       (lambda (frame)
+                         (when (eq frame 'candidate)
+                           (setq candidate-shown t))))
+                      ((symbol-function #'display-graphic-p)
+                       (lambda (&optional _frame) t))
+                      ((symbol-function
+                        #'vertico-buffer-frame--ensure-preview-window)
+                       (lambda (_buffer _parent)
+                         'preview-window))
+                      ((symbol-function
+                        #'vertico-buffer-frame--set-preview-window-buffer)
+                       #'ignore)
+                      ((symbol-function
+                        #'vertico-buffer-frame--copy-window-view)
+                       #'ignore)
+                      ((symbol-function
+                        #'vertico-buffer-frame--mirror-preview-overlays)
+                       #'ignore)
+                      ((symbol-function
+                        #'vertico-buffer-frame--highlight-preview-line)
+                       #'ignore)
+                      ((symbol-function
+                        #'vertico-buffer-frame--sync-preview-frame)
+                       #'ignore))
+              (should (eq (vertico-buffer-frame-consult-preview-mirror-window
+                           'source-window)
+                          'preview-window))
+              (should-not candidate-shown))))
+      (dolist (buffer (list owner source-buffer))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest vertico-buffer-frame-consult-preview-waits-for-candidate ()
+  (let ((owner (generate-new-buffer " *vbf-consult-wait-owner*"))
+        (source-buffer (generate-new-buffer " *vbf-consult-wait-source*"))
+        ensured
+        hidden)
+    (unwind-protect
+        (with-current-buffer owner
+          (let ((vertico-buffer-frame-mode t)
+                (vertico-buffer-frame-consult-preview t))
+            (setq-local vertico-buffer-frame--frame 'candidate
+                        vertico-buffer-frame--window 'candidate-window
+                        vertico-buffer-frame--parent 'parent)
+            (cl-letf (((symbol-function #'active-minibuffer-window)
+                       (lambda () 'minibuffer-window))
+                      ((symbol-function #'window-live-p)
+                       (lambda (window)
+                         (memq window
+                               '(minibuffer-window candidate-window
+                                                   source-window))))
+                      ((symbol-function #'window-buffer)
+                       (lambda (window)
+                         (pcase window
+                           ('minibuffer-window owner)
+                           ('candidate-window source-buffer)
+                           ('source-window source-buffer))))
+                      ((symbol-function #'frame-live-p)
+                       (lambda (frame)
+                         (memq frame '(candidate parent preview))))
+                      ((symbol-function #'display-graphic-p)
+                       (lambda (&optional _frame) t))
+                      ((symbol-function
+                        #'vertico-buffer-frame--ensure-preview-window)
+                       (lambda (&rest _args)
+                         (setq ensured t)
+                         'preview-window))
+                      ((symbol-function
+                        #'vertico-buffer-frame-consult-preview-hide)
+                       (lambda ()
+                         (setq hidden t))))
+              (should-not
+               (vertico-buffer-frame-consult-preview-mirror-window
+                'source-window))
+              (should hidden)
+              (should-not ensured))))
       (dolist (buffer (list owner source-buffer))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))

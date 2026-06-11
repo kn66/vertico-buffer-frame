@@ -4,7 +4,7 @@
 
 ;; Author: Nobuyuki Kamimoto
 ;; Assisted-by: OpenAI Codex:GPT-5
-;; Version: 0.3.0
+;; Version: 0.4.0
 ;; Package-Requires: ((emacs "29.1") (vertico "2.8"))
 ;; Keywords: convenience, frames, minibuffer
 ;; URL: https://github.com/kn66/vertico-buffer-frame
@@ -33,9 +33,12 @@
 ;; Vertico renders the candidates.  This package only installs a
 ;; `vertico-buffer-display-action', creates one golden-ratio-sized child frame
 ;; per minibuffer session, falls back to the previous display action when child
-;; frames are unavailable, and deletes owned child frames when the minibuffer
-;; exits.  When Consult is loaded, Consult's ordinary window preview can be
-;; mirrored in a second child frame overlaid on the candidate frame.
+;; frames are unavailable, and releases owned child frames when the minibuffer
+;; exits.  Released candidate frames are hidden and pooled for reuse by later
+;; minibuffer sessions, because creating a child frame realizes every face for
+;; the new frame and can take hundreds of milliseconds under a loaded theme.
+;; When Consult is loaded, Consult's ordinary window preview can be mirrored in
+;; a second child frame overlaid on the candidate frame.
 
 ;;; Code:
 
@@ -117,6 +120,17 @@ golden-ratio width.  Prompt and input wrapping is left to `vertico-buffer-mode',
 which wraps that line while the cursor is past the frame width."
   :type 'boolean)
 
+(defcustom vertico-buffer-frame-reuse-frames t
+  "Non-nil means pool candidate child frames for reuse across sessions.
+Creating a child frame realizes every face for the new frame, which can take
+hundreds of milliseconds under a loaded theme, while showing an existing
+hidden frame takes a few milliseconds.  When this option is non-nil, candidate
+child frames are hidden instead of deleted when the minibuffer exits and are
+reused by later minibuffer sessions on the same parent frame.  Set this to nil
+to restore the previous create-and-delete behavior, for example when a
+window-system backend misbehaves with hidden child frames."
+  :type 'boolean)
+
 (defcustom vertico-buffer-frame-parameters nil
   "Additional child frame parameters.
 These parameters are appended to the package defaults before calling
@@ -139,6 +153,8 @@ the defaults, the value in this option replaces the default value."
 (defvar-local vertico-buffer-frame--preview-overlays nil)
 (defvar-local vertico-buffer-frame--local-saved-state nil)
 (defvar-local vertico-buffer-frame--session nil)
+(defvar-local vertico-buffer-frame--pending-show nil
+  "Non-nil means the candidate frame should be shown after Vertico setup.")
 (defvar-local vertico-buffer-frame--auto-width-floor nil
   "Widest auto-width applied to the candidate frame this session.
 With `vertico-buffer-frame-auto-width', the frame grows to fit candidates but
@@ -151,6 +167,19 @@ never shrinks below this floor until the frame is recreated.")
 (defconst vertico-buffer-frame--owner-session-parameter
   'vertico-buffer-frame-owner-session
   "Frame parameter storing the minibuffer session that owns a child frame.")
+
+(defconst vertico-buffer-frame--pool-key-parameter
+  'vertico-buffer-frame-pool-key
+  "Frame parameter storing the reuse fingerprint of a candidate frame.")
+
+(defconst vertico-buffer-frame--pool-max-per-parent 4
+  "Maximum number of pooled candidate frames kept per parent frame.
+Recursive minibuffer sessions park one frame per depth, so the pool grows to
+the deepest recursion used; depths beyond this cap are rare enough that their
+frames are deleted instead of parked.")
+
+(defvar vertico-buffer-frame--pool nil
+  "Hidden candidate child frames parked for reuse by later sessions.")
 
 (defconst vertico-buffer-frame--golden-ratio (/ (+ 1.0 (sqrt 5.0)) 2.0)
   "Golden ratio used for automatic child-frame layout.")
@@ -409,6 +438,9 @@ SIZE is a cons of width and height in characters.  ROLE is `candidate' or
                     (not vertico-buffer-frame-candidate-accept-focus)))
             (no-focus-on-map . t)
             (skip-taskbar . t)
+            ;; Pooled frames outlive their minibuffer session, so keep them out
+            ;; of desktop.el's frameset save.
+            (desktop-dont-save . t)
             (unsplittable . t)
             (border-width . 0)
             (child-frame-border-width . ,vertico-buffer-frame-border-width)
@@ -444,12 +476,61 @@ are set explicitly so a reused window does not keep stale values."
   (set-window-fringes window (car fringes) (cdr fringes) nil)
   (set-window-scroll-bars window nil nil nil nil))
 
+(defun vertico-buffer-frame--candidate-frame-ready-p ()
+  "Return non-nil when the candidate frame displays this minibuffer buffer."
+  (and (frame-live-p vertico-buffer-frame--frame)
+       (window-live-p vertico-buffer-frame--window)
+       (eq (window-buffer vertico-buffer-frame--window)
+           (current-buffer))))
+
+(defun vertico-buffer-frame--candidate-frame-has-vertico-overlays-p ()
+  "Return non-nil when Vertico overlays target the candidate frame window."
+  (and (vertico-buffer-frame--candidate-frame-ready-p)
+       (boundp 'vertico--candidates-ov)
+       (overlayp vertico--candidates-ov)
+       (eq (overlay-get vertico--candidates-ov 'window)
+           vertico-buffer-frame--window)
+       (or (not (boundp 'vertico--count-ov))
+           (not (overlayp vertico--count-ov))
+           (null (overlay-get vertico--count-ov 'window))
+           (eq (overlay-get vertico--count-ov 'window)
+               vertico-buffer-frame--window))))
+
+(defun vertico-buffer-frame--show-candidate-frame ()
+  "Show the candidate child frame when Vertico is displaying in it."
+  (when (and (vertico-buffer-frame--candidate-frame-has-vertico-overlays-p)
+             (not (eq (frame-visible-p vertico-buffer-frame--frame) t)))
+    (setq-local vertico-buffer-frame--pending-show nil)
+    (make-frame-visible vertico-buffer-frame--frame)
+    ;; Recursive minibuffers create another candidate frame at the same
+    ;; position as the outer minibuffer's still-visible frame.  Some backends
+    ;; map the later frame below the existing sibling unless it is raised.
+    (ignore-errors
+      (raise-frame vertico-buffer-frame--frame))))
+
+(defun vertico-buffer-frame--redisplay (window)
+  "Keep the candidate child frame sized and visible across redisplays.
+This runs from `pre-redisplay-functions' in the minibuffer.  WINDOW is the
+window being redisplayed."
+  (when (and (vertico-buffer-frame--enabled-p)
+             (frame-live-p vertico-buffer-frame--frame)
+             (frame-live-p vertico-buffer-frame--parent))
+    (vertico-buffer-frame--auto-width-redisplay window)
+    ;; `vertico-buffer-frame--sync-frame' requests the map only once per
+    ;; session, but some window-system backends (notably w32) can drop the
+    ;; request for a child frame previously hidden by the frame pool, leaving
+    ;; the candidate frame invisible with no retry.  Re-asserting visibility
+    ;; here recovers from a lost request.  The Consult preview frame is left
+    ;; alone because it is hidden intentionally while no preview is shown.
+    (vertico-buffer-frame--show-candidate-frame)))
+
 (defun vertico-buffer-frame--auto-width-redisplay (_window)
   "Resize the candidate child frame to fit the visible candidates.
 `vertico-buffer-mode' updates candidates through overlays without re-running
-the display action, so this runs from `pre-redisplay-functions' to keep the
-auto-width frame sized to its content.  The frame is only synced when the
-target width changes, so a settled frame triggers no further resizing."
+the display action, so this runs from `vertico-buffer-frame--redisplay' to
+keep the auto-width frame sized to its content.  The frame is only synced
+when the target width changes, so a settled frame triggers no further
+resizing."
   (when (and vertico-buffer-frame-auto-width
              (vertico-buffer-frame--enabled-p)
              (frame-live-p vertico-buffer-frame--frame)
@@ -491,17 +572,26 @@ SHARE is the `share-child-frame' value used for child-frame reuse."
          (minibuffer-exit . nil)
          (share-child-frame . ,(or share buffer)))))))
 
-(defun vertico-buffer-frame--clear-vertico-overlay-window (window)
-  "Clear Vertico overlay window state when it points at WINDOW."
+(defun vertico-buffer-frame--clear-vertico-overlay-window (window &optional force)
+  "Clear Vertico overlay display state when it points at WINDOW.
+When FORCE is non-nil, clear the display state regardless of the overlay
+window."
   (dolist (symbol '(vertico--candidates-ov vertico--count-ov))
     (when (and (boundp symbol)
                (overlayp (symbol-value symbol))
-               (eq (overlay-get (symbol-value symbol) 'window)
-                   window))
-      (overlay-put (symbol-value symbol) 'window nil))))
+               (or force
+                   (eq (overlay-get (symbol-value symbol) 'window)
+                       window)))
+      (overlay-put (symbol-value symbol) 'window nil)
+      ;; `vertico-buffer-mode' leaves the candidate strings in overlay
+      ;; properties after restore.  Minibuffer buffers are reused, so a pooled
+      ;; child frame can otherwise paint the previous session's candidates
+      ;; before Vertico writes the first candidate list for the new session.
+      (overlay-put (symbol-value symbol) 'before-string nil)
+      (overlay-put (symbol-value symbol) 'after-string nil))))
 
 (defun vertico-buffer-frame--clear-vertico-overlays-for-frame (frame)
-  "Clear Vertico overlay window state before deleting FRAME."
+  "Clear Vertico overlay display state before hiding or deleting FRAME."
   (let ((owner (ignore-errors
                  (and (frame-live-p frame)
                       (frame-parameter
@@ -538,10 +628,128 @@ SHARE is the `share-child-frame' value used for child-frame reuse."
   (vertico-buffer-frame--hide-frame vertico-buffer-frame--preview-frame)
   (vertico-buffer-frame--hide-frame vertico-buffer-frame--frame))
 
+(defun vertico-buffer-frame--pool-key (parent)
+  "Return the reuse fingerprint of a candidate frame created under PARENT.
+A pooled frame is only reused while this fingerprint still matches, so any
+configuration change falls back to creating a fresh frame instead of showing
+a frame built from stale parameters."
+  (list parent
+        vertico-buffer-frame-border-width
+        (vertico-buffer-frame--candidate-fringes parent)
+        vertico-buffer-frame-candidate-accept-focus
+        vertico-buffer-frame-parameters))
+
+(defun vertico-buffer-frame--prune-pool ()
+  "Drop dead frames from `vertico-buffer-frame--pool'."
+  (setq vertico-buffer-frame--pool
+        (cl-delete-if-not #'frame-live-p vertico-buffer-frame--pool)))
+
+(defun vertico-buffer-frame--flush-pool ()
+  "Delete all pooled candidate child frames."
+  (let ((pool vertico-buffer-frame--pool))
+    (setq vertico-buffer-frame--pool nil)
+    (mapc #'vertico-buffer-frame--delete-frame pool)))
+
+(defun vertico-buffer-frame--trim-pool (parent)
+  "Delete pooled frames for PARENT beyond the per-parent cap."
+  (let ((kept 0))
+    (dolist (frame (copy-sequence vertico-buffer-frame--pool))
+      (when (eq (frame-parameter frame 'parent-frame) parent)
+        (setq kept (1+ kept))
+        (when (> kept vertico-buffer-frame--pool-max-per-parent)
+          (setq vertico-buffer-frame--pool
+                (delq frame vertico-buffer-frame--pool))
+          (vertico-buffer-frame--delete-frame frame))))))
+
+(defun vertico-buffer-frame--park-window (frame)
+  "Detach FRAME's window from session buffers while FRAME is pooled.
+Showing a neutral hidden buffer keeps the parked window from holding the dead
+Vertico session buffer or accumulating user buffers in its history."
+  (let ((window (frame-root-window frame)))
+    (when (window-live-p window)
+      (set-window-dedicated-p window nil)
+      (set-window-buffer
+       window (get-buffer-create " *vertico-buffer-frame-pool*"))
+      (set-window-prev-buffers window nil))))
+
+(defun vertico-buffer-frame--scrub-frame (frame)
+  "Repaint hidden FRAME with its blank pool buffer so reuse shows no leftovers.
+Redisplay skips invisible frames, so a parked frame's back buffer keeps the
+previous session's candidate list, and mapping the frame for reuse exposes
+that stale image before the new candidates are painted.  Move FRAME to the
+parent frame's lower-right edge with only one pixel inside the clipped area,
+so the window-system backend still has a visible region to repaint while the
+user cannot meaningfully see it.  FRAME is hidden again before returning, and
+reuse then exposes at worst a blank frame."
+  (let ((parent (frame-parameter frame 'parent-frame)))
+    (when (frame-live-p parent)
+      (set-frame-position frame
+                          (max 0 (1- (frame-pixel-width parent)))
+                          (max 0 (1- (frame-pixel-height parent))))
+      (make-frame-visible frame)
+      (redisplay t)
+      (make-frame-invisible frame t))))
+
+(defun vertico-buffer-frame--release-frame (frame)
+  "Park FRAME for reuse by a later minibuffer session, or delete it.
+Only live candidate frames with a live parent are parked while
+`vertico-buffer-frame-reuse-frames' is non-nil; anything else, including any
+error while parking, deletes FRAME like the pre-pooling behavior."
+  (if (not (and vertico-buffer-frame-reuse-frames
+                (frame-live-p frame)
+                (eq (frame-parameter frame 'vertico-buffer-frame-role)
+                    'candidate)
+                (frame-parameter frame
+                                 vertico-buffer-frame--pool-key-parameter)
+                (frame-live-p (frame-parameter frame 'parent-frame))))
+      (vertico-buffer-frame--delete-frame frame)
+    (condition-case nil
+        (progn
+          (vertico-buffer-frame--clear-vertico-overlays-for-frame frame)
+          (make-frame-invisible frame t)
+          (modify-frame-parameters
+           frame
+           `((,vertico-buffer-frame--owner-buffer-parameter . nil)
+             (,vertico-buffer-frame--owner-session-parameter . nil)
+             (share-child-frame . nil)))
+          (vertico-buffer-frame--park-window frame)
+          (vertico-buffer-frame--scrub-frame frame)
+          (push frame vertico-buffer-frame--pool)
+          (vertico-buffer-frame--trim-pool
+           (frame-parameter frame 'parent-frame)))
+      (error
+       (setq vertico-buffer-frame--pool
+             (delq frame vertico-buffer-frame--pool))
+       (vertico-buffer-frame--delete-frame frame)))))
+
+(defun vertico-buffer-frame--claim-frame (parent)
+  "Return a pooled candidate frame for PARENT, or nil.
+The claimed frame is removed from the pool.  Pooled frames for PARENT whose
+fingerprint no longer matches the current configuration can never match again
+and are deleted so they do not linger invisibly."
+  (when vertico-buffer-frame-reuse-frames
+    (vertico-buffer-frame--prune-pool)
+    (let ((key (vertico-buffer-frame--pool-key parent))
+          claimed)
+      (dolist (frame (copy-sequence vertico-buffer-frame--pool))
+        (when (eq (frame-parameter frame 'parent-frame) parent)
+          (if (equal key (frame-parameter
+                          frame vertico-buffer-frame--pool-key-parameter))
+              (unless claimed
+                (setq claimed frame)
+                (setq vertico-buffer-frame--pool
+                      (delq frame vertico-buffer-frame--pool)))
+            (setq vertico-buffer-frame--pool
+                  (delq frame vertico-buffer-frame--pool))
+            (vertico-buffer-frame--delete-frame frame))))
+      claimed)))
+
 (defun vertico-buffer-frame--delete-frames-owned-by-buffer
-    (buffer &optional session)
+    (buffer &optional session release)
   "Delete child frames owned by minibuffer BUFFER.
-When SESSION is non-nil, only delete frames owned by that minibuffer session."
+When SESSION is non-nil, only delete frames owned by that minibuffer session.
+When RELEASE is non-nil, park reusable candidate frames in the pool instead of
+deleting them."
   (dolist (frame (frame-list))
     (when (and (eq (frame-parameter
                     frame vertico-buffer-frame--owner-buffer-parameter)
@@ -554,16 +762,23 @@ When SESSION is non-nil, only delete frames owned by that minibuffer session."
                      (eq owner-session session)
                      ;; Delete frames created before session ownership existed.
                      (null owner-session))))
-      (vertico-buffer-frame--delete-frame frame))))
+      (if release
+          (vertico-buffer-frame--release-frame frame)
+        (vertico-buffer-frame--delete-frame frame)))))
 
-(defun vertico-buffer-frame--delete-frames-owned-by-buffer-later
+(defun vertico-buffer-frame--release-frames-owned-by-buffer (buffer session)
+  "Release child frames owned by minibuffer BUFFER and SESSION.
+Candidate frames are parked for reuse; other frames are deleted."
+  (vertico-buffer-frame--delete-frames-owned-by-buffer buffer session t))
+
+(defun vertico-buffer-frame--release-frames-owned-by-buffer-later
     (buffer session)
-  "Delete child frames owned by minibuffer BUFFER and SESSION after teardown."
+  "Release child frames owned by minibuffer BUFFER and SESSION after teardown."
   ;; `minibuffer-exit-hook' can run before Emacs restores the pre-minibuffer
-  ;; window configuration.  Deleting child frames there may run zero-delay
+  ;; window configuration.  Releasing child frames there may run zero-delay
   ;; timers, including Embark's deferred collect/export display, too early.
   (run-at-time 0 nil
-               #'vertico-buffer-frame--delete-frames-owned-by-buffer
+               #'vertico-buffer-frame--release-frames-owned-by-buffer
                buffer session))
 
 (defun vertico-buffer-frame--delete-owned-frames ()
@@ -579,6 +794,7 @@ When SESSION is non-nil, only delete frames owned by that minibuffer session."
               vertico-buffer-frame--parent nil
               vertico-buffer-frame--preview-frame nil
               vertico-buffer-frame--preview-window nil
+              vertico-buffer-frame--pending-show nil
               vertico-buffer-frame--auto-width-floor nil))
 
 (defun vertico-buffer-frame--clear-preview-overlays ()
@@ -602,7 +818,7 @@ When DELAY-DELETE is non-nil, delete owned frames after minibuffer teardown."
         (vertico-buffer-frame--clear-frame-state)
         (setq-local vertico-buffer-frame--session nil)))
     (if delay-delete
-        (vertico-buffer-frame--delete-frames-owned-by-buffer-later
+        (vertico-buffer-frame--release-frames-owned-by-buffer-later
          buffer session)
       (vertico-buffer-frame--delete-frames-owned-by-buffer buffer session))
     (setq vertico-buffer-frame--minibuffers
@@ -610,10 +826,12 @@ When DELAY-DELETE is non-nil, delete owned frames after minibuffer teardown."
 
 ;;;###autoload
 (defun vertico-buffer-frame-cleanup ()
-  "Release all child frames currently owned by active minibuffers."
+  "Release all child frames currently owned by active minibuffers.
+Pooled candidate frames kept for reuse are deleted as well."
   (interactive)
   (mapc #'vertico-buffer-frame--cleanup-minibuffer
-        (copy-sequence vertico-buffer-frame--minibuffers)))
+        (copy-sequence vertico-buffer-frame--minibuffers))
+  (vertico-buffer-frame--flush-pool))
 
 (defun vertico-buffer-frame--install-cleanup ()
   "Install cleanup hooks for the current minibuffer buffer."
@@ -626,8 +844,10 @@ When DELAY-DELETE is non-nil, delete owned frames after minibuffer teardown."
   "Clean up the child frame owned by the current minibuffer."
   (vertico-buffer-frame--cleanup-minibuffer (current-buffer) t))
 
-(defun vertico-buffer-frame--sync-frame ()
-  "Resize, center, and show the current child frame."
+(defun vertico-buffer-frame--sync-frame (&optional defer-show)
+  "Resize, center, and show the current child frame.
+When DEFER-SHOW is non-nil, leave a hidden frame hidden until the next
+`vertico-buffer-frame--redisplay' call."
   (when (and (frame-live-p vertico-buffer-frame--frame)
              (frame-live-p vertico-buffer-frame--parent))
     (let* ((parent vertico-buffer-frame--parent)
@@ -639,18 +859,21 @@ When DELAY-DELETE is non-nil, delete owned frames after minibuffer teardown."
            ;; Derive the pixel size from the characters being set so centering
            ;; does not read a stale `frame-pixel-width' right after a resize.
            (target-pixel-width (* width (frame-char-width parent)))
-           (target-pixel-height (* height (frame-char-height parent)))
-           (window-min-height 1)
-           (window-min-width 1)
-           (inhibit-redisplay t))
-      (unless (and (= (frame-width frame) width)
-                   (= (frame-height frame) height))
-        (set-frame-size frame width height))
-      (set-frame-position
-       frame
-       (max 0 (/ (- (frame-pixel-width parent) target-pixel-width) 2))
-       (max 0 (/ (- (frame-pixel-height parent) target-pixel-height) 2)))
-      (unless (eq (frame-visible-p frame) t)
+           (target-pixel-height (* height (frame-char-height parent))))
+      (let ((window-min-height 1)
+            (window-min-width 1)
+            (inhibit-redisplay t))
+        (unless (and (= (frame-width frame) width)
+                     (= (frame-height frame) height))
+          (set-frame-size frame width height))
+        (set-frame-position
+         frame
+         (max 0 (/ (- (frame-pixel-width parent) target-pixel-width) 2))
+         (max 0 (/ (- (frame-pixel-height parent) target-pixel-height) 2))))
+      ;; Map the frame outside `inhibit-redisplay' so the request is not
+      ;; deferred into a redisplay that may drop it on some backends.
+      (unless (or defer-show
+                  (eq (frame-visible-p frame) t))
         (make-frame-visible frame)))))
 
 (defun vertico-buffer-frame--candidate-frame-current-p (parent)
@@ -686,7 +909,10 @@ ALIST is appended to the display action passed to
                 (append
                  `((share-child-frame . ,share))
                  (vertico-buffer-frame--base-parameters parent name size role)
-                 `((vertico-buffer-frame-role . ,role))))
+                 `((vertico-buffer-frame-role . ,role))
+                 (and (eq role 'candidate)
+                      `((,vertico-buffer-frame--pool-key-parameter
+                         . ,(vertico-buffer-frame--pool-key parent))))))
                (action
                 (append `((child-frame-parameters . ,parameters)
                           (inhibit-switch-frame . t))
@@ -713,18 +939,61 @@ ALIST is appended to the display action passed to
       (unless success
         (vertico-buffer-frame--delete-frame frame)))))
 
+(defun vertico-buffer-frame--reuse-frame (frame buffer parent)
+  "Reattach pooled FRAME to the current minibuffer and show BUFFER in it.
+PARENT is FRAME's parent frame.  Refresh everything a fingerprint match does
+not guarantee: the theme-derived border color and the inherited window fringes
+and margins.  Return FRAME's root window, or nil when FRAME cannot be reused,
+in which case the caller deletes FRAME and creates a fresh one."
+  (condition-case nil
+      (let ((window (frame-root-window frame)))
+        (when (window-live-p window)
+          (vertico-buffer-frame--ensure-session)
+          ;; A parked frame can report itself visible without being mapped:
+          ;; on w32, deleting the sibling Consult preview frame right after
+          ;; parking delivers a paint message that flips the hidden frame's
+          ;; visibility flag back to t.  `make-frame-visible' trusts that
+          ;; flag and becomes a no-op, leaving the candidate frame unmapped
+          ;; for the whole session, so reset the flag with an explicit hide
+          ;; before `vertico-buffer-frame--sync-frame' shows the frame.
+          (when (frame-visible-p frame)
+            (make-frame-invisible frame t))
+          (modify-frame-parameters
+           frame
+           `((name . ,(format "Vertico %s" (minibuffer-depth)))))
+          (vertico-buffer-frame--apply-border frame)
+          (vertico-buffer-frame--prepare-window
+           window
+           (vertico-buffer-frame--candidate-fringes parent)
+           (vertico-buffer-frame--candidate-margins parent))
+          (set-window-dedicated-p window nil)
+          (vertico-buffer-frame--clear-vertico-overlay-window window t)
+          (set-window-buffer window buffer)
+          (vertico-buffer-frame--set-frame-owner-buffer
+           frame (current-buffer))
+          window))
+    (error nil)))
+
 (defun vertico-buffer-frame--ensure-window (buffer parent alist)
   "Return a live child-frame window for BUFFER under PARENT."
   (unless (vertico-buffer-frame--candidate-frame-current-p parent)
     (vertico-buffer-frame--discard-frame))
   (unless (window-live-p vertico-buffer-frame--window)
-    (setq-local vertico-buffer-frame--window
-                (vertico-buffer-frame--display-buffer-in-child-frame
-                 buffer parent (format "Vertico %s" (minibuffer-depth)) alist)
-                vertico-buffer-frame--frame
-                (window-frame vertico-buffer-frame--window)
-                vertico-buffer-frame--parent
-                parent))
+    (let* ((claimed (vertico-buffer-frame--claim-frame parent))
+           (window (and claimed
+                        (vertico-buffer-frame--reuse-frame
+                         claimed buffer parent))))
+      (when (and claimed (not window))
+        (vertico-buffer-frame--delete-frame claimed))
+      (setq-local vertico-buffer-frame--window
+                  (or window
+                      (vertico-buffer-frame--display-buffer-in-child-frame
+                       buffer parent
+                       (format "Vertico %s" (minibuffer-depth)) alist))
+                  vertico-buffer-frame--frame
+                  (window-frame vertico-buffer-frame--window)
+                  vertico-buffer-frame--parent
+                  parent)))
   vertico-buffer-frame--window)
 
 (defun vertico-buffer-frame--display-buffer-in-candidate-frame
@@ -737,7 +1006,13 @@ frame that should own the candidate child frame."
     (unless (eq (window-buffer window) buffer)
       (set-window-dedicated-p window nil)
       (set-window-buffer window buffer))
-    (vertico-buffer-frame--sync-frame)
+    ;; `vertico-buffer--setup' displays a temporary buffer first and switches
+    ;; the returned window to the minibuffer buffer only after this display
+    ;; action returns.  Showing the child frame here can paint the old selected
+    ;; buffer on w32 and leave it there, so map it from the redisplay hook after
+    ;; Vertico has installed the candidate overlays.
+    (setq-local vertico-buffer-frame--pending-show t)
+    (vertico-buffer-frame--sync-frame t)
     window))
 
 (defun vertico-buffer-frame--saved-action-entry (state)
@@ -828,20 +1103,22 @@ fresh resize of either frame instead of a stale `frame-pixel-width'."
                   vertico-buffer-frame--parent
                   vertico-buffer-frame--frame))
            (width (car size))
-           (height (cdr size))
-           (window-min-height 1)
-           (window-min-width 1)
-           (inhibit-redisplay t))
-      (unless (and (= (frame-width vertico-buffer-frame--preview-frame)
-                      width)
-                   (= (frame-height vertico-buffer-frame--preview-frame)
-                      height))
-        (set-frame-size vertico-buffer-frame--preview-frame width height))
-      (let ((position (vertico-buffer-frame--preview-frame-position)))
-        (set-frame-position
-         vertico-buffer-frame--preview-frame
-         (max 0 (car position))
-         (max 0 (cdr position))))
+           (height (cdr size)))
+      (let ((window-min-height 1)
+            (window-min-width 1)
+            (inhibit-redisplay t))
+        (unless (and (= (frame-width vertico-buffer-frame--preview-frame)
+                        width)
+                     (= (frame-height vertico-buffer-frame--preview-frame)
+                        height))
+          (set-frame-size vertico-buffer-frame--preview-frame width height))
+        (let ((position (vertico-buffer-frame--preview-frame-position)))
+          (set-frame-position
+           vertico-buffer-frame--preview-frame
+           (max 0 (car position))
+           (max 0 (cdr position)))))
+      ;; Map the frame outside `inhibit-redisplay' so the request is not
+      ;; deferred into a redisplay that may drop it on some backends.
       (unless (eq (frame-visible-p vertico-buffer-frame--preview-frame) t)
         (make-frame-visible vertico-buffer-frame--preview-frame))
       ;; Keep the preview stacked above the candidate frame, which is restacked
@@ -973,7 +1250,7 @@ fresh resize of either frame instead of a stale `frame-pixel-width'."
               (buffer (window-buffer source-window))
               ((buffer-live-p buffer)))
     (with-current-buffer owner
-      (if (and (frame-live-p vertico-buffer-frame--frame)
+      (if (and (vertico-buffer-frame--candidate-frame-ready-p)
                (frame-live-p vertico-buffer-frame--parent)
                (or (display-graphic-p vertico-buffer-frame--parent)
                    (featurep 'tty-child-frames)))
@@ -1019,8 +1296,14 @@ ALIST is the display action alist passed by `display-buffer'."
   ;; Depth 90 runs after `vertico-buffer--redisplay' (added at the default
   ;; depth), so it resizes the frame once the candidate overlay is up to date.
   (add-hook 'pre-redisplay-functions
-            #'vertico-buffer-frame--auto-width-redisplay 90 t)
-  (vertico-buffer-frame--start-session)
+            #'vertico-buffer-frame--redisplay 90 t)
+  ;; `vertico--setup' runs before this hook (`minibuffer-with-setup-hook'
+  ;; prepends it), so the display action may already have created this
+  ;; session and stamped it on the candidate frame.  Starting a fresh
+  ;; session here would orphan that frame at exit, where ownership is
+  ;; matched by session.  Cleanup clears the session, so a leftover value
+  ;; always belongs to the current minibuffer session.
+  (vertico-buffer-frame--ensure-session)
   (vertico-buffer-frame--install-cleanup))
 
 (defun vertico-buffer-frame--setup-minibuffer ()

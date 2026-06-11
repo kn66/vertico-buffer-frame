@@ -23,6 +23,8 @@ code, or `README.org`.
   ordinary frames are configured as transparent.
 - When Consult is loaded, mirror Consult's active window preview in a preview
   child frame overlaid on the lower-right of the candidate frame.
+- Keep candidate-frame painting owned by Vertico's redisplay path; Consult
+  preview mirroring must not directly show an unpainted candidate frame.
 - Mirror Consult's window-local insertion preview overlays, such as
   `consult-yank-from-kill-ring` previews, in the preview child frame.
 - Keep Embark collect/export buffers visible after the minibuffer exits, like
@@ -32,8 +34,16 @@ code, or `README.org`.
 - Allow Consult preview mirroring to be toggled globally or for the current
   minibuffer session.
 - Provide customization only for golden-ratio scale, border width, focus
-  acceptance, Consult preview enablement, candidate-width auto-resizing, and
-  extra frame parameters.
+  acceptance, Consult preview enablement, candidate-width auto-resizing,
+  candidate-frame reuse, and extra frame parameters.
+- Pool candidate child frames across minibuffer sessions instead of deleting
+  them on exit: creating a child frame realizes every face for the new frame
+  (measured ~260 ms per session under a loaded theme on w32, versus ~4 ms to
+  reshow a hidden frame). Reuse a pooled frame only when its creation-time
+  configuration fingerprint still matches; otherwise, or on any error, fall
+  back to the create-and-delete behavior. Do not show stale candidates from
+  the previous minibuffer session while a pooled frame is being reused.
+  Disabling the mode or running the cleanup command deletes pooled frames.
 - Optionally grow the candidate frame width to fit the widest visible
   candidate, keeping the frame centered, capped below the parent frame width so
   a margin remains, and never below the golden-ratio width.
