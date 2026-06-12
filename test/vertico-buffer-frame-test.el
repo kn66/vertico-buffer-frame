@@ -1764,6 +1764,45 @@
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
+(ert-deftest vertico-buffer-frame-consult-mirror-window-respects-local-preview ()
+  (let ((owner (generate-new-buffer " *vbf-consult-local-preview-owner*"))
+        (source-buffer (generate-new-buffer " *vbf-consult-local-preview-source*"))
+        ensured)
+    (unwind-protect
+        (let ((vertico-buffer-frame-mode t))
+          (setq-default vertico-buffer-frame-consult-preview t)
+          (with-current-buffer owner
+            (setq-local vertico-buffer-frame-consult-preview nil
+                        vertico-buffer-frame--frame 'candidate
+                        vertico-buffer-frame--window 'candidate-window
+                        vertico-buffer-frame--parent 'parent))
+          (with-current-buffer source-buffer
+            (cl-letf (((symbol-function #'active-minibuffer-window)
+                       (lambda () 'minibuffer-window))
+                      ((symbol-function #'window-live-p)
+                       (lambda (window)
+                         (memq window
+                               '(minibuffer-window candidate-window
+                                                   source-window))))
+                      ((symbol-function #'window-buffer)
+                       (lambda (window)
+                         (pcase window
+                           ('minibuffer-window owner)
+                           ('candidate-window owner)
+                           ('source-window source-buffer))))
+                      ((symbol-function
+                        #'vertico-buffer-frame--ensure-preview-window)
+                       (lambda (&rest _args)
+                         (setq ensured t)
+                         'preview-window)))
+              (should-not
+               (vertico-buffer-frame-consult-preview-mirror-window
+                'source-window))
+              (should-not ensured))))
+      (dolist (buffer (list owner source-buffer))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (ert-deftest vertico-buffer-frame-consult-preview-does-not-show-candidate ()
   (let ((owner (generate-new-buffer " *vbf-consult-owner*"))
         (source-buffer (generate-new-buffer " *vbf-consult-source*"))

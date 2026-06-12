@@ -1240,9 +1240,7 @@ fresh resize of either frame instead of a stale `frame-pixel-width'."
 
 (defun vertico-buffer-frame-consult-preview-mirror-window (source-window)
   "Mirror Consult preview SOURCE-WINDOW in a lower-right child frame."
-  (when-let* (((and (vertico-buffer-frame--enabled-p)
-                    vertico-buffer-frame-consult-preview))
-              ((window-live-p source-window))
+  (when-let* (((window-live-p source-window))
               (minibuffer-window (active-minibuffer-window))
               ((window-live-p minibuffer-window))
               (owner (window-buffer minibuffer-window))
@@ -1250,7 +1248,9 @@ fresh resize of either frame instead of a stale `frame-pixel-width'."
               (buffer (window-buffer source-window))
               ((buffer-live-p buffer)))
     (with-current-buffer owner
-      (if (and (vertico-buffer-frame--candidate-frame-ready-p)
+      (if (and (vertico-buffer-frame--enabled-p)
+               vertico-buffer-frame-consult-preview
+               (vertico-buffer-frame--candidate-frame-ready-p)
                (frame-live-p vertico-buffer-frame--parent)
                (or (display-graphic-p vertico-buffer-frame--parent)
                    (featurep 'tty-child-frames)))
