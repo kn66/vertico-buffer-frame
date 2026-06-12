@@ -25,6 +25,14 @@ from Consult's window-local preview overlay.
 
 [[file:gif/vertico-buffer-frame2.gif]]
 
+** with [[https://github.com/rougier/nano-vertico][nano-vertico]]
+:PROPERTIES:
+:ID:       d62fe18c-aa71-4db5-8ab9-e9011fbf74ad
+:END:
+
+#+DOWNLOADED: screenshot @ 2026-06-12 09:09:34
+[[file:GIF/2026-06-12_09-09-34_screenshot.png]]
+
 * Usage
 
 Add this directory to ~load-path~, then:
